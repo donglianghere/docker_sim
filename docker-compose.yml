@@ -69,6 +69,10 @@ services:
       - __GLX_VENDOR_LIBRARY_NAME=nvidia
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ./runtime_logs:/logs   # 运行时数据记录用，见README"运行时数据记录"一节;
+                                # 三个服务都挂同一个宿主机目录到容器内同一个/logs，
+                                # 不分服务开子挂载点，各脚本自己按/logs/nx01、
+                                # /logs/rosbag这些约定的子路径分开写，互不冲突。
     devices:
       - /dev/dri:/dev/dri
     deploy:
@@ -78,6 +82,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"   # docker自己的stdout日志滚动，是运行时数据记录的第一层、
+        max-file: "5"     # 免维护兜底（但容器一`down`就没了，长期持久化靠
+                           # scripts/tail_persist_logs.sh额外tee一份到宿主机）
     restart: "no"
 
   flight-stack-nx01:
@@ -111,6 +121,13 @@ services:
                                   # 才生效；想不改文件临时切，用
                                   # `CONTROL_LAW=attitude docker compose up`，
                                   # ${CONTROL_LAW:-trajectory}这个写法两种都支持。
+    volumes:
+      - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     restart: "no"
 
   flight-stack-nx02:
@@ -128,4 +145,11 @@ services:
       - LOCALIZATION_SOURCE=dlio  # 两架飞机要保持一致，别一个dlio一个gt
       - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # 同上，两架飞机也要保持一致，
                                   # 见flight-stack-nx01那边的完整注释
+    volumes:
+      - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     restart: "no"

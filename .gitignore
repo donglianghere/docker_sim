@@ -4,3 +4,8 @@ staging/
 build/
 install/
 log/
+
+# 运行时数据记录（rosbag/持久化stdout/姿态日志）——量大、纯运行时产物，
+# 不进版本控制，只保留目录结构（.gitkeep）
+runtime_logs/*
+!runtime_logs/.gitkeep

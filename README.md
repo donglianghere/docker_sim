@@ -4091,3 +4091,93 @@ obs->is_agent) continue;`这行会让邻机整个从`J_dyn`里被跳过，等于
 这次改的是`lbfgs_solver.cpp`，是flight-stack里跟真机共用的规划核心
 代码，不是仿真专属，涉及双机避障的实际安全边界，值得按"安全相关代码
 变更"的标准过一遍，不要因为"仿真里跑通了"就直接定稿。
+
+## 用户要求：实现运行时数据记录方案（rosbag黑匣子滚动录制 + 容器stdout持久化 + 姿态日志落盘），顺带把项目补成git仓库
+
+先补了一个基础动作：`docker_sim/`之前完全没有版本控制（`.gitignore`
+早就有了、但没人跑过`git init`）。给顶层做了一次`git init`+首次提交
+（`patches/`/两个`Dockerfile`/`scripts/`/`src/`/`README.md`等手写内容
+共96个文件、1.2MB，`staging/`按`.gitignore`排除——那是`fetch_sources.sh`
+拉的公开源码，7.9GB，丢了能重新拉，不需要版本控制）。git identity只设了
+这个仓库本地的（`git config`不带`--global`），没碰全局配置。之后每次
+改代码都能`git diff`/`git log`/出问题能`git revert`，是应对"改崩溃了"
+最直接的保险；镜像本身（`flight-stack`9.2GB/`sim-world`22.9GB）没做
+额外备份，因为都能从`patches/`+`staging/`确定性重新build出来，丢了是
+"要花时间重建"不是"数据永久丢失"。
+
+**数据记录方案分两层**，都是有界保留（滚动窗口/固定大小上限），不是
+无限堆积：
+
+**第一层——容器stdout持久化**（`scripts/tail_persist_logs.sh`，宿主机
+侧跑，不在容器里）：`docker compose logs -f --tail=0 <service>`持续
+追加进`runtime_logs/container_logs/<service>.log`，自己实现了个简化版
+`logrotate`（超过50MB就转存成`.1`，最多留5份，约250MB/服务的上限）——
+`docker compose down`会把容器自己的日志存储删掉，这层是为了让日志脱离
+容器生命周期独立存活。`docker-compose.yml`三个服务也顺手加了原生
+`logging: {driver: json-file, max-size: 20m, max-file: 5}`配置，作为
+免维护但生命周期更短的第一层兜底（容器活着的时候`docker compose
+logs`能看，容器一down就没了）。
+
+**第二层——rosbag"黑匣子"滚动录制**（`scripts/record_rosbag.sh`+
+`scripts/prune_rosbag.sh`，跑在flight-stack-nx01容器里，
+`network_mode:host`下能看到全部双机话题）：不用`ros2 bag record
+--max-bag-duration`在同一个bag目录里内部分片（分片共用一份
+metadata.yaml，删旧分片会把索引和实际文件对不上），改成用`timeout`
+每5分钟重开一个全新、独立的bag目录，`prune_rosbag.sh`只保留最近12个
+（约1小时），超过的从最老的开始整个目录删掉。
+
+**录制话题选型，实测踩了一个坑**：一开始想当然把`occupancy_grid`跟
+`unknown_grid`都录了，`ros2 topic bw`实测：`occupancy_grid`确实只有
+约36KB/s/机，但`unknown_grid`（虽然名字听着像轻量的
+`nav_msgs/OccupancyGrid`，实际类型是`sensor_msgs/PointCloud2`——
+"grid"只是话题名字沿用的旧称呼；20x20米房间里"未知"格子点数远多于
+"占据"格子）飙到约410~460KB/s/机，双机合计能占滚动录制总带宽的七成
+以上，实测整个话题列表录了1分钟涨到155MB（外推约4.7GB/小时），跟
+"不能让存储爆"这个目标直接冲突。**修复**：默认话题列表去掉
+`unknown_grid`，只留`occupancy_grid`，改完实测录制带宽从约1.32MB/s
+降到约206KB/s（6倍以上），5分钟一个块约62MB，12块滚动窗口稳定在
+~750MB量级，需要专门查frontier/exploration相关问题时再手动加回
+`unknown_grid`单独录一次，不常驻默认列表。默认录的话题：`/tf`
+`/tf_static`、`/trajs`、双机`term_goal`/`mavros/state`/
+`local_position/pose`/`occupancy_grid`、`frame_align`两个方向、
+`/plug/model_states_plug`（Gazebo真值）——原始点云同样默认不录（比
+occupancy_grid还大一个数量级），道理跟排除unknown_grid一样。
+
+**留证机制**（`scripts/save_incident.sh`）：出事故时手动跑一下，把
+最近3个滚动bag块（约15分钟，覆盖事发前后）+双机姿态/推力文本日志
+复制到`runtime_logs/incidents/<时间戳>_<描述>/`长期保留，不受
+`prune_rosbag.sh`滚动清理影响——现场测过一次（`save_incident.sh "测试
+留证"`），确认能正确抓取最近的bag块+两机日志。
+
+**`scripts/attitude_thrust_logger.py`顺手改了输出路径**：从容器内
+`/tmp/attitude_thrust_debug.log`（容器一删就没了，得手动`docker cp`）
+改成`/logs/<namespace>/attitude_thrust_debug.log`（`docker-compose.yml`
+新挂载的`runtime_logs/`volume，容器销毁/重建数据不丢）；`/logs`这个
+挂载点不存在时（比如脱离docker-compose单独调这个脚本）自动退回旧的
+`/tmp`路径，不报错。
+
+**`docker-compose.yml`改动**：三个服务都加了`./runtime_logs:/logs`
+挂载（同一个宿主机目录挂到容器内同一个路径，各脚本自己按
+`/logs/nx01`、`/logs/rosbag`这些约定的子路径分开写，不额外拆分
+per-service挂载点）+ 上面提到的`logging:`原生日志滚动配置。这个改动
+不涉及镜像内容、不需要rebuild，`docker compose up -d`重建容器就生效。
+
+**`scripts/watch_sim.sh`新增两个tmux窗口**：`record`（紫色，起
+`record_rosbag.sh`+后台`prune_rosbag.sh`）、`logs`（灰色，起三个
+`tail_persist_logs.sh`）——从原来六窗口变成八窗口。
+
+**实测发现的一个无关但值得记的坑**：验证过程中`ros2 topic echo`/
+`ros2 topic list`突然集体报`xmlrpc.client.Fault:
+RuntimeError:!rclpy.ok()`，一度以为是MAVROS真的没连上（花了不少时间
+排查），最后发现是容器里`ros2` CLI自己的后台daemon卡死了，
+跟MAVROS/PX4本身毫无关系——`ros2 daemon stop && ros2 daemon start`
+之后所有CLI命令立刻恢复正常，`mavros/state`一直都是
+`connected:true armed:true mode:OFFBOARD`。以后再遇到"ros2 CLI集体
+报`!rclpy.ok()`或者莫名其妙的RPC错误"，先重启一下daemon再深挖，别
+一上来就怀疑是被查的系统本身出了问题。
+
+**另外记一笔**：`ros2 bag record`/这些脚本在容器里是以root跑的，
+`runtime_logs/`下产生的文件在宿主机上也是root所有——宿主机侧普通用户
+手动清理（比如想直接`rm -rf`某个旧的bag块）需要`sudo`，正常的滚动
+删除（`prune_rosbag.sh`自己在容器内跑，权限足够）不受影响，只是"人
+手动伸进去删"这个操作需要注意。

@@ -15,10 +15,15 @@ orientation四元数换算出来的旋转角接近180度（w分量接近0）的�
 
 用法（在flight-stack容器内部跑，namespace从参数读）：
   python3 attitude_thrust_logger.py NX01
-输出：追加写到 /tmp/attitude_thrust_debug.log，每行前面带秒级时间戳，
-跟mighty_debug.log的debug_log_t()格式风格保持一致，方便对照着看。
+输出：追加写到 /logs/<namespace>/attitude_thrust_debug.log（`/logs`是
+docker-compose挂载到宿主机`runtime_logs/`的volume，容器销毁/重建数据
+不会丢，参见README"运行时数据记录"一节）；如果`/logs`这个挂载点不存在
+（比如手动在容器外单独调试这个脚本），退回旧行为写到`/tmp`，不报错。
+每行前面带秒级时间戳，跟mighty_debug.log的debug_log_t()格式风格保持
+一致，方便对照着看。
 """
 
+import os
 import sys
 import math
 import time
@@ -29,7 +34,13 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from mavros_msgs.msg import AttitudeTarget
 from geometry_msgs.msg import PoseStamped
 
-LOG_PATH = '/tmp/attitude_thrust_debug.log'
+
+def log_path_for(ns: str) -> str:
+    logs_dir = f'/logs/{ns}'
+    if os.path.isdir('/logs'):
+        os.makedirs(logs_dir, exist_ok=True)
+        return f'{logs_dir}/attitude_thrust_debug.log'
+    return '/tmp/attitude_thrust_debug.log'
 
 
 def quat_rotation_angle_deg(x, y, z, w):
@@ -61,7 +72,7 @@ class AttitudeThrustLogger(Node):
         super().__init__(f'{ns.lower()}_attitude_thrust_logger')
         self.ns = ns
         self.t0 = time.monotonic()
-        self.log_file = open(LOG_PATH, 'a', buffering=1)  # line-buffered
+        self.log_file = open(log_path_for(ns), 'a', buffering=1)  # line-buffered
 
         self.latest_actual = None
 
