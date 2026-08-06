@@ -4459,3 +4459,73 @@ mtime比容器启动时间晚了几分钟——用户在GUI里做完调整后用
 依赖"5个patch按顺序都刚好套得上"这个越来越脆的假设。
 
 同样需要重新build sim-world才会在下次`docker compose up`里生效。
+
+## 用户反馈"给两个无人机发同一个目标，互相不避障了，撞一块了"——根因是`J_dyn`里没做`getHorizon()`边界检查，已修复（方案A）
+
+排查思路：两机各自往`/trajs`广播自己规划出的轨迹（`dynTraj`），对方
+用`obs->eval(t_abs)`在自己的优化循环里查"这个时刻对方大概在哪"来算
+避障代价`J_dyn`。问题是每条广播轨迹只覆盖一段有限的时间窗口
+（`getHorizon()`返回的`[t_min, t_max]`），如果查询时刻`t_abs`超出了
+这个窗口，`dynTraj`的`eval()`不会报错，而是**直接把对方"冻结"在
+窗口边界那个位置**（`pwp.eval()`过界截断在`times.back()`，
+`Quintic`则是外推）——不是真实位置，是个"鬼影"。
+
+翻了`mit-acl/mighty`上游所有分支（main/dev/dev-sim/dev-rr/
+dev-rr-mad/multiagent/multiagent_hw），发现`J_form`（编队飞行代价，
+只有`formation_weight_>0`才生效，这套部署里没开）在上游`"formation
+flight"`那次提交里已经加了这个`getHorizon()`边界跳过的保护，但同一
+提交完全没有把这个保护同步给`J_dyn`（这套部署里真正在起作用的机间
+避障机制）——`multiagent`/`multiagent_hw`这两个分支甚至更早于那次
+修复提交，从一开始就没有任何保护。也就是说这是上游代码本身遗留的
+一个漏洞，不是这套仿真自己引入的。
+
+这一个根因会表现成两种不同的故障，取决于"鬼影"位置恰好落在哪：
+1. 如果鬼影正好飘进了`planner_Cw`（避障安全间距）附近，`J_dyn`的
+   三次hinge代价会跟着炸掉，导致整次replan的`fopt`远超
+   `fopt_threshold`直接失败——哪怕真实情况下明明有可行解。
+2. 如果鬼影飘到了跟己方规划路径完全不沾边的地方，`J_dyn`对那个
+   采样点直接报"零冲突"——哪怕对方这时候的真实位置其实已经进了自己
+   的规划路径。两机各自拿着这份"零冲突"误判独立规划，都以为自己已经
+   绕开了对方，实际谁都没绕开，正面撞上——不报错、不触发replan
+   失败日志，直接实机（仿真里是"啪"一声掉一块）。这次用户看到的
+   "互相不避障了，撞一块了"，从`/trajs`广播时间线核对下来，正是第
+   2种（假阴性）。
+
+跟用户核对过方案A（照抄`J_form`那段已有的硬跳过逻辑，套到`J_dyn`
+上）和方案C（时间衰减：越过horizon越远，避障权重越低而不是直接
+跳过）改动量的差别——两边核心数学量差不多，但C需要新增一个可调参数
+并穿透`mighty_type.hpp`/`mighty_node.cpp`/yaml三四个文件，属于原创
+数学、需要仔细核对梯度一致性；A是纯抄现成模式、单文件、零新参数。
+用户选择先落地方案A。
+
+**已实现**：`patches/mighty_avoidance_horizon_guard.patch`，改
+`src/mighty/lbfgs_solver.cpp`里`evaluateObjectiveAndGradientFused`
+函数（这是`lbfgs::lbfgs_optimize`实际注册回调的那个"Fused"版本，
+确认过）的`J_dyn`循环：在`for (const auto& obs : obstacles_)`那层
+循环开头调一次`obs->getHorizon(t_min, t_max, has_horizon)`，再在内层
+采样循环里`t_abs`算出来之后加一句`if (has_horizon && (t_abs < t_min
+|| t_abs > t_max)) continue;`，跟`J_form`那段的写法完全对齐。
+
+顺带查了一眼有没有第二处同样漏洞：`lbfgs_solver.cpp`里还有一个
+结构几乎一样的`obs->eval(t_abs)`循环，在`SolverLBFGS::dJ_dyn_dz`里，
+同样没有horizon保护。往上追调用链：`dJ_dyn_dz`只被
+`computeAnalyticalGrad`调，`computeAnalyticalGrad`只被
+`evaluateObjectiveAndGradient`（不带"Fused"的那个旧版本）调——而
+`evaluateObjectiveAndGradient`在整个代码库里所有会真正调用它的地方
+（包括本该注册成求解器回调的那一行）全部是**注释掉的**，只剩函数
+定义本身和自己的声明还在。确认是死代码，不会被真实求解流程执行，
+所以没有再改这一处，只改了`evaluateObjectiveAndGradientFused`里那
+一个真正生效的地方，避免动不需要动的代码。
+
+验证方式：跟`mighty_enable_thrust_constraint.patch`同样的
+"clean-room重放patch链"流程——staging里`mighty`目录全程保持
+pristine，只在临时目录里重放flight-stack这条mighty patch链（21个
+旧patch+这1个新的，共22个）全部apply成功（唯一失败的还是跟这次改动
+无关的既有`mighty_disable_d435`）。改的是`Dockerfile.flight-stack`
+（`lbfgs_solver.cpp`是flight-stack镜像里编译的，不在sim-world里），
+需要重新build flight-stack（两架机都要）才会生效。
+
+（`get_angular()`里`h_om = m / u1 * (...)`那处除零风险、attitude
+控制律的yaw角速度异常根因——用户明确说了"不用查了"，保持未修复，
+仅作记录，不在本次范围内。方案C（时间衰减）作为方案A效果不够时的
+备选，也保持未实现。）

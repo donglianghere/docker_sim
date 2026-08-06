@@ -1,0 +1,43 @@
+diff --git a/src/mighty/lbfgs_solver.cpp b/src/mighty/lbfgs_solver.cpp
+index 2da57df..304467e 100644
+--- a/src/mighty/lbfgs_solver.cpp
++++ b/src/mighty/lbfgs_solver.cpp
+@@ -2541,12 +2541,38 @@ double SolverLBFGS::evaluateObjectiveAndGradientFused(const Eigen::VectorXd& z,
+         // *true* dynamic obstacles while J_form handles agent-agent spacing.
+         if (formation_weight_ > 0.0 && obs->is_agent) continue;
+ 
++        // Skip samples outside this obstacle's broadcast horizon — same fix
++        // as J_form below (see that block's comment for the full story).
++        // Without this, an obstacle/agent whose most recently broadcast
++        // trajectory doesn't cover t_abs gets silently frozen at its
++        // horizon's END position by dynTraj's evaluator (pwp.eval() clamps
++        // past times.back(); Quintic extrapolates). Two failure modes from
++        // the same root cause, both observed live: (1) if that frozen ghost
++        // position drifts inside Cw, J_dyn's cubic hinge blows up and the
++        // whole replan fails with fopt way past par_.fopt_threshold even
++        // though a real solution exists; (2) if the ghost position is NOT
++        // near the planned path, J_dyn reports zero conflict for that
++        // sample even though the real, current obstacle may by now actually
++        // be somewhere the plan does cross — a false "all clear" that lets
++        // two agents each independently believe they've routed around the
++        // other while neither actually has (realtime collision, no
++        // exception thrown, no replan failure logged — just a crash on
++        // simulated ground). formation_weight_>0 already routes true agents
++        // to J_form's identical guard above; this covers J_dyn's remaining
++        // consumers (real dynamic obstacles, and agents when
++        // formation_weight_==0 as in this deployment).
++        double obs_t_min, obs_t_max;
++        bool obs_has_horizon;
++        obs->getHorizon(obs_t_min, obs_t_max, obs_has_horizon);
++
+         for (int i = 0; i < N; ++i) {
+           // Midpoint in (0,1) → avoids endpoints by construction
+           const double u = (i + 0.5) / static_cast<double>(N);
+           double t_abs = t0_ + u * total_T;
+           t_abs = std::min(std::max(t_abs, edges.front() + kEpsT), edges.back() - kEpsT);
+ 
++          if (obs_has_horizon && (t_abs < obs_t_min || t_abs > obs_t_max)) continue;
++
+           // Locate segment and local tau (strictly inside)
+           int s = int(std::upper_bound(edges.begin(), edges.end(), t_abs) - edges.begin()) - 1;
+           s = std::clamp(s, 0, M - 1);
