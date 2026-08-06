@@ -1,0 +1,108 @@
+diff --git a/global_mapper/include/global_mapper/params.h b/global_mapper/include/global_mapper/params.h
+index fd3d004..ad4356d 100644
+--- a/global_mapper/include/global_mapper/params.h
++++ b/global_mapper/include/global_mapper/params.h
+@@ -26,6 +26,15 @@ struct Params
+   double z_ground = 0;
+   int skip = 0;
+   double depth_max = 10;
++  // [m] points closer than this to the sensor origin are dropped entirely
++  // before hit/miss insertion (not just cleared after the fact, unlike
++  // clear_occupied_radius above). Needed because a tilted-mount Livox
++  // mid-360 has beams down to -7 deg that can return off the vehicle's own
++  // airframe at close range; those self-hits get baked into the map as a
++  // permanent "occupied halo" around wherever the drone was sitting since
++  // nothing ever re-observes that exact spot as free once the drone moves
++  // away. 0 means disabled (old behavior).
++  double sensor_min_range = 0.0;
+   double r1 = 0.8;
+   double r2 = 8.0;
+   double z_min_unknown = 0.2;
+diff --git a/global_mapper/src/global_mapper/global_mapper.cc b/global_mapper/src/global_mapper/global_mapper.cc
+index 2b8056b..21aa84a 100644
+--- a/global_mapper/src/global_mapper/global_mapper.cc
++++ b/global_mapper/src/global_mapper/global_mapper.cc
+@@ -145,6 +145,11 @@ namespace global_mapper
+     const double max_r = params_.depth_max;
+     const double max_r_sq = max_r * max_r;
+ 
++    // Minimum sensor range and squared threshold -- see sensor_min_range's
++    // comment in params.h for why this exists (tilted mid-360 self-hits).
++    const double min_r = params_.sensor_min_range;
++    const double min_r_sq = min_r * min_r;
++
+     // --- 1) MISS pass (ray‐trace): clear cells along every beam ---
+     for (size_t i = 0; i < cloud_ptr->points.size(); ++i)
+     {
+@@ -168,7 +173,7 @@ namespace global_mapper
+       double dz = pt.z - start[2];
+       double dist_sq = dx * dx + dy * dy + dz * dz;
+ 
+-      if (dist_sq <= max_r_sq && std::isfinite(pt.intensity))
++      if (dist_sq >= min_r_sq && dist_sq <= max_r_sq && std::isfinite(pt.intensity))
+       {
+         // It’s a valid return within range ⇒ mark occupied
+         end[0] = pt.x;
+@@ -176,7 +181,9 @@ namespace global_mapper
+         end[2] = pt.z;
+         occupancy_grid_.UpdateValue(end, params_.hit_inc);
+       }
+-      // Else: beam simply clipped at max range ⇒ do not insert a false obstacle
++      // Else: beam simply clipped at max/min range ⇒ do not insert a false
++      // obstacle (min-range clip is almost always the vehicle's own
++      // airframe, not a real obstacle)
+     }
+   }
+ 
+diff --git a/global_mapper_ros/cfg/global_mapper.yaml b/global_mapper_ros/cfg/global_mapper.yaml
+index 9a90bd5..ad2941a 100644
+--- a/global_mapper_ros/cfg/global_mapper.yaml
++++ b/global_mapper_ros/cfg/global_mapper.yaml
+@@ -12,6 +12,7 @@
+         z_ground: 0.5  #[m] points below z_ground are not published in the known grid
+         skip: 0  #[pixels] Numbers of pixels to skip in the depth map. Should be >=0
+         depth_max: 15.0 #[m] In the depth image, points farther than depth_max, are treated as inf (i.e. along its ray (and up to that point) only unknown voxels are cleared. If doing simulation, this should be the value of pointCloudCutoffMax in the file `asus_camera_urdf.xacro`
++        sensor_min_range: 0.4  #[m] points closer than this to the sensor are dropped before hit/miss insertion (0=disabled). The mid-360 is tilted 30deg forward and has beams down to -7deg, which can return off the vehicle's own airframe at close range; those self-hits were baking a permanent "occupied" halo into the map around wherever the drone was sitting.
+         r1: 0.8 #[m] Points in the sphere centerd in the drone with r>r1 and r<r2 are published as unkown space
+         r2: 15.0 #[m] See above
+         z_min_unknown: 0.1 #[m] points below z_min_unkown are not published in the unkown grid
+diff --git a/global_mapper_ros/cfg/hw_global_mapper.yaml b/global_mapper_ros/cfg/hw_global_mapper.yaml
+index 1a2646b..810577a 100644
+--- a/global_mapper_ros/cfg/hw_global_mapper.yaml
++++ b/global_mapper_ros/cfg/hw_global_mapper.yaml
+@@ -13,6 +13,7 @@
+         z_ground: -0.4  #[m] points below z_ground are not published in the known grid (allow ground points)
+         skip: 0
+         depth_max: 15.0
++        sensor_min_range: 0.4  #[m] points closer than this to the sensor are dropped before hit/miss insertion (0=disabled). The mid-360 is tilted 30deg forward and has beams down to -7deg, which can return off the vehicle's own airframe at close range; those self-hits were baking a permanent "occupied" halo into the map around wherever the drone was sitting.
+         r1: 0.8
+         r2: 20.0
+         z_min_unknown: -0.5 #[m] points below z_min_unknown are not published in the unknown grid (allow ground)
+diff --git a/global_mapper_ros/src/global_mapper_ros.cc b/global_mapper_ros/src/global_mapper_ros.cc
+index 45810a8..9f1f15b 100644
+--- a/global_mapper_ros/src/global_mapper_ros.cc
++++ b/global_mapper_ros/src/global_mapper_ros.cc
+@@ -40,6 +40,7 @@ namespace global_mapper_ros
+     this->declare_parameter<double>("z_ground", 0.1);
+     this->declare_parameter<int>("skip", 0);
+     this->declare_parameter<double>("depth_max", 8.0);
++    this->declare_parameter<double>("sensor_min_range", 0.0);
+     this->declare_parameter<double>("r1", 0.8);
+     this->declare_parameter<double>("r2", 8.0);
+     this->declare_parameter<double>("z_min_unknown", 0.1);
+@@ -121,6 +122,7 @@ namespace global_mapper_ros
+     fla_utils::SafeGetParam(*this, "z_ground", params_.z_ground);
+     fla_utils::SafeGetParam(*this, "skip", params_.skip);
+     fla_utils::SafeGetParam(*this, "depth_max", params_.depth_max);
++    fla_utils::SafeGetParam(*this, "sensor_min_range", params_.sensor_min_range);
+     fla_utils::SafeGetParam(*this, "r1", params_.r1);
+     fla_utils::SafeGetParam(*this, "r2", params_.r2);
+     fla_utils::SafeGetParam(*this, "z_min_unknown", params_.z_min_unknown);
+@@ -228,6 +230,7 @@ namespace global_mapper_ros
+     RCLCPP_INFO(this->get_logger(), "  z_ground: %f", params_.z_ground);
+     RCLCPP_INFO(this->get_logger(), "  skip: %d", params_.skip);
+     RCLCPP_INFO(this->get_logger(), "  depth_max: %f", params_.depth_max);
++    RCLCPP_INFO(this->get_logger(), "  sensor_min_range: %f (disabled if 0)", params_.sensor_min_range);
+     RCLCPP_INFO(this->get_logger(), "  r1: %f", params_.r1);
+     RCLCPP_INFO(this->get_logger(), "  r2: %f", params_.r2);
+     RCLCPP_INFO(this->get_logger(), "  z_min_unknown: %f", params_.z_min_unknown);

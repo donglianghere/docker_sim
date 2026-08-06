@@ -358,10 +358,12 @@ RUN cd /opt/mighty_ws/src/mighty \
 # TF用的假epoch时钟域对不上，导致RViz里Fixed Frame跨namespace查看另一架
 # 飞机的occupancy_grid时解不出变换（同namespace因为是零跳恒等变换、不用
 # 查TF，看起来正常，容易误判成"只有跨机才有问题、这条消息本身没事"）。
-COPY patches/global_mapper_ros_sim_time_stamp.patch /tmp/
+COPY patches/global_mapper_ros_sim_time_stamp.patch patches/global_mapper_sensor_min_range.patch /tmp/
 RUN cd /opt/mighty_ws/src/acl-mapping \
     && (git apply --check /tmp/global_mapper_ros_sim_time_stamp.patch && git apply /tmp/global_mapper_ros_sim_time_stamp.patch \
-        || echo "!! global_mapper_ros_sim_time_stamp.patch 未能自动应用，需人工核对后手动改 global_mapper_ros/src/global_mapper_ros.cc !!")
+        || echo "!! global_mapper_ros_sim_time_stamp.patch 未能自动应用，需人工核对后手动改 global_mapper_ros/src/global_mapper_ros.cc !!") \
+    && (git apply --check /tmp/global_mapper_sensor_min_range.patch && git apply /tmp/global_mapper_sensor_min_range.patch \
+        || echo "!! global_mapper_sensor_min_range.patch 未能自动应用，需人工核对后手动改 global_mapper/include/global_mapper/params.h、global_mapper/src/global_mapper/global_mapper.cc、global_mapper_ros/src/global_mapper_ros.cc、global_mapper_ros/cfg/global_mapper.yaml、global_mapper_ros/cfg/hw_global_mapper.yaml !!")
 
 # 用户反馈"飞机起来了，但用RViz的2D Goal Pose给点，飞机不动"——查了
 # mighty_node.cpp的debug日志（/tmp/mighty_debug.log，debug_log_file参数
