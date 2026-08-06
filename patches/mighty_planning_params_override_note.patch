@@ -1,0 +1,66 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index f9a0c84..d8db603 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -86,13 +86,29 @@ mighty_node:
+         shrinked_box_size: 0.0                  # [m] Size of the shrinked box
+ 
+         # Optimization parameters
++        #
++        # ⚠️ v_max/a_max/j_max/omega_max/time_weight/goal_seen_radius/goal_radius/
++        # dynamic_weight/planner_Cw/dyn_constr_thrust_weight below are DEAD VALUES
++        # at runtime as of 2026-08-07 -- flight-stack-entrypoint.sh generates a
++        # vehicle_profile override yaml from docker-compose.yml's V_MAX/A_MAX/...
++        # environment variables (same mighty_onboard_vehicle_profile.patch
++        # mechanism that already overrides f_min/f_max below), and that override
++        # always wins, unconditionally, for every one of these keys. Editing the
++        # numbers on these lines has NO effect on what actually flies; edit
++        # docker-compose.yml instead. Kept here only as the fallback the override
++        # yaml is generated from and as human-readable documentation of what the
++        # defaults mean. This mirrors -- and is meant to avoid repeating -- the
++        # exact mistake vehicle_profile.yaml's own header comment warns about
++        # (a second, silently-diverging copy of the same tunables); the
++        # difference here is the override is unconditional and always active,
++        # not an easily-forgotten opt-in file.
+         horizon: 15.0                               # [m] Horizon
+         dc: 0.01                                    # [s] Duration for the interpolation=Value of the timer pubGoal
+-        v_max: 1.0                                       # [m/s]  max velocity
+-        a_max: 3.0                                       # [m/s2] max acceleration
+-        j_max: 5.0                                       # [m/s3] max jerk
+-        dynamic_weight: 1e+2                        # [-] Weight of the obstacles and agents distance in the optimization
+-        time_weight: 1.5e+2                          # [-] Weight of the time cost in the optimization. Was 5e+2 --
++        v_max: 1.0                                       # [m/s]  max velocity -- ⚠ overridden by compose V_MAX, see note above
++        a_max: 3.0                                       # [m/s2] max acceleration -- ⚠ overridden by compose A_MAX
++        j_max: 5.0                                       # [m/s3] max jerk -- ⚠ overridden by compose J_MAX
++        dynamic_weight: 1e+2                        # [-] Weight of the obstacles and agents distance in the optimization -- ⚠ overridden by compose DYNAMIC_WEIGHT
++        time_weight: 1.5e+2                          # [-] Weight of the time cost in the optimization -- ⚠ overridden by compose TIME_WEIGHT, see note above. Was 5e+2 --
+                                                       # that high relative to jerk_weight (1e-1) pushed the optimizer
+                                                       # toward near-bang-bang "cruise at v_max, brake at the last
+                                                       # possible moment" trajectories. Kinematically that braking
+@@ -110,7 +126,7 @@ mighty_node:
+         dyn_constr_jerk_weight: 1e+3                # [-] Weight of the jerk constraints violation in the optimization
+         dyn_constr_bodyrate_weight: 0.0             # [-] Weight of the body rate constraints violation in the optimization
+         dyn_constr_tilt_weight: 0.0                 # [-] Weight of the tilt constraints violation in the optimization
+-        dyn_constr_thrust_weight: 1e+3               # [-] Weight of the thrust constraints violation in the optimization.
++        dyn_constr_thrust_weight: 1e+3               # [-] Weight of the thrust constraints violation in the optimization -- ⚠ overridden by compose DYN_CONSTR_THRUST_WEIGHT, see note above.
+                                                        # 2026-08-06起打开(原来是0.0，等于没启用)，用户明确要求——
+                                                        # 权重量级照抄同一批dyn_constr_*_weight(vel/acc/jerk都是1e+3)，
+                                                        # 跟它们保持一致的优先级。f_min/f_max用的是mighty_node.f_min/
+@@ -121,13 +137,13 @@ mighty_node:
+                                                        # 不是这份文件里字面写的这两个数字。
+         num_dyn_obst_samples: 10                    # [-] Number of samples for the dynamic obstacles in the optimization
+         planner_Co: 0.6                              # [-] Collision clearance thresh for static obstacles in the optimization
+-        planner_Cw: 3.0                             # [-] Collision clearance thresh for dynamic obstacles in the optimization
++        planner_Cw: 3.0                             # [-] Collision clearance thresh for dynamic obstacles in the optimization -- ⚠ overridden by compose PLANNER_CW, see note above
+         drone_bbox: [1.2, 1.2, 1.2]                 # [m] Size of the bounding box for the obstacles
+-        goal_radius: 0.3                           # [m] Radius of the goal
+-        goal_seen_radius: 3.0                       # [m] Radius of the goal that the drone can see and stop replanning. Note that if this number is too small, the trajectory planning becomes extremely difficult. Was 2.0 -- bumped for more margin on the hard terminal (zero-velocity) constraint segment, alongside the time_weight reduction above, to fix goal-arrival overshoot.
++        goal_radius: 0.3                           # [m] Radius of the goal -- ⚠ overridden by compose GOAL_RADIUS, see note above
++        goal_seen_radius: 3.0                       # [m] Radius of the goal that the drone can see and stop replanning. Note that if this number is too small, the trajectory planning becomes extremely difficult. -- ⚠ overridden by compose GOAL_SEEN_RADIUS, see note above. Was 2.0 -- bumped for more margin on the hard terminal (zero-velocity) constraint segment, alongside the time_weight reduction above, to fix goal-arrival overshoot.
+         integral_resolution: 8
+         hinge_mu: 1e-2
+-        omega_max: 0.10472 # [rad/s] Maximum angular velocity (6 deg/s)
++        omega_max: 0.10472 # [rad/s] Maximum angular velocity (6 deg/s) -- ⚠ overridden by compose OMEGA_MAX, see note above
+         tilt_max_rad: 0.610865 # [rad] Maximum tilt angle (35 deg)
+         f_min: 3.0                        # [N] Minimum thrust
+         f_max: 26.0                        # [N] Maximum thrust -- real physical ceiling is

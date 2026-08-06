@@ -4615,3 +4615,65 @@ clean-room重放flight-stack这条mighty patch链（22个旧patch+这1个
 `mighty_disable_d435`）。这两个数值是基于运动学分析给出的起点，不是
 实测调出来的最终值，需要用户重新build flight-stack后实际试飞验证、
 按效果继续微调。
+
+## 用户反馈"规划、避障、控制的一些重要参数应该放到compose文件中"——已实现，复用现成的vehicle_profile覆盖机制
+
+用户想要的是：不用改`hw_mighty.yaml`再重新build镜像，改
+`docker-compose.yml`里的环境变量、重新`up`容器就能调参数。选定的
+10个参数（运动限制`v_max/a_max/j_max/omega_max`、行为调优
+`time_weight/goal_seen_radius/goal_radius`、避障
+`dynamic_weight/planner_Cw`、推力约束`dyn_constr_thrust_weight`）
+都是这次调参会话里实际碰过或讨论过的"重要"项，感知模块（HSV/YOLO/
+二维码）明确排除在这次范围外——用户说了"真机才做"。
+
+**先排查了一圈现成机制，没有从零设计**：
+`mighty_onboard_vehicle_profile.patch`早就给`onboard_mighty.launch.py`
+加了一个`vehicle_profile:=`launch参数，逻辑是把传入yaml文件里
+`mighty_node.ros__parameters`这部分整个`.update()`进最终交给
+`mighty_node`的参数表（在`hw_mighty.yaml`之后生效，谁最后update谁
+赢）——这个逻辑本来就是"任意key都能覆盖"的通用写法，不是只认
+`mass/f_min/f_max`这三个key，不用改一行launch文件代码。
+
+但这里有个明确要避开的坑：`config/vehicle_profile.yaml`文件头注释
+自己记录过一次教训——历史上这份文件一度放过一套跟`hw_mighty.yaml`
+不一样的`v_max`等数值，只是刚好因为一个patch顺序bug没让它意外生效，
+教训是"不要让同一批参数存在两份不同步的副本"。这次的设计**特意
+避开重蹈覆辙**：
+- 原来那份`/opt/config/vehicle_profile.yaml`是build时`COPY`进镜像
+  的静态文件，改不了内容触发运行时变化；这次**新增**一份运行时
+  生成的yaml（`flight-stack-entrypoint.sh`里一段python，读静态文件
+  的`mass/f_min/f_max`打底，再把这10个来自环境变量的新key`update`
+  进去，写到`/tmp/vehicle_profile_runtime.yaml`），`vehicle_profile:=`
+  这个launch参数改指向这份新生成的文件，不再指向静态文件本身。
+- 这10个环境变量在`docker-compose.yml`里**必须每个都有默认值**
+  （形如`${V_MAX:-1.0}`，数值等于当前`hw_mighty.yaml`里实际生效的
+  数字），entrypoint侧生成逻辑也**无条件**给这10个key赋值（不是
+  "设了才覆盖"）——保证运行时永远只有一份数字在起作用，不会出现
+  "compose没设、entrypoint也没兜底、两边各自以为对方生效"这种
+  空档。
+- `patches/mighty_planning_params_override_note.patch`给
+  `hw_mighty.yaml`里这10个字段各自加了`⚠ overridden by compose
+  ...`的行内标记+一段总说明，明确写着"改这个文件里的数字没有任何
+  效果，实际生效值以compose为准"——防止以后有人（包括我自己）又
+  想当然地改这份yaml却发现"怎么调都不生效"，重蹈那次教训里"两份
+  数字不同步、还不知道哪份真正生效"的confusion。
+
+`docker-compose.yml`里两架飞机的这10个环境变量必须给一样的值（跟
+`CONTROL_LAW`同样的要求）——规划/避障参数不一致会破坏多机避让的
+前提假设。
+
+**已实现的改动**（3个文件）：
+- `docker/entrypoints/flight-stack-entrypoint.sh`：新增环境变量读取
+  +运行时yaml生成逻辑，`vehicle_profile:=`参数改指向生成的文件。
+- `docker-compose.yml`：`flight-stack-nx01`/`flight-stack-nx02`两个
+  service各自加10行环境变量，默认值和注释跟`hw_mighty.yaml`当前
+  实际生效值一一对应。
+- `patches/mighty_planning_params_override_note.patch`：给
+  `hw_mighty.yaml`加"这里已经不生效了"的标记注释，clean-room重放
+  flight-stack这条mighty patch链（23个旧patch+这1个新的，共24个）
+  全部apply成功。
+
+entrypoint脚本是build时`COPY`进镜像的（`Dockerfile.flight-stack`），
+所以这次改动也需要重新build flight-stack才生效——单纯改
+`docker-compose.yml`里的数字、不重新build是不会生效的（entrypoint
+里生成runtime yaml的那段代码本身也得先被build进镜像）。

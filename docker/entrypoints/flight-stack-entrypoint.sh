@@ -76,6 +76,53 @@ print(d['offboard_dynus_follower']['ros__parameters']['hover_thrust'])
 " 2>/dev/null || echo "0.50")
 echo "== [flight-stack:${NAMESPACE}] VEHICLE_MASS_KG=${VEHICLE_MASS_KG} VEHICLE_HOVER_THRUST=${VEHICLE_HOVER_THRUST} =="
 
+# 规划/避障/控制的重要可调参数，改成从 docker-compose.yml 的环境变量读，不再只能
+# 靠改 hw_mighty.yaml 再重新build镜像才能调。复用上面同一套 vehicle_profile 机制
+# （mighty_onboard_vehicle_profile.patch 加的 parameters.update()，本来就是"任意
+# key都能覆盖"的通用逻辑，不用改launch文件代码）——但静态的
+# /opt/config/vehicle_profile.yaml 是build时COPY进镜像的，改不了；这里在容器启动时
+# 现算一份新的、多出这些key的yaml，传给 vehicle_profile:= 这个launch参数（见下面
+# ros2 launch那一行），而不是直接改静态文件。
+#
+# 每个变量的默认值都保持跟当前 hw_mighty.yaml 里实际生效的数字一致，
+# compose.yml没设这些环境变量时行为完全不变；一旦设了，这里生成的yaml就是
+# 唯一生效的值——不会出现"两份数字不同步"的情况（hw_mighty.yaml里这几个字段
+# 已经在mighty_planning_params_override_note.patch里加了注释，明确写着"实际生效
+# 值以这里为准，改这里的数字不会有任何效果"，避免重蹈vehicle_profile.yaml文件头
+# 注释里记录的那次教训——历史上这里出现过两份不同步的数字，只是刚好因为一个patch
+# 顺序bug没让第二份意外生效）。
+export V_MAX="${V_MAX:-1.0}"
+export A_MAX="${A_MAX:-3.0}"
+export J_MAX="${J_MAX:-5.0}"
+export OMEGA_MAX="${OMEGA_MAX:-0.10472}"
+export TIME_WEIGHT="${TIME_WEIGHT:-1.5e+2}"
+export GOAL_SEEN_RADIUS="${GOAL_SEEN_RADIUS:-3.0}"
+export GOAL_RADIUS="${GOAL_RADIUS:-0.3}"
+export DYNAMIC_WEIGHT="${DYNAMIC_WEIGHT:-1e+2}"
+export PLANNER_CW="${PLANNER_CW:-3.0}"
+export DYN_CONSTR_THRUST_WEIGHT="${DYN_CONSTR_THRUST_WEIGHT:-1e+3}"
+echo "== [flight-stack:${NAMESPACE}] 规划/避障/控制参数： v_max=${V_MAX} a_max=${A_MAX} j_max=${J_MAX} omega_max=${OMEGA_MAX} time_weight=${TIME_WEIGHT} goal_seen_radius=${GOAL_SEEN_RADIUS} goal_radius=${GOAL_RADIUS} dynamic_weight=${DYNAMIC_WEIGHT} planner_Cw=${PLANNER_CW} dyn_constr_thrust_weight=${DYN_CONSTR_THRUST_WEIGHT} =="
+export VEHICLE_PROFILE_RUNTIME=/tmp/vehicle_profile_runtime.yaml
+python3 -c "
+import os
+import yaml
+with open('/opt/config/vehicle_profile.yaml') as f:
+    d = yaml.safe_load(f)
+params = d.setdefault('mighty_node', {}).setdefault('ros__parameters', {})
+params['v_max'] = float(os.environ['V_MAX'])
+params['a_max'] = float(os.environ['A_MAX'])
+params['j_max'] = float(os.environ['J_MAX'])
+params['omega_max'] = float(os.environ['OMEGA_MAX'])
+params['time_weight'] = float(os.environ['TIME_WEIGHT'])
+params['goal_seen_radius'] = float(os.environ['GOAL_SEEN_RADIUS'])
+params['goal_radius'] = float(os.environ['GOAL_RADIUS'])
+params['dynamic_weight'] = float(os.environ['DYNAMIC_WEIGHT'])
+params['planner_Cw'] = float(os.environ['PLANNER_CW'])
+params['dyn_constr_thrust_weight'] = float(os.environ['DYN_CONSTR_THRUST_WEIGHT'])
+with open(os.environ['VEHICLE_PROFILE_RUNTIME'], 'w') as f:
+    yaml.safe_dump(d, f)
+"
+
 # MAVROS 之前整个没启动过（之前只跑了 dynus_mavros.launch.py，那里面没有mavros_node，
 # 只是声明了一个从没被用到的fcu_url参数）——ros2_px4_stack 那几个节点因此一直连不上
 # mavros/cmd/arming、mavros/set_mode、mavros/param/set 这些服务，日志里"not available,
@@ -155,7 +202,7 @@ ros2 launch mighty onboard_mighty.launch.py \
     namespace:="${NAMESPACE}" sim_env:=none use_hardware:=true use_onboard_localization:=true \
     use_frame_alignment:=true num_agents:="${NUM_AGENTS:-2}" \
     lidar_point_cloud_topic:=mid360_PointCloud2 \
-    vehicle_profile:=/opt/config/vehicle_profile.yaml &
+    vehicle_profile:="${VEHICLE_PROFILE_RUNTIME}" &
 sleep 2
 
 # mighty_node.cpp 无论 use_hardware=true 还是 sim_env=gazebo，实际订阅的都是

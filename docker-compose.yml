@@ -125,6 +125,25 @@ services:
                                   # Python实现从没被审查过——已改回trajectory，attitude
                                   # 模式在这个bug修好、重新验证之前不要再当默认用，
                                   # 见README"CONTROL_LAW=attitude模式排查"一节。
+      # ------ 规划/避障/控制重要参数（flight-stack-entrypoint.sh 现算一份
+      # vehicle_profile覆盖yaml传给mighty，改这里数字不用重新build镜像，改完
+      # 重新up容器就生效）。默认值等于当前hw_mighty.yaml里实际生效的数字，不设
+      # 就是原来的行为；两架飞机必须给一样的值，不然规划行为不一致、多机避让的
+      # 假设会被破坏。完整设计说明见README"重要参数放进compose"一节。 ------
+      - V_MAX=${V_MAX:-1.0}                              # [m/s] 最大飞行速度
+      - A_MAX=${A_MAX:-3.0}                               # [m/s2] 最大加速度
+      - J_MAX=${J_MAX:-5.0}                               # [m/s3] 最大jerk
+      - OMEGA_MAX=${OMEGA_MAX:-0.10472}                   # [rad/s] 最大角速度(6deg/s)
+      - TIME_WEIGHT=${TIME_WEIGHT:-1.5e+2}                # [-] 轨迹用时代价权重，
+                                  # 越大越倾向"晚刹车"的激进速度曲线，太大会导致
+                                  # 到达目标点超调（见README超调排查一节）
+      - GOAL_SEEN_RADIUS=${GOAL_SEEN_RADIUS:-3.0}         # [m] 进入这个半径开始
+                                  # 用硬终态(零速度)约束规划
+      - GOAL_RADIUS=${GOAL_RADIUS:-0.3}                   # [m] 判定"到达目标点"的半径
+      - DYNAMIC_WEIGHT=${DYNAMIC_WEIGHT:-1e+2}            # [-] 动态障碍物/僚机避让权重
+      - PLANNER_CW=${PLANNER_CW:-3.0}                     # [-] 动态避障安全间距阈值
+      - DYN_CONSTR_THRUST_WEIGHT=${DYN_CONSTR_THRUST_WEIGHT:-1e+3}  # [-] 推力约束
+                                  # 违反的惩罚权重，0=关闭推力限制
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:
@@ -149,6 +168,17 @@ services:
       - LOCALIZATION_SOURCE=dlio  # 两架飞机要保持一致，别一个dlio一个gt
       - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # 同上，两架飞机必须保持一致，
                                   # 见flight-stack-nx01那边的完整注释
+      # 规划/避障/控制参数——必须跟flight-stack-nx01那边给一样的值，见那边的完整注释
+      - V_MAX=${V_MAX:-1.0}
+      - A_MAX=${A_MAX:-3.0}
+      - J_MAX=${J_MAX:-5.0}
+      - OMEGA_MAX=${OMEGA_MAX:-0.10472}
+      - TIME_WEIGHT=${TIME_WEIGHT:-1.5e+2}
+      - GOAL_SEEN_RADIUS=${GOAL_SEEN_RADIUS:-3.0}
+      - GOAL_RADIUS=${GOAL_RADIUS:-0.3}
+      - DYNAMIC_WEIGHT=${DYNAMIC_WEIGHT:-1e+2}
+      - PLANNER_CW=${PLANNER_CW:-3.0}
+      - DYN_CONSTR_THRUST_WEIGHT=${DYN_CONSTR_THRUST_WEIGHT:-1e+3}
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:
