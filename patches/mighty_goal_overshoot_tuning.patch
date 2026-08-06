@@ -1,0 +1,31 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index f19b2b0..f9a0c84 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -92,7 +92,16 @@ mighty_node:
+         a_max: 3.0                                       # [m/s2] max acceleration
+         j_max: 5.0                                       # [m/s3] max jerk
+         dynamic_weight: 1e+2                        # [-] Weight of the obstacles and agents distance in the optimization
+-        time_weight: 5e+2                            # [-] Weight of the time cost in the optimization
++        time_weight: 1.5e+2                          # [-] Weight of the time cost in the optimization. Was 5e+2 --
++                                                      # that high relative to jerk_weight (1e-1) pushed the optimizer
++                                                      # toward near-bang-bang "cruise at v_max, brake at the last
++                                                      # possible moment" trajectories. Kinematically that braking
++                                                      # still fits inside goal_seen_radius (v_max^2/(2*a_max) ~=
++                                                      # 0.17m << 2m), but PX4's MPC tracking lags a sharp late-brake
++                                                      # profile enough that the real vehicle overshoots past the
++                                                      # planned stop point on long approaches. Lowering time_weight
++                                                      # lets the optimizer spread deceleration out earlier/more
++                                                      # smoothly without being penalized as much for the extra time.
+         pos_anchor_weight: 0.0                      # [-] Weight of the position anchors in the optimization
+         stat_weight: 1e+3                           # [-] Weight of the static obstacles in the optimization
+         jerk_weight: 1e-1                                   # [-] Weight of the jerk in the optimization
+@@ -115,7 +124,7 @@ mighty_node:
+         planner_Cw: 3.0                             # [-] Collision clearance thresh for dynamic obstacles in the optimization
+         drone_bbox: [1.2, 1.2, 1.2]                 # [m] Size of the bounding box for the obstacles
+         goal_radius: 0.3                           # [m] Radius of the goal
+-        goal_seen_radius: 2.0                       # [m] Radius of the goal that the drone can see and stop replanning. Note that if this number is too small, the trajectory planning becomes extremely difficult.
++        goal_seen_radius: 3.0                       # [m] Radius of the goal that the drone can see and stop replanning. Note that if this number is too small, the trajectory planning becomes extremely difficult. Was 2.0 -- bumped for more margin on the hard terminal (zero-velocity) constraint segment, alongside the time_weight reduction above, to fix goal-arrival overshoot.
+         integral_resolution: 8
+         hinge_mu: 1e-2
+         omega_max: 0.10472 # [rad/s] Maximum angular velocity (6 deg/s)

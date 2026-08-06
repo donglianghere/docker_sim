@@ -297,7 +297,7 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 COPY staging/mighty_ws_src /opt/mighty_ws/src
-COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_onboard_vehicle_profile.patch patches/mighty_lidar_point_cloud_topic_arg.patch patches/mighty_static_tf_fix.patch patches/mighty_static_tf_namespace_fix.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_force_goal_z.patch patches/mighty_headless_yaw_fix.patch patches/mighty_local_frame_only.patch patches/mighty_avoidance_tuning.patch patches/mighty_replan_failure_cap.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_z_range_narrow.patch patches/mighty_traveling_yaw_zero_dist_guard.patch patches/mighty_enable_thrust_constraint.patch patches/mighty_avoidance_horizon_guard.patch /tmp/
+COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_onboard_vehicle_profile.patch patches/mighty_lidar_point_cloud_topic_arg.patch patches/mighty_static_tf_fix.patch patches/mighty_static_tf_namespace_fix.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_force_goal_z.patch patches/mighty_headless_yaw_fix.patch patches/mighty_local_frame_only.patch patches/mighty_avoidance_tuning.patch patches/mighty_replan_failure_cap.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_z_range_narrow.patch patches/mighty_traveling_yaw_zero_dist_guard.patch patches/mighty_enable_thrust_constraint.patch patches/mighty_avoidance_horizon_guard.patch patches/mighty_goal_overshoot_tuning.patch /tmp/
 RUN cd /opt/mighty_ws/src/mighty \
     && (git apply --check /tmp/mighty_lidar_frame_id.patch && git apply /tmp/mighty_lidar_frame_id.patch \
         || echo "!! mighty_lidar_frame_id.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
@@ -342,7 +342,9 @@ RUN cd /opt/mighty_ws/src/mighty \
     && (git apply --check /tmp/mighty_enable_thrust_constraint.patch && git apply /tmp/mighty_enable_thrust_constraint.patch \
         || echo "!! mighty_enable_thrust_constraint.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!") \
     && (git apply --check /tmp/mighty_avoidance_horizon_guard.patch && git apply /tmp/mighty_avoidance_horizon_guard.patch \
-        || echo "!! mighty_avoidance_horizon_guard.patch 未能自动应用，需人工核对后手动改 src/mighty/lbfgs_solver.cpp !!")
+        || echo "!! mighty_avoidance_horizon_guard.patch 未能自动应用，需人工核对后手动改 src/mighty/lbfgs_solver.cpp !!") \
+    && (git apply --check /tmp/mighty_goal_overshoot_tuning.patch && git apply /tmp/mighty_goal_overshoot_tuning.patch \
+        || echo "!! mighty_goal_overshoot_tuning.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!")
 
 # acl-mapping是一个git仓库，global_mapper_ros只是它下面的一个子目录
 # （不是独立的git repo，跟"mighty"那个repo结构不一样）——patch的cwd必须是
