@@ -1,9 +1,51 @@
 diff --git a/rviz/multi_mighty.rviz b/rviz/multi_mighty.rviz
-index 19cb0a3..d894058 100644
+index 19cb0a3..1986999 100644
 --- a/rviz/multi_mighty.rviz
 +++ b/rviz/multi_mighty.rviz
-@@ -60,22 +60,6 @@ Visualization Manager:
+@@ -4,12 +4,11 @@ Panels:
+     Name: Displays
+     Property Tree Widget:
+       Expanded:
+-        - /Benchmarking1/Trajectories1/Namespaces1
+         - /NX011/Planning1/NX01 Traj1/Topic1
+         - /NX011/Mapping1/NX01 D435 PointCloud1/Topic1
+         - /NX011/Mapping1/NX01 Lidar PointCloud1/Topic1
+-      Splitter Ratio: 0.5
+-    Tree Height: 1157
++      Splitter Ratio: 0.7445109486579895
++    Tree Height: 1037
+   - Class: rviz_common/Selection
+     Name: Selection
+   - Class: rviz_common/Tool Properties
+@@ -27,7 +26,7 @@ Panels:
+     Experimental: false
+     Name: Time
+     SyncMode: 0
+-    SyncSource: Simulation Global Map
++    SyncSource: NX01 ACL Map Occupied
+ Visualization Manager:
+   Class: ""
+   Displays:
+@@ -56,167 +55,76 @@ Visualization Manager:
+           Frame Timeout: 15
+           Frames:
+             All Enabled: false
++            NX01/NX01_livox:
++              Value: false
+             NX01/base_link:
                Value: true
++            NX01/imu:
++              Value: false
++            NX01/init_pose:
++              Value: false
++            NX01/lidar:
++              Value: false
++            NX01/map:
++              Value: false
++            NX01/odom:
++              Value: false
++            NX02/NX02_livox:
++              Value: false
              NX02/base_link:
                Value: true
 -            NX03/base_link:
@@ -22,13 +64,44 @@ index 19cb0a3..d894058 100644
 -              Value: true
 -            NX10/base_link:
 -              Value: true
++            NX02/imu:
++              Value: false
++            NX02/init_pose:
++              Value: false
++            NX02/lidar:
++              Value: false
++            NX02/map:
++              Value: false
++            NX02/odom:
++              Value: false
++            base_link:
++              Value: false
++            base_link_frd:
++              Value: false
              map:
                Value: false
++            map_ned:
++              Value: false
++            odom:
++              Value: false
++            odom_ned:
++              Value: false
++            world:
++              Value: false
++            world_mocap:
++              Value: false
            Marker Scale: 5
-@@ -89,22 +73,6 @@ Visualization Manager:
-                 {}
-               NX02/base_link:
-                 {}
+           Name: TF
+           Show Arrows: false
+           Show Axes: true
+-          Show Names: false
++          Show Names: true
+           Tree:
+-            map:
+-              NX01/base_link:
+-                {}
+-              NX02/base_link:
+-                {}
 -              NX03/base_link:
 -                {}
 -              NX04/base_link:
@@ -45,19 +118,187 @@ index 19cb0a3..d894058 100644
 -                {}
 -              NX10/base_link:
 -                {}
++            NX01/map:
++              NX01/odom:
++                NX01/base_link:
++                  NX01/imu:
++                    {}
++                  NX01/lidar:
++                    NX01/NX01_livox:
++                      {}
++              NX02/map:
++                NX02/odom:
++                  NX02/base_link:
++                    NX02/imu:
++                      {}
++                    NX02/lidar:
++                      NX02/NX02_livox:
++                        {}
            Update Interval: 0
            Value: true
-         - Class: rviz_default_plugins/Marker
-@@ -453,7 +421,7 @@ Visualization Manager:
+-        - Class: rviz_default_plugins/Marker
+-          Enabled: true
+-          Name: Formation Edges
+-          Namespaces:
+-            {}
+-          Topic:
+-            Depth: 5
+-            Durability Policy: Volatile
+-            Filter size: 10
+-            History Policy: Keep Last
+-            Reliability Policy: Best Effort
+-            Value: /formation_viz
+-          Value: true
+-        - Class: rviz_default_plugins/MarkerArray
+-          Enabled: true
+-          Name: Dynamic Obstacles GT
+-          Namespaces:
+-            {}
+-          Topic:
+-            Depth: 5
+-            Durability Policy: Volatile
+-            History Policy: Keep Last
+-            Reliability Policy: Best Effort
+-            Value: /shapes_dynamic_mesh
+-          Value: true
+-        - Alpha: 1
+-          Autocompute Intensity Bounds: true
+-          Autocompute Value Bounds:
+-            Max Value: 2.9600000381469727
+-            Min Value: -1.940000057220459
+-            Value: true
+-          Axis: Z
+-          Channel Name: intensity
+-          Class: rviz_default_plugins/PointCloud2
+-          Color: 153; 193; 241
+-          Color Transformer: FlatColor
+-          Decay Time: 0
+-          Enabled: true
+-          Invert Rainbow: false
+-          Max Color: 255; 255; 255
+-          Max Intensity: 4096
+-          Min Color: 0; 0; 0
+-          Min Intensity: 0
+-          Name: Simulation Global Map
+-          Position Transformer: XYZ
+-          Selectable: true
+-          Size (Pixels): 3
+-          Size (m): 0.05000000074505806
+-          Style: Flat Squares
+-          Topic:
+-            Depth: 5
+-            Durability Policy: Volatile
+-            Filter size: 10
+-            History Policy: Keep Last
+-            Reliability Policy: Best Effort
+-            Value: /map_generator/global_cloud
+-          Use Fixed Frame: true
+-          Use rainbow: true
+-          Value: true
+       Enabled: true
+       Name: Common
+-    - Class: rviz_common/Group
+-      Displays:
+-        - Class: rviz_default_plugins/MarkerArray
+-          Enabled: true
+-          Name: Trajectories
+-          Namespaces:
+-            {}
+-          Topic:
+-            Depth: 5
+-            Durability Policy: Volatile
+-            History Policy: Keep Last
+-            Reliability Policy: Best Effort
+-            Value: /local_traj_overlay
+-          Value: true
+-      Enabled: true
+-      Name: Benchmarking
+-    - Class: rviz_common/Group
+-      Displays:
+-        - Class: rviz_default_plugins/MarkerArray
+-          Enabled: true
+-          Name: SFC Debug Markers
+-          Namespaces:
+-            {}
+-          Topic:
+-            Depth: 5
+-            Durability Policy: Volatile
+-            History Policy: Keep Last
+-            Reliability Policy: Best Effort
+-            Value: /mighty/temporal_test_markers
+-          Value: true
+-        - Alpha: 0.20000000298023224
+-          BoundColor: 255; 0; 0
+-          Class: decomp_rviz_plugins/PolyhedronArray
+-          Enabled: false
+-          MeshColor: 0; 170; 255
+-          Name: "temporal SFC "
+-          Scale: 0.10000000149011612
+-          State: Mesh
+-          Topic:
+-            Depth: 5
+-            Durability Policy: Volatile
+-            History Policy: Keep Last
+-            Reliability Policy: Best Effort
+-            Value: /mighty/poly_time_layer
+-          Value: false
+-          VsColor: 0; 255; 0
+-          VsScale: 1
+-      Enabled: true
+-      Name: Temporal SFC Debug
+     - Class: rviz_common/Group
+       Displays:
+         - Class: rviz_common/Group
+@@ -299,7 +207,7 @@ Visualization Manager:
+               Enabled: true
+               Name: NX01 Traj
+               Namespaces:
+-                state_vec: true
++                {}
+               Topic:
+                 Depth: 5
+                 Durability Policy: Volatile
+@@ -428,7 +336,7 @@ Visualization Manager:
+               Name: NX01 D435 PointCloud
+               Position Transformer: XYZ
+               Selectable: true
+-              Size (Pixels): 1
++              Size (Pixels): 3
+               Size (m): 0.10000000149011612
+               Style: Points
+               Topic:
+@@ -444,16 +352,16 @@ Visualization Manager:
+             - Alpha: 0.10000000149011612
+               Autocompute Intensity Bounds: false
+               Autocompute Value Bounds:
+-                Max Value: 344.9466247558594
+-                Min Value: 1.7602663040161133
++                Max Value: 4.901299953460693
++                Min Value: -0.06078782677650452
+                 Value: true
+               Axis: Z
+               Channel Name: z
+               Class: rviz_default_plugins/PointCloud2
                Color: 46; 194; 126
-               Color Transformer: Intensity
-               Decay Time: 9999
+-              Color Transformer: Intensity
+-              Decay Time: 9999
 -              Enabled: false
++              Color Transformer: AxisColor
++              Decay Time: 0
 +              Enabled: true
                Invert Rainbow: false
                Max Color: 255; 255; 255
                Max Intensity: 4096
-@@ -474,7 +442,7 @@ Visualization Manager:
+@@ -462,7 +370,7 @@ Visualization Manager:
+               Name: NX01 Lidar PointCloud
+               Position Transformer: XYZ
+               Selectable: true
+-              Size (Pixels): 1.5
++              Size (Pixels): 3
+               Size (m): 0.10000000149011612
+               Style: Points
+               Topic:
+@@ -474,7 +382,7 @@ Visualization Manager:
                  Value: /NX01/mid360_PointCloud2
                Use Fixed Frame: true
                Use rainbow: true
@@ -66,16 +307,288 @@ index 19cb0a3..d894058 100644
              - Alpha: 1
                Autocompute Intensity Bounds: true
                Autocompute Value Bounds:
-@@ -1126,7 +1094,7 @@ Visualization Manager:
-               Color: 46; 194; 126
-               Color Transformer: Intensity
-               Decay Time: 9999
+@@ -555,7 +463,7 @@ Visualization Manager:
+               Color: 246; 97; 81
+               Color Transformer: FlatColor
+               Decay Time: 0
 -              Enabled: false
 +              Enabled: true
                Invert Rainbow: false
                Max Color: 255; 255; 255
                Max Intensity: 4096
-@@ -1147,7 +1115,7 @@ Visualization Manager:
+@@ -576,7 +484,7 @@ Visualization Manager:
+                 Value: /NX01/occupancy_grid
+               Use Fixed Frame: true
+               Use rainbow: true
+-              Value: false
++              Value: true
+             - Alpha: 1
+               Autocompute Intensity Bounds: true
+               Autocompute Value Bounds:
+@@ -681,213 +589,6 @@ Visualization Manager:
+               Value: false
+           Enabled: true
+           Name: Mapping
+-        - Class: rviz_common/Group
+-          Displays:
+-            - Alpha: 0.699999988079071
+-              Class: rviz_default_plugins/Map
+-              Color Scheme: map
+-              Draw Behind: true
+-              Enabled: true
+-              Name: NX01 2D Occ from ACL Mapper
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/occ_2d_topic
+-              Update Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/occ_2d_topic_updates
+-              Use Timestamp: false
+-              Value: true
+-            - Alpha: 0.800000011920929
+-              Autocompute Intensity Bounds: true
+-              Autocompute Value Bounds:
+-                Max Value: 10
+-                Min Value: -10
+-                Value: true
+-              Axis: Z
+-              Channel Name: intensity
+-              Class: rviz_default_plugins/PointCloud2
+-              Color: 255; 170; 0
+-              Color Transformer: FlatColor
+-              Decay Time: 0
+-              Enabled: false
+-              Invert Rainbow: false
+-              Max Color: 255; 255; 255
+-              Max Intensity: 4096
+-              Min Color: 0; 0; 0
+-              Min Intensity: 0
+-              Name: NX01 2D Occupied Grid
+-              Position Transformer: XYZ
+-              Selectable: true
+-              Size (Pixels): 5
+-              Size (m): 0.10000000149011612
+-              Style: Flat Squares
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/ground_2d_occupied
+-              Use Fixed Frame: true
+-              Use rainbow: false
+-              Value: false
+-            - Alpha: 1
+-              Autocompute Intensity Bounds: true
+-              Autocompute Value Bounds:
+-                Max Value: 10
+-                Min Value: -10
+-                Value: true
+-              Axis: Z
+-              Channel Name: intensity
+-              Class: rviz_default_plugins/PointCloud2
+-              Color: 255; 255; 255
+-              Color Transformer: Intensity
+-              Decay Time: 0
+-              Enabled: false
+-              Invert Rainbow: false
+-              Max Color: 255; 255; 255
+-              Max Intensity: 5
+-              Min Color: 0; 0; 0
+-              Min Intensity: 0.055728036910295486
+-              Name: NX01 2D Ground Heat
+-              Position Transformer: XYZ
+-              Selectable: true
+-              Size (Pixels): 3
+-              Size (m): 0.10000000149011612
+-              Style: Flat Squares
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/ground_2d_heat
+-              Use Fixed Frame: true
+-              Use rainbow: true
+-              Value: false
+-            - Alpha: 0.699999988079071
+-              Class: rviz_default_plugins/Map
+-              Color Scheme: costmap
+-              Draw Behind: true
+-              Enabled: true
+-              Name: NX01 2D ESDF
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/esdf_2d_topic
+-              Update Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/esdf_2d_topic_updates
+-              Use Timestamp: false
+-              Value: true
+-          Enabled: false
+-          Name: Ground 2D
+-        - Class: rviz_common/Group
+-          Displays:
+-            - Class: rviz_default_plugins/Marker
+-              Enabled: true
+-              Name: NX01 Vel Text
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/vel_text
+-              Value: true
+-            - Class: rviz_default_plugins/Marker
+-              Enabled: false
+-              Name: NX01 FOV
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/fov
+-              Value: false
+-            - Class: rviz_default_plugins/Marker
+-              Enabled: true
+-              Name: NX01 Drone marker
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/drone_marker
+-              Value: true
+-            - Class: rviz_default_plugins/MarkerArray
+-              Enabled: true
+-              Name: NX01 tracked obstacles
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/tracked_obstacles
+-              Value: true
+-            - Class: rviz_default_plugins/MarkerArray
+-              Enabled: true
+-              Name: NX01 Cluster Bbox
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/cluster_bounding_boxes
+-              Value: true
+-            - Class: rviz_default_plugins/MarkerArray
+-              Enabled: true
+-              Name: NX01 Dyn Obst Unc Sphere
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/uncertainty_spheres
+-              Value: true
+-            - Class: rviz_default_plugins/Image
+-              Enabled: false
+-              Max Value: 1
+-              Median window: 5
+-              Min Value: 0
+-              Name: NX01 Front Camera
+-              Normalize Range: true
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX01/d435/color/image_raw
+-              Value: false
+-          Enabled: false
+-          Name: Others
+       Enabled: true
+       Name: NX01
+     - Class: rviz_common/Group
+@@ -972,7 +673,7 @@ Visualization Manager:
+               Enabled: true
+               Name: NX02 Traj
+               Namespaces:
+-                state_vec: true
++                {}
+               Topic:
+                 Depth: 5
+                 Durability Policy: Volatile
+@@ -1101,7 +802,7 @@ Visualization Manager:
+               Name: NX02 D435 PointCloud
+               Position Transformer: XYZ
+               Selectable: true
+-              Size (Pixels): 1
++              Size (Pixels): 3
+               Size (m): 0.10000000149011612
+               Style: Points
+               Topic:
+@@ -1117,16 +818,16 @@ Visualization Manager:
+             - Alpha: 0.10000000149011612
+               Autocompute Intensity Bounds: false
+               Autocompute Value Bounds:
+-                Max Value: 344.9466247558594
+-                Min Value: 1.7602663040161133
++                Max Value: 4.898426055908203
++                Min Value: -0.060226816684007645
+                 Value: true
+               Axis: Z
+               Channel Name: z
+               Class: rviz_default_plugins/PointCloud2
+               Color: 46; 194; 126
+-              Color Transformer: Intensity
+-              Decay Time: 9999
+-              Enabled: false
++              Color Transformer: AxisColor
++              Decay Time: 0
++              Enabled: true
+               Invert Rainbow: false
+               Max Color: 255; 255; 255
+               Max Intensity: 4096
+@@ -1135,7 +836,7 @@ Visualization Manager:
+               Name: NX02 Lidar PointCloud
+               Position Transformer: XYZ
+               Selectable: true
+-              Size (Pixels): 1.5
++              Size (Pixels): 3
+               Size (m): 0.10000000149011612
+               Style: Points
+               Topic:
+@@ -1147,7 +848,7 @@ Visualization Manager:
                  Value: /NX02/mid360_PointCloud2
                Use Fixed Frame: true
                Use rainbow: true
@@ -84,10 +597,237 @@ index 19cb0a3..d894058 100644
              - Alpha: 1
                Autocompute Intensity Bounds: true
                Autocompute Value Bounds:
-@@ -1563,5394 +1531,10 @@ Visualization Manager:
-           Name: Others
-       Enabled: true
-       Name: NX02
+@@ -1228,7 +929,7 @@ Visualization Manager:
+               Color: 246; 97; 81
+               Color Transformer: FlatColor
+               Decay Time: 0
+-              Enabled: false
++              Enabled: true
+               Invert Rainbow: false
+               Max Color: 255; 255; 255
+               Max Intensity: 4096
+@@ -1249,7 +950,7 @@ Visualization Manager:
+                 Value: /NX02/occupancy_grid
+               Use Fixed Frame: true
+               Use rainbow: true
+-              Value: false
++              Value: true
+             - Alpha: 1
+               Autocompute Intensity Bounds: true
+               Autocompute Value Bounds:
+@@ -1354,5603 +1055,12 @@ Visualization Manager:
+               Value: false
+           Enabled: true
+           Name: Mapping
+-        - Class: rviz_common/Group
+-          Displays:
+-            - Alpha: 0.699999988079071
+-              Class: rviz_default_plugins/Map
+-              Color Scheme: map
+-              Draw Behind: true
+-              Enabled: true
+-              Name: NX02 2D Occ from ACL Mapper
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/occ_2d_topic
+-              Update Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/occ_2d_topic_updates
+-              Use Timestamp: false
+-              Value: true
+-            - Alpha: 0.800000011920929
+-              Autocompute Intensity Bounds: true
+-              Autocompute Value Bounds:
+-                Max Value: 10
+-                Min Value: -10
+-                Value: true
+-              Axis: Z
+-              Channel Name: intensity
+-              Class: rviz_default_plugins/PointCloud2
+-              Color: 255; 170; 0
+-              Color Transformer: FlatColor
+-              Decay Time: 0
+-              Enabled: false
+-              Invert Rainbow: false
+-              Max Color: 255; 255; 255
+-              Max Intensity: 4096
+-              Min Color: 0; 0; 0
+-              Min Intensity: 0
+-              Name: NX02 2D Occupied Grid
+-              Position Transformer: XYZ
+-              Selectable: true
+-              Size (Pixels): 5
+-              Size (m): 0.10000000149011612
+-              Style: Flat Squares
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/ground_2d_occupied
+-              Use Fixed Frame: true
+-              Use rainbow: false
+-              Value: false
+-            - Alpha: 1
+-              Autocompute Intensity Bounds: true
+-              Autocompute Value Bounds:
+-                Max Value: 10
+-                Min Value: -10
+-                Value: true
+-              Axis: Z
+-              Channel Name: intensity
+-              Class: rviz_default_plugins/PointCloud2
+-              Color: 255; 255; 255
+-              Color Transformer: Intensity
+-              Decay Time: 0
+-              Enabled: false
+-              Invert Rainbow: false
+-              Max Color: 255; 255; 255
+-              Max Intensity: 5
+-              Min Color: 0; 0; 0
+-              Min Intensity: 0.055728036910295486
+-              Name: NX02 2D Ground Heat
+-              Position Transformer: XYZ
+-              Selectable: true
+-              Size (Pixels): 3
+-              Size (m): 0.10000000149011612
+-              Style: Flat Squares
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/ground_2d_heat
+-              Use Fixed Frame: true
+-              Use rainbow: true
+-              Value: false
+-            - Alpha: 0.699999988079071
+-              Class: rviz_default_plugins/Map
+-              Color Scheme: costmap
+-              Draw Behind: true
+-              Enabled: true
+-              Name: NX02 2D ESDF
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/esdf_2d_topic
+-              Update Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/esdf_2d_topic_updates
+-              Use Timestamp: false
+-              Value: true
+-          Enabled: false
+-          Name: Ground 2D
+-        - Class: rviz_common/Group
+-          Displays:
+-            - Class: rviz_default_plugins/Marker
+-              Enabled: true
+-              Name: NX02 Vel Text
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/vel_text
+-              Value: true
+-            - Class: rviz_default_plugins/Marker
+-              Enabled: false
+-              Name: NX02 FOV
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/fov
+-              Value: false
+-            - Class: rviz_default_plugins/Marker
+-              Enabled: true
+-              Name: NX02 Drone marker
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                Filter size: 10
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/drone_marker
+-              Value: true
+-            - Class: rviz_default_plugins/MarkerArray
+-              Enabled: true
+-              Name: NX02 tracked obstacles
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/tracked_obstacles
+-              Value: true
+-            - Class: rviz_default_plugins/MarkerArray
+-              Enabled: true
+-              Name: NX02 Cluster Bbox
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/cluster_bounding_boxes
+-              Value: true
+-            - Class: rviz_default_plugins/MarkerArray
+-              Enabled: true
+-              Name: NX02 Dyn Obst Unc Sphere
+-              Namespaces:
+-                {}
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/uncertainty_spheres
+-              Value: true
+-            - Class: rviz_default_plugins/Image
+-              Enabled: false
+-              Max Value: 1
+-              Median window: 5
+-              Min Value: 0
+-              Name: NX02 Front Camera
+-              Normalize Range: true
+-              Topic:
+-                Depth: 5
+-                Durability Policy: Volatile
+-                History Policy: Keep Last
+-                Reliability Policy: Best Effort
+-                Value: /NX02/d435/color/image_raw
+-              Value: false
+-          Enabled: false
+-          Name: Others
+-      Enabled: true
+-      Name: NX02
 -    - Class: rviz_common/Group
 -      Displays:
 -        - Class: rviz_common/Group
@@ -5470,8 +6210,9 @@ index 19cb0a3..d894058 100644
 -              Value: false
 -          Enabled: false
 -          Name: Others
--      Enabled: true
+       Enabled: true
 -      Name: NX10
++      Name: NX02
    Enabled: true
    Global Options:
      Background Color: 222; 221; 218
@@ -5480,10 +6221,37 @@ index 19cb0a3..d894058 100644
      Frame Rate: 30
    Name: root
    Tools:
-@@ -7023,22 +1607,6 @@ Window Geometry:
-     collapsed: false
-   NX02 Front Camera:
-     collapsed: false
+@@ -6978,6 +1088,13 @@ Visualization Manager:
+         History Policy: Keep Last
+         Reliability Policy: Reliable
+         Value: /NX01/term_goal
++    - Class: rviz_default_plugins/SetGoal
++      Topic:
++        Depth: 5
++        Durability Policy: Volatile
++        History Policy: Keep Last
++        Reliability Policy: Reliable
++        Value: /NX02/term_goal
+     - Class: rviz_default_plugins/PublishPoint
+       Single click: true
+       Topic:
+@@ -6993,7 +1110,7 @@ Visualization Manager:
+   Views:
+     Current:
+       Class: rviz_default_plugins/Orbit
+-      Distance: 34.264408111572266
++      Distance: 29.132274627685547
+       Enable Stereo Rendering:
+         Stereo Eye Separation: 0.05999999865889549
+         Stereo Focal Distance: 1
+@@ -7019,27 +1136,7 @@ Window Geometry:
+   Height: 1376
+   Hide Left Dock: false
+   Hide Right Dock: true
+-  NX01 Front Camera:
+-    collapsed: false
+-  NX02 Front Camera:
+-    collapsed: false
 -  NX03 Front Camera:
 -    collapsed: false
 -  NX04 Front Camera:
@@ -5500,6 +6268,16 @@ index 19cb0a3..d894058 100644
 -    collapsed: false
 -  NX10 Front Camera:
 -    collapsed: false
-   QMainWindow State: 000000ff00000000fd0000000400000000000001f7000004c2fc0200000046fb0000001200530065006c0065006300740069006f006e000000003d0000008f0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003d000004c2000000c900fffffffb0000001e004e005800300031002000660072006f006e00740020007600690065007701000002a1000003180000000000000000fb0000001e004e005800300032002000660072006f006e00740020007600690065007700000005e7000001e80000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000017c0000015d0000002800fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001e004e00580030003100200059004f004c004f00200049006d00610067006500000003d8000001e10000000000000000fb0000000a0049006d00610067006501000007810000004e0000000000000000fb0000000a0049006d00610067006500000004310000003f0000000000000000fb000000320054003200360035002000460072006f006e007400200046006900730068006500790065002000430061006d00650072006100000004e7000002170000000000000000fb0000000a0049006d00610067006500000006ac0000013e0000000000000000fb0000001800460072006f006e0074002000430061006d00650072006101000004fb000002ef0000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d00650072006100000002a8000000c90000002800fffffffb00000022004e005800300033002000460072006f006e0074002000430061006d0065007200610000000327000000fa0000002800fffffffb00000022004e005800300033002000460072006f006e0074002000430061006d00650072006100000006fb000000d40000000000000000fb0000001e004e005800300033002000660072006f006e0074002000760069006500770000000222000001e20000000000000000fb0000000a0049006d006100670065010000067e000001510000000000000000fb0000000a0049006d00610067006501000006a00000012f0000000000000000fb0000001e004e00580030003500200059004f004c004f00200049006d006100670065000000025b000000ab0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000003ed000001120000002800fffffffb0000001e004e005800300035002000660072006f006e00740020007600690065007700000002c5000002790000000000000000fb0000001e004e005800300034002000660072006f006e0074002000760069006500770000000402000003cd0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000041e000001330000000000000000fb00000022004e005800300035002000460072006f006e0074002000430061006d00650072006100000004de0000017a0000002800fffffffb00000022004e005800300035002000460072006f006e0074002000430061006d0065007200610000000602000001cd0000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d0061006700650000000429000000d60000000000000000fb0000001e004e00580030003300200059004f004c004f00200049006d00610067006500000003c50000013a0000000000000000fb0000001e004e00580030003100200059004f004c004f00200049006d00610067006501000006e9000001010000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d006100670065000000040c000000c60000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d006500720061000000047d000000fd0000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d00610067006500000005220000014a0000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d0065007200610000000624000001c60000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000373000000b00000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000403000000fc0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000001ae0000004d0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d00610067006500000002260000007f0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000256000000aa0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000029e000000ec0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000313000001580000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000003ef0000022a0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000348000000860000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000399000000af0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000040f000000ed0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000004cc0000014d0000000000000000fb0000001e004e00580030003700200059004f004c004f00200049006d006100670065000000024f0000005c0000000000000000fb00000022004e005800300037002000460072006f006e0074002000430061006d0065007200610000000275000000620000002800fffffffb00000022004e005800300039002000460072006f006e0074002000430061006d00650072006100000002a00000006a0000002800fffffffb0000001e004e00580030003900200059004f004c004f00200049006d00610067006500000002d2000000740000000000000000fb0000001e004e00580031003000200059004f004c004f00200049006d006100670065000000030e0000007c0000000000000000fb00000022004e005800310030002000460072006f006e0074002000430061006d0065007200610000000353000000890000002800fffffffb00000022004e005800300038002000460072006f006e0074002000430061006d00650072006100000003a7000000990000002800fffffffb0000001e004e00580030003800200059004f004c004f00200049006d006100670065000000040f000000ab0000000000000000fb0000001e004e00580030003600200059004f004c004f00200049006d0061006700650000000492000000bd0000000000000000fb00000022004e005800300036002000460072006f006e0074002000430061006d0065007200610000000538000000e10000002800fffffffb0000000a0049006d0061006700650000000704000000e60000000000000000fb0000000a0049006d0061006700650000000547000002a30000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001ff000000cc0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000025d0000012c0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d0065007200610000000313000001ec0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001ae0000004d0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001c9000000670000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001f00000008a0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000022b000000be0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000028a000001170000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000033d000001c200000000000000000000000100000182000004c2fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d000004c2000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000006950000003efc0100000002fb0000000800540069006d0065010000000000000695000002fb00fffffffb0000000800540069006d0065010000000000000450000000000000000000000498000004c200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+-  QMainWindow State: 000000ff00000000fd0000000400000000000001f7000004c2fc0200000046fb0000001200530065006c0065006300740069006f006e000000003d0000008f0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003d000004c2000000c900fffffffb0000001e004e005800300031002000660072006f006e00740020007600690065007701000002a1000003180000000000000000fb0000001e004e005800300032002000660072006f006e00740020007600690065007700000005e7000001e80000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000017c0000015d0000002800fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001e004e00580030003100200059004f004c004f00200049006d00610067006500000003d8000001e10000000000000000fb0000000a0049006d00610067006501000007810000004e0000000000000000fb0000000a0049006d00610067006500000004310000003f0000000000000000fb000000320054003200360035002000460072006f006e007400200046006900730068006500790065002000430061006d00650072006100000004e7000002170000000000000000fb0000000a0049006d00610067006500000006ac0000013e0000000000000000fb0000001800460072006f006e0074002000430061006d00650072006101000004fb000002ef0000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d00650072006100000002a8000000c90000002800fffffffb00000022004e005800300033002000460072006f006e0074002000430061006d0065007200610000000327000000fa0000002800fffffffb00000022004e005800300033002000460072006f006e0074002000430061006d00650072006100000006fb000000d40000000000000000fb0000001e004e005800300033002000660072006f006e0074002000760069006500770000000222000001e20000000000000000fb0000000a0049006d006100670065010000067e000001510000000000000000fb0000000a0049006d00610067006501000006a00000012f0000000000000000fb0000001e004e00580030003500200059004f004c004f00200049006d006100670065000000025b000000ab0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000003ed000001120000002800fffffffb0000001e004e005800300035002000660072006f006e00740020007600690065007700000002c5000002790000000000000000fb0000001e004e005800300034002000660072006f006e0074002000760069006500770000000402000003cd0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000041e000001330000000000000000fb00000022004e005800300035002000460072006f006e0074002000430061006d00650072006100000004de0000017a0000002800fffffffb00000022004e005800300035002000460072006f006e0074002000430061006d0065007200610000000602000001cd0000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d0061006700650000000429000000d60000000000000000fb0000001e004e00580030003300200059004f004c004f00200049006d00610067006500000003c50000013a0000000000000000fb0000001e004e00580030003100200059004f004c004f00200049006d00610067006501000006e9000001010000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d006100670065000000040c000000c60000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d006500720061000000047d000000fd0000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d00610067006500000005220000014a0000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d0065007200610000000624000001c60000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000373000000b00000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000403000000fc0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000001ae0000004d0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d00610067006500000002260000007f0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000256000000aa0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000029e000000ec0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000313000001580000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000003ef0000022a0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000348000000860000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000399000000af0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000040f000000ed0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000004cc0000014d0000000000000000fb0000001e004e00580030003700200059004f004c004f00200049006d006100670065000000024f0000005c0000000000000000fb00000022004e005800300037002000460072006f006e0074002000430061006d0065007200610000000275000000620000002800fffffffb00000022004e005800300039002000460072006f006e0074002000430061006d00650072006100000002a00000006a0000002800fffffffb0000001e004e00580030003900200059004f004c004f00200049006d00610067006500000002d2000000740000000000000000fb0000001e004e00580031003000200059004f004c004f00200049006d006100670065000000030e0000007c0000000000000000fb00000022004e005800310030002000460072006f006e0074002000430061006d0065007200610000000353000000890000002800fffffffb00000022004e005800300038002000460072006f006e0074002000430061006d00650072006100000003a7000000990000002800fffffffb0000001e004e00580030003800200059004f004c004f00200049006d006100670065000000040f000000ab0000000000000000fb0000001e004e00580030003600200059004f004c004f00200049006d0061006700650000000492000000bd0000000000000000fb00000022004e005800300036002000460072006f006e0074002000430061006d0065007200610000000538000000e10000002800fffffffb0000000a0049006d0061006700650000000704000000e60000000000000000fb0000000a0049006d0061006700650000000547000002a30000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001ff000000cc0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000025d0000012c0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d0065007200610000000313000001ec0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001ae0000004d0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001c9000000670000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001f00000008a0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000022b000000be0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000028a000001170000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000033d000001c200000000000000000000000100000182000004c2fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d000004c2000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000006950000003efc0100000002fb0000000800540069006d0065010000000000000695000002fb00fffffffb0000000800540069006d0065010000000000000450000000000000000000000498000004c200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
++  QMainWindow State: 000000ff00000000fd0000000400000000000001f700000471fc0200000046fb0000001200530065006c0065006300740069006f006e000000003d0000008f000000ab00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c0061007900730100000069000004710000017800fffffffb0000001e004e005800300031002000660072006f006e00740020007600690065007701000002a1000003180000000000000000fb0000001e004e005800300032002000660072006f006e00740020007600690065007700000005e7000001e80000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000017c0000015d0000000000000000fb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001e004e00580030003100200059004f004c004f00200049006d00610067006500000003d8000001e10000000000000000fb0000000a0049006d00610067006501000007810000004e0000000000000000fb0000000a0049006d00610067006500000004310000003f0000000000000000fb000000320054003200360035002000460072006f006e007400200046006900730068006500790065002000430061006d00650072006100000004e7000002170000000000000000fb0000000a0049006d00610067006500000006ac0000013e0000000000000000fb0000001800460072006f006e0074002000430061006d00650072006101000004fb000002ef0000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d00650072006100000002a8000000c90000000000000000fb00000022004e005800300033002000460072006f006e0074002000430061006d0065007200610000000327000000fa0000000000000000fb00000022004e005800300033002000460072006f006e0074002000430061006d00650072006100000006fb000000d40000000000000000fb0000001e004e005800300033002000660072006f006e0074002000760069006500770000000222000001e20000000000000000fb0000000a0049006d006100670065010000067e000001510000000000000000fb0000000a0049006d00610067006501000006a00000012f0000000000000000fb0000001e004e00580030003500200059004f004c004f00200049006d006100670065000000025b000000ab0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000003ed000001120000000000000000fb0000001e004e005800300035002000660072006f006e00740020007600690065007700000002c5000002790000000000000000fb0000001e004e005800300034002000660072006f006e0074002000760069006500770000000402000003cd0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000041e000001330000000000000000fb00000022004e005800300035002000460072006f006e0074002000430061006d00650072006100000004de0000017a0000000000000000fb00000022004e005800300035002000460072006f006e0074002000430061006d0065007200610000000602000001cd0000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d0061006700650000000429000000d60000000000000000fb0000001e004e00580030003300200059004f004c004f00200049006d00610067006500000003c50000013a0000000000000000fb0000001e004e00580030003100200059004f004c004f00200049006d00610067006501000006e9000001010000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d006100670065000000040c000000c60000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d006500720061000000047d000000fd0000000000000000fb0000001e004e00580030003200200059004f004c004f00200049006d00610067006500000005220000014a0000000000000000fb00000022004e005800300032002000460072006f006e0074002000430061006d0065007200610000000624000001c60000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000373000000b00000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000403000000fc0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000001ae0000004d0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d00610067006500000002260000007f0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000256000000aa0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000029e000000ec0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000313000001580000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000003ef0000022a0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d0065007200610000000348000000860000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d0061006700650000000399000000af0000000000000000fb0000001e004e00580030003400200059004f004c004f00200049006d006100670065000000040f000000ed0000000000000000fb00000022004e005800300034002000460072006f006e0074002000430061006d00650072006100000004cc0000014d0000000000000000fb0000001e004e00580030003700200059004f004c004f00200049006d006100670065000000024f0000005c0000000000000000fb00000022004e005800300037002000460072006f006e0074002000430061006d0065007200610000000275000000620000000000000000fb00000022004e005800300039002000460072006f006e0074002000430061006d00650072006100000002a00000006a0000000000000000fb0000001e004e00580030003900200059004f004c004f00200049006d00610067006500000002d2000000740000000000000000fb0000001e004e00580031003000200059004f004c004f00200049006d006100670065000000030e0000007c0000000000000000fb00000022004e005800310030002000460072006f006e0074002000430061006d0065007200610000000353000000890000000000000000fb00000022004e005800300038002000460072006f006e0074002000430061006d00650072006100000003a7000000990000000000000000fb0000001e004e00580030003800200059004f004c004f00200049006d006100670065000000040f000000ab0000000000000000fb0000001e004e00580030003600200059004f004c004f00200049006d0061006700650000000492000000bd0000000000000000fb00000022004e005800300036002000460072006f006e0074002000430061006d0065007200610000000538000000e10000000000000000fb0000000a0049006d0061006700650000000704000000e60000000000000000fb0000000a0049006d0061006700650000000547000002a30000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001ff000000cc0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000025d0000012c0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d0065007200610000000313000001ec0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001ae0000004d0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001c9000000670000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d00650072006100000001f00000008a0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000022b000000be0000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000028a000001170000000000000000fb00000022004e005800300031002000460072006f006e0074002000430061006d006500720061000000033d000001c200000000000000000000000100000182000004c2fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d000004c20000012300fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000069500000051fc0100000002fb0000000800540069006d00650100000000000006950000046000fffffffb0000000800540069006d00650100000000000004500000000000000000000004920000047100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
    Selection:
      collapsed: false
+   Time:
+@@ -7049,5 +1146,5 @@ Window Geometry:
+   Views:
+     collapsed: true
+   Width: 1685
+-  X: 5595
+-  Y: 336
++  X: 1087
++  Y: 420

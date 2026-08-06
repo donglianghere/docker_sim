@@ -4422,3 +4422,40 @@ Display默认`Enabled: true`，不需要改，如果被手滑关掉了在Display
 改动无关的既有失败，见前面章节）之外全部apply成功。改的是
 `Dockerfile.sim-world`（这个rviz文件只在sim-world镜像里用），需要
 重新build sim-world才生效。
+
+## 用户反馈"验证了这个配置，不合格，我做了很多改动都没保存下来"——只改一行远远不够，改成"整份保存用户实时配置"
+
+用户说的不是"再调几个display选项"，是在RViz GUI里做了大量调整之后，
+希望"以后都用这个配置"——之前只打了`Show Names: false→true`这一行，
+完全没覆盖到用户实际做的调整量级。
+
+**发现活的savepoint**：sim-world容器里`rviz2`进程本身已经不在跑了，
+但`/opt/mighty_ws/src/mighty/rviz/multi_mighty.rviz`这个文件的
+mtime比容器启动时间晚了几分钟——用户在GUI里做完调整后用RViz自己的
+"File → Save Config"存过一次，只是存的是**容器里的这份文件**，容器
+一销毁/重建就会跟着丢，这正是"我做了很多改动都没保存下来"的真正原因
+（改动其实一直在，只是没有持久化到`staging/`源码里、没进版本控制）。
+
+`docker cp`把这份文件从容器里取出来，跟pristine的
+`rviz/multi_mighty.rviz`一比：pristine原文件7053行，用户实时保存
+的这份只有1150行——用户删掉了大量默认模板里根本用不上的Display项
+（"SFC Whole"/"Subopt Trajs"/"Original Global Path"这些），做的是
+一次大幅简化，不是零散调几个开关。
+
+**处理方式**：没有再叠一个新的增量patch在原来5个rviz patch
+（`mighty_rviz_two_agents`/`mighty_rviz_nx02_setgoal`/
+`mighty_rviz_name_label`/`mighty_rviz_pointcloud_style`/
+`mighty_rviz_show_tf_names`，含刚打的那一行小改动）上面——这5个是
+按时间顺序各自独立、手写的增量diff，用户这次是用RViz自己的保存机制
+整份重新落盘，产出的文件在字段顺序/结构上已经和这条patch链假设的
+中间状态对不上了，继续摞增量patch只会越来越脆。改成**用户当前这份
+存档直接替换掉原来的5个patch**：删掉这5个文件，新增
+`mighty_rviz_final_config.patch`——一步到位，从pristine
+`multi_mighty.rviz`直接diff到用户这份实时保存的最终内容。**已验证**：
+删除+替换后，完整重放sim-world这条mighty patch链（含
+`mighty_disable_d435`这一个跟rviz无关的既有失败），最终产出的
+`rviz/multi_mighty.rviz`跟从容器里`docker cp`出来的那份逐字节对比
+完全一致。以后不管重新build多少次，产出的都是用户这份存档，不再
+依赖"5个patch按顺序都刚好套得上"这个越来越脆的假设。
+
+同样需要重新build sim-world才会在下次`docker compose up`里生效。
