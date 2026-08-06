@@ -4677,3 +4677,71 @@ entrypoint脚本是build时`COPY`进镜像的（`Dockerfile.flight-stack`），
 所以这次改动也需要重新build flight-stack才生效——单纯改
 `docker-compose.yml`里的数字、不重新build是不会生效的（entrypoint
 里生成runtime yaml的那段代码本身也得先被build进镜像）。
+
+## 用户问"mighty在多机飞行/规划上用了哪些技术，不完备的地方有哪些"——直接读代码给的详细拆解（非文档/论文推断）
+
+**两段式规划架构**：HGP（全局A*族搜索，`astar_heat`）→ 凸分解生成安全
+走廊(SFC)→局部L-BFGS连续轨迹优化。局部轨迹是分段五次Hermite样条
+（`spline_degree=5`，ground robot用三次），优化时转Bernstein/Bezier
+基求值（标准Hermite→Bezier闭式转换），**没有用MINVO基**。决策变量
+只有内部节点（起点/终点不是决策变量，直接写死常数，结构性硬约束）
++ 每段时长`T`（GCOPTER同款`τ↔T`光滑双射重参数化）——**时间不是
+先分配好再固定几何，是跟几何一起联合优化的**，`time_weight`乘
+`J_time=ΣT`就是"总用时越短越好"这项代价，这是"到达目标点超调"那次
+调`time_weight`真的有效的根本原因。
+
+**起点/终点速度加速度约束**：起点硬等式约束（当前"A点"——上一条
+已接受轨迹上未来某时刻的状态，不是原始里程计瞬时值——的位置/速度/
+加速度直接写死进`x0_/v0_/a0_`，L-BFGS物理上碰不到）。**终点更关键：
+不管处于什么状态，每一次replan终端速度/加速度都被硬钉成0**
+（`state`默认构造`vel/accel=Zero()`，全代码没有任何一处赋过非零
+值）——`GOAL_SEEN`状态切换真正改变的只是终端**位置**目标（`num_N`
+截断的中间点→真正的`G_term`），不是终端速度约束本身。结论：现在的
+边界条件结构完全不支持"以非零速度到达/掠过某点"，是个真实的能力
+缺口，不是没写全的边角情况。Ground robot起点策略不一样：跳过
+"A点"直接用当前里程计+速度强制清零。
+
+**多机避让**：完全去中心化、广播-信任式，`/trajs`各自广播`dynTraj`
+（含bbox），`getTrajs()`直接返回缓存，没有握手/优先级/协商/同步
+屏障（全代码grep确认没有`priority`/`agent_id`仲裁）。局部优化器
+`J_dyn`把僚机广播轨迹当已知动态障碍物，用固定标量半径`planner_Cw`
+（球形包络，不区分僚机实际尺寸）算避让代价——但HGP全局层反而是
+bbox-aware的（`msg.bbox/2 + drone_bbox/2`闵可夫斯基和喂给地图膨胀），
+**两层规划器对"僚机多大"建模精度不一致**。粗粒度`traj_lifetime`
+（7秒）整条轨迹过期和细粒度`getHorizon()`过期窗口检查是两回事、
+不能互相替代——本session修的`J_dyn`缺`getHorizon()`保护那个bug
+就是细粒度这层的漏洞。`dynTraj`的`Quintic`模式`eval`无边界钳制
+会无界外推，目前`/trajs`固定用Piecewise模式所以没触发，是潜伏
+风险。
+
+**不完备的地方（按重要性）**：
+1. 所有动力学限制（v_max/a_max/j_max/omega_max/tilt/thrust）全部
+   是软约束——优化器是裸的无约束L-BFGS，限制靠GCOPTER式C²光滑
+   hinge惩罚项，`dyn_constr_*_weight`权重决定实际enforce力度，
+   **没有任何数学保证不违反**。当前`bodyrate`/`tilt`权重是0.0，
+   等于没启用；`vel/acc/jerk`是1e+3认真enforce。
+2. **静态障碍物SFC containment也是软的，不是硬的**——最反直觉的
+   一条。MADER/FASTER一脉论文"走廊有效就理论保证碰不上静态障碍物"
+   这个卖点在这套实现里不成立：走廊只在生成初值时被硬性满足
+   （`replaceGlobalPathWithCorridorShortest`），优化过程中`J_stat`
+   是跟`J_dyn`一样的软惩罚，控制点完全可能被别的代价项推出走廊。
+3. 局部优化器机间避障用固定标量半径，忽略实际bbox（跟HGP层不
+   一致，见上）。
+4. 终端速度/加速度永远硬钉零，无法表达非零到达速度（见上）。
+5. `J_dyn`的`getHorizon()`过期广播轨迹问题本session已修（仿
+   `J_form`加guard），但`Piecewise`模式"冻结在窗口末端"是设计
+   使然没变，`Quintic`模式无界外推隐患还在（潜伏，未被触发）。
+6. 两处死代码：`computeQuinticCP()`跟`reconstruct()`实际用的
+   Hermite→Bezier转换不等价，没人调用但是潜伏地雷；
+   `evaluateObjectiveAndGradient`/`dJ_dyn_dz`（非Fused版）同样缺
+   `getHorizon()`保护，但确认调用链全被注释掉、是死代码，没有
+   修的必要。
+7. `FrontierManager`/`setFormationNeighbors()`显式标注非线程安全
+   契约，`generateLocalTrajectory()`用`std::async`多线程多初值
+   优化时靠"每线程各自new一个全新`SolverLBFGS`实例"规避，写法
+   本身没问题但是个容易被将来重构不小心破坏的脆弱不变量。
+
+一句话定性：这套架构是"经验上够好、算得快、能跑"的工程实现，不是
+"数学上可证明安全"的形式化方法——多机避让/动力学限制/静态避障
+理论上该是硬约束的地方，实现上全部退化成带权重的软惩罚项，安全
+边际本质靠调参数撑，不是算法结构本身保证的。
