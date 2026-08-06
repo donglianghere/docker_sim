@@ -1,0 +1,12 @@
+diff --git a/cfg/params.yaml b/cfg/params.yaml
+index c9ff880..96b7852 100755
+--- a/cfg/params.yaml
++++ b/cfg/params.yaml
+@@ -53,5 +53,5 @@
+     odom/geo/Kq: 4.0
+     odom/geo/Kab: 2.25
+     odom/geo/Kgb: 1.0
+-    odom/geo/abias_max: 5.0
+-    odom/geo/gbias_max: 0.5
++    odom/geo/abias_max: 0.3
++    odom/geo/gbias_max: 0.05

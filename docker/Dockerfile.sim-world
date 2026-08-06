@@ -1,0 +1,345 @@
+# ----------------------------------------------------------------------------
+# sim-world：仿真环境侧。经典Gazebo世界 + 双机PX4 v1.16 SITL + mighty的传感器/机体
+# xacro（Mid-360前倾30°+前视/下视相机） + UWB真值模拟节点。只跑一份容器实例。
+#
+# 前提：已经在宿主机上跑过 ../fetch_sources.sh，staging/ 下有全部源码。
+#
+# 构建：
+#   docker build --build-arg HTTP_PROXY=$http_proxy --build-arg HTTPS_PROXY=$https_proxy \
+#                 -f docker/Dockerfile.sim-world -t sim-world:latest ..
+#   (构建上下文用上一级目录，这样才能 COPY 到 staging/)
+# ----------------------------------------------------------------------------
+FROM mighty-base:humble
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+# 编译并发度：colcon/ninja/make 默认都会吃满 nproc，这台机器核数(32)远超内存(31G)，
+# sim-world 和 flight-stack 两个镜像又会被 docker compose build 并发构建，
+# 核数x核数 x 2镜像 的并发编译/链接直接把内存打爆、系统死机。用 BUILD_JOBS 统一收窄，
+# 按 "内存(GB)/2" 估算一个安全值，构建时可用 --build-arg BUILD_JOBS=N 覆盖默认值。
+ARG BUILD_JOBS=4
+ENV http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    DEBIAN_FRONTEND=noninteractive \
+    MAKEFLAGS=-j${BUILD_JOBS}
+
+# ============================================================
+# 1. PX4-Autopilot v1.16 + 经典Gazebo SITL 插件（源码已由宿主机预取，这里只 COPY）
+#    Tools/simulation/gazebo-classic/sitl_gazebo-classic 本身是PX4-Autopilot注册的
+#    git submodule，fetch_sources.sh 里 submodule update 时已经一并拉到位，
+#    随 PX4-Autopilot 整个目录一起COPY进来，不需要单独再COPY一次。
+# ============================================================
+COPY staging/PX4-Autopilot /opt/PX4-Autopilot
+
+# 第一次给PX4-Autopilot本身打patch（之前这个仓库全程没动过，保持"纯净官方源码"）——
+# iris这个airframe的MPC_THR_HOVER（悬停油门标定点）默认是PX4官方值0.5，隐含假设
+# 的质量(~1.44kg)跟这套仿真实际挂了mid360+IMU负载之后的真实质量(~1.935kg)对不上，
+# 实测确认这个偏差是"飞机悬停/巡航掉高度、最后趴地"这类问题的一个具体根因（见
+# README.md）。这个文件是运行时直接从磁盘读的（sim-world-entrypoint.sh里
+# `-d "$PWD/ROMFS/px4fmu_common"`），不参与编译，但还是放在编译之前打，跟其余
+# patch的应用时机保持一致。
+COPY patches/px4_iris_mpc_thr_hover.patch patches/px4_iris_mpc_yawrate_max.patch /tmp/
+RUN cd /opt/PX4-Autopilot \
+    && (git apply --check /tmp/px4_iris_mpc_thr_hover.patch && git apply /tmp/px4_iris_mpc_thr_hover.patch \
+        || echo "!! px4_iris_mpc_thr_hover.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris !!") \
+    && (git apply --check /tmp/px4_iris_mpc_yawrate_max.patch && git apply /tmp/px4_iris_mpc_yawrate_max.patch \
+        || echo "!! px4_iris_mpc_yawrate_max.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris !!")
+
+# rosdep/依赖装好之后再编译；PX4 自带的 ubuntu.sh 会装一批 python/apt 依赖，
+# 这一步仍然需要网络（apt/pip），所以留着代理，编译完再统一清理。
+#
+# --no-nuttx：跳过ARM/NuttX嵌入式工具链——那是给真实飞控板编译固件用的，
+#   我们只做SITL，用不上。
+# --no-sim-tools：故意跳过ubuntu.sh自己的"仿真依赖安装"这一段——因为这段代码
+#   在Ubuntu22.04上会自动装Gazebo Harmonic、并且主动卸载已装好的经典Gazebo
+#   （脚本里原话"Gazebo (Harmonic) will be installed / Earlier versions will
+#   be removed"），这会把 Dockerfile.base 里装好的经典Gazebo连根拔掉，跟我们
+#   整条链路要用经典Gazebo的决定直接冲突，必须跳过。
+#   代价是这段里其余跟Gazebo版本无关、但经典Gazebo插件自己也需要的依赖
+#   （GStreamer/OpenCV/protobuf等）会被一起跳过，所以已经把这些单独补进了
+#   Dockerfile.base的apt安装列表里，不需要在这里另外装。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    cd /opt/PX4-Autopilot \
+    && bash ./Tools/setup/ubuntu.sh --no-nuttx --no-sim-tools \
+    && DONT_RUN=1 make -j"${BUILD_JOBS}" px4_sitl_default gazebo-classic
+
+# ============================================================
+# 2. mighty.repos 全部依赖 + mighty 本体 + decomp_ws + livox_ws（源码已预取，COPY后编译）
+# ============================================================
+COPY staging/decomp_ws_src /opt/decomp_ws/src
+# decomp_rviz_plugins 的 package.xml 没有把 decomp_util 声明成依赖，colcon 不会
+# 自动把 decomp_util 的安装路径注入 CMAKE_PREFIX_PATH——光按顺序build不够，
+# 中间必须手动 source 一次 decomp_util 的 install/setup.bash 才能让后续
+# find_package(decomp_util) 找到 decomp_utilConfig.cmake。
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/decomp_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --packages-select decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && source /opt/decomp_ws/install/setup.bash \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+COPY staging/livox_ws_src /opt/livox_ws/src
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    cd /opt/livox_ws/src/Livox-SDK2 \
+        && mkdir -p build && cd build && cmake .. && make -j"${BUILD_JOBS}" && make install && ldconfig \
+    && source /opt/ros/humble/setup.bash \
+        && cd /opt/livox_ws/src/livox_ros_driver2 \
+        && bash build.sh humble
+
+COPY staging/mighty_ws_src /opt/mighty_ws/src
+COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_spawn_agent_launch.patch patches/mighty_hard_forest_camera.patch patches/mighty_forest_boundary_walls.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_simple_room_world.patch patches/mighty_simple_room_world_mapping.patch patches/mighty_rviz_config_arg.patch patches/mighty_rviz_two_agents.patch patches/mighty_imu_sim_time.patch patches/mighty_rviz_nx02_setgoal.patch patches/mighty_rviz_name_label.patch patches/mighty_rviz_pointcloud_style.patch patches/mighty_headless_yaw_fix.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_traveling_yaw_zero_dist_guard.patch /tmp/
+RUN cd /opt/mighty_ws/src/mighty \
+    && (git apply --check /tmp/mighty_lidar_frame_id.patch && git apply /tmp/mighty_lidar_frame_id.patch \
+        || echo "!! mighty_lidar_frame_id.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_occupancy_grid_qos_fix.patch && git apply /tmp/mighty_occupancy_grid_qos_fix.patch \
+        || echo "!! mighty_occupancy_grid_qos_fix.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_sensor_mount.patch && git apply /tmp/mighty_sensor_mount.patch \
+        || echo "!! mighty_sensor_mount.patch 未能自动应用，需人工核对后手动改 quadrotor.urdf.xacro !!") \
+    && (git apply --check /tmp/mighty_spawn_agent_launch.patch && git apply /tmp/mighty_spawn_agent_launch.patch \
+        || echo "!! mighty_spawn_agent_launch.patch 未能自动应用，需人工核对后手动补 launch/spawn_agent.launch.py !!") \
+    && (git apply --check /tmp/mighty_hard_forest_camera.patch && git apply /tmp/mighty_hard_forest_camera.patch \
+        || echo "!! mighty_hard_forest_camera.patch 未能自动应用，需人工核对后手动改 worlds/hard_forest.world !!") \
+    && (git apply --check /tmp/mighty_forest_boundary_walls.patch && git apply /tmp/mighty_forest_boundary_walls.patch \
+        || echo "!! mighty_forest_boundary_walls.patch 未能自动应用，需人工核对后手动改 worlds/hard_forest.world、worlds/easy_forest.world !!") \
+    && (git apply --check /tmp/mighty_disable_d435.patch && git apply /tmp/mighty_disable_d435.patch \
+        || echo "!! mighty_disable_d435.patch 未能自动应用，需人工核对后手动改 quadrotor.urdf.xacro !!") \
+    && (git apply --check /tmp/mighty_enable_gravity.patch && git apply /tmp/mighty_enable_gravity.patch \
+        || echo "!! mighty_enable_gravity.patch 未能自动应用，需人工核对后手动改 quadrotor_base.urdf.xacro !!") \
+    && (git apply --check /tmp/mighty_simple_room_world.patch && git apply /tmp/mighty_simple_room_world.patch \
+        || echo "!! mighty_simple_room_world.patch 未能自动应用，需人工核对后手动补 worlds/simple_room.world !!") \
+    && (git apply --check /tmp/mighty_simple_room_world_mapping.patch && git apply /tmp/mighty_simple_room_world_mapping.patch \
+        || echo "!! mighty_simple_room_world_mapping.patch 未能自动应用，需人工核对后手动改 launch/base_mighty.launch.py !!") \
+    && (git apply --check /tmp/mighty_rviz_config_arg.patch && git apply /tmp/mighty_rviz_config_arg.patch \
+        || echo "!! mighty_rviz_config_arg.patch 未能自动应用，需人工核对后手动改 launch/base_mighty.launch.py !!") \
+    && (git apply --check /tmp/mighty_rviz_two_agents.patch && git apply /tmp/mighty_rviz_two_agents.patch \
+        || echo "!! mighty_rviz_two_agents.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz !!") \
+    && (git apply --check /tmp/mighty_imu_sim_time.patch && git apply /tmp/mighty_imu_sim_time.patch \
+        || echo "!! mighty_imu_sim_time.patch 未能自动应用，需人工核对后手动改 src/sim/gazebo_ros_imu_sensor.cpp !!") \
+    && (git apply --check /tmp/mighty_rviz_nx02_setgoal.patch && git apply /tmp/mighty_rviz_nx02_setgoal.patch \
+        || echo "!! mighty_rviz_nx02_setgoal.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz !!") \
+    && (git apply --check /tmp/mighty_rviz_name_label.patch && git apply /tmp/mighty_rviz_name_label.patch \
+        || echo "!! mighty_rviz_name_label.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz !!") \
+    && (git apply --check /tmp/mighty_rviz_pointcloud_style.patch && git apply /tmp/mighty_rviz_pointcloud_style.patch \
+        || echo "!! mighty_rviz_pointcloud_style.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz !!") \
+    && (git apply --check /tmp/mighty_headless_yaw_fix.patch && git apply /tmp/mighty_headless_yaw_fix.patch \
+        || echo "!! mighty_headless_yaw_fix.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
+    && (git apply --check /tmp/mighty_share_traj_heartbeat.patch && git apply /tmp/mighty_share_traj_heartbeat.patch \
+        || echo "!! mighty_share_traj_heartbeat.patch 未能自动应用，需人工核对后手动改 include/mighty/mighty_node.hpp、src/mighty/mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_replan_state_resync.patch && git apply /tmp/mighty_replan_state_resync.patch \
+        || echo "!! mighty_replan_state_resync.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
+    && (git apply --check /tmp/mighty_trajectory_wall_check_log.patch && git apply /tmp/mighty_trajectory_wall_check_log.patch \
+        || echo "!! mighty_trajectory_wall_check_log.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_z_window_ceiling_occupied.patch && git apply /tmp/mighty_z_window_ceiling_occupied.patch \
+        || echo "!! mighty_z_window_ceiling_occupied.patch 未能自动应用，需人工核对后手动改 include/hgp/map_util.hpp !!") \
+    && (git apply --check /tmp/mighty_traveling_yaw_zero_dist_guard.patch && git apply /tmp/mighty_traveling_yaw_zero_dist_guard.patch \
+        || echo "!! mighty_traveling_yaw_zero_dist_guard.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!")
+# 用户问"双机系统2D Goal Pose给出后，究竟哪架飞机会飞那"——查了
+# multi_mighty.rviz的Tools列表，只有一个SetGoal工具实例，写死发到
+# /NX01/term_goal——RViz工具面板的按钮不会"自动感知当前选中哪架飞机"，
+# 每个按钮就是死死绑定一个话题，NX02原来根本没有对应的入口。加一个
+# 第二份SetGoal工具实例，绑定/NX02/term_goal，两个工具都加了Name属性
+# （"2D Goal Pose (NX01)"/"2D Goal Pose (NX02)"）方便在工具面板上区分，
+# 工具面板上会出现两个类似但可区分的按钮。
+# 用户提出怀疑："我觉得是mid360雷达的imu有问题，也就是这个传感器插件有问题"——
+# 顺着这个思路查src/sim/gazebo_ros_imu_sensor.cpp（libimu_plugin.so真正的源码，
+# 不是urdf注释里提到的那个标准gazebo_ros_pkgs实现，是mighty自己vendor进来的一份
+# 拷贝）：OnUpdate()里msg_->header.stamp用的是裸rclcpp::Clock().now()（永远是
+# 系统墙钟时间），而紧邻的两行注释掉的原始代码用的是
+# sensor_->LastUpdateTime()（Gazebo仿真时钟）——像是有人特意把sim时间换成了墙钟。
+# DLIO的odom.cc只用imu->header.stamp算dt(=当前减上一帧)喂积分（velocity +=
+# accel*dt），如果这个dt是墙钟时间而不是仿真物理时间真正流逝的量，只要两者不是
+# 严格1:1，dt就会系统性偏差，双重积分下误差会越滚越大。实测`gz stats`：sim time
+# 360.18s，real time 403.01s——real-time-factor持续在0.96~0.97，400秒内累计
+# 漂了约43秒（双机+双DLIO+gzclient渲染一起抢这台主机的CPU，gzclient单进程
+# 950%CPU那次记录就是这个负载的側面证据），不是瞬时抖动，是持续性偏差。这跟
+# 用户自己的经验完全对得上："真实硬件上IMU几十Hz都很稳"——真机只有一个时钟，
+# 压根不存在sim/real两条时间线打架这回事，这类bug在真机上是不可能出现的。
+# 直接切回sim time不安全：livox_pointcloud_timestamp.patch的注释里记录过，
+# 之前有人真的试过用sim time给点云盖戳，直接导致DLIO自己的Livox/Hesai
+# 传感器类型自动识别（odom.cc里`timestamp > 1e14`这条阈值判断）把这种量级
+# 小得多的"仿真启动以来的秒数"误判成Hesai格式，deskew逻辑找不到匹配的IMU区间，
+# 静默卡死、点云再也配准不出来（不报错、不崩溃，`deskewed points`永远卡0）。
+# 这次的做法是给Gazebo sim time加一个固定的大常数偏移量再盖戳（SimTimeAsFakeEpoch()，
+# 数值上看起来还是一个"正常"的绝对epoch时间，能骗过那个>1e14阈值判断），
+# 同一个偏移量常数在livox_imu_lidar_sim_time.patch里也用，让IMU和点云共用
+# 同一条时间基准——两条消息流之间的相对dt从此严格等于仿真物理时间真正流逝的量，
+# 不再受real-time-factor漂移影响。是否真的解决了核心的发散问题，还没有
+# 重新build验证。
+# multi_mighty.rviz这份配置原来是给最多10架飞机(NX01-NX10)准备的通用模板，这套
+# docker_sim只跑双机，RViz左侧面板堆了8架用不上的飞机分组，用户反馈"删除7架"
+# （数的时候少数了一架，实际是10架不是9架，删的是8架NX03-NX10不是7架，但目标
+# 一致：只留NX01/NX02）。同时发现"NX01/NX02 Lidar PointCloud"这两个雷达点云
+# Display在配置文件里默认是Enabled: false（勾选框没打开）——用户反馈"rviz里根本
+# 看不到NX01的点云"，排查一路查到DDS共享内存资源耗尽（长时间session累积了1834个
+# Fast-DDS SHM段文件，新参与者抢不到端口，完整重启释放后点云话题本身确认正常
+# 发布），但即使话题本身通了，RViz这边这个Display是关着的，永远不会订阅，两个
+# 问题（DDS资源耗尽 + Display默认关闭）叠在一起。这个patch：删除NX03-NX10这
+# 8个飞机分组（含TF Frames/Tree列表、Window Geometry里的Front Camera停靠位置
+# 记录）+ 把NX01/NX02的Lidar PointCloud Display默认打开。
+# base_mighty.launch.py原来rviz配置文件名是根据use_ground_robot硬编码的
+# （mighty.rviz或mighty_sim_ground_robot.rviz），没有办法指定用哪份配置。
+# rviz/multi_mighty.rviz这份配置文件已经按NX01/NX02两机命名空间配好了
+# （grep确认146处NX01/NX02引用），双机场景正好能直接用，加了个rviz_config
+# 覆盖参数选它。用RViz2看点云/建图，不用在Gazebo里开雷达射线可视化——那个
+# 早就确认过会拖慢物理循环导致PX4 poll timeout（gen_iris_mid360_sdf.py里
+# 两处<visualize>都是false），RViz2只管渲染、不在物理仿真主循环里，不会
+# 重蹈覆辙。
+# 森林场景（easy_forest/hard_forest）复现了一个 gzserver exit code -6 崩溃，出现在
+# "生成+spawn 完NX01的iris+mid360模型、还没启动PX4实例"这个时间点，跟MAVLink时序
+# 无关；未捕获到详细abort信息（ros2 launch的日志聚合在崩溃瞬间似乎会丢内容，这是
+# 本次调试里第N次遇到同样的现象）。用户明确决定暂不深挖这个崩溃，先换一个更简单
+# 的场景把SLAM+全流程跑通：20x20米、5米高的室内房间，4面墙+4根直径0.5米/高5米
+# 的柱子（比森林场景127+个障碍物模型少得多，如果这个简单场景也崩，就能排除掉
+# "只是复杂场景本身"这个可能性）。柱子位置刻意避开两机spawn点(3,0,3)/(6,0,3)，
+# 净空都在6米以上——参照 hard_forest 里 NX02 差点贴着障碍物出生的教训。
+# 用 env:=simple_room 启动（base_mighty.launch.py 的 world_mapping 新增了这个映射）。
+# quadrotor_base.urdf.xacro 里 base_link 原来<gravity>0</gravity>，机体压根不受
+# 重力——之前一直以为"未解锁飞机悬空不下落"，本质是这个开关关掉了，不是
+# DLIO/PX4哪边的问题。改成1，恢复正常物理。
+# realsense_gazebo_plugin的RealSensePlugin::Load()里GetSensor()返回值没判空就
+# 直接解引用，双机同时初始化相机传感器时命中已知的上游多机时序竞态
+# （github.com/pal-robotics/realsense_gazebo_plugin issue #17），
+# 稳定复现gzserver段错误崩溃（NX01不会崩，后加载的NX02必崩）。没找到简单可靠
+# 的上游修复，先禁用D435相机，只保留雷达+IMU，等以后有空再处理相机。
+# hard_forest.world 原来内置的默认GUI相机机位在(144.7, 5.67, 295.8)——295米高空
+# 俯视整条约300米长的走廊，飞机spawn在(3,0,3)/(6,0,3)那一端，开GUI默认视角下
+# 完全看不到飞机（不是没spawn出来，日志里spawn_entity.py确实成功退出了，纯粹是
+# 相机没对着那边，机体本身相对6米高的"树"障碍物也很小，肉眼很难在远景里找到）。
+# 改成对着两机spawn点、离得近一点的机位，开GUI一启动就能直接看到飞机。
+# hard_forest/easy_forest 原来都是"开放"的森林——障碍物只在中间一片区域，外围
+# 没有任何边界，DLIO一旦初始化阶段配准出错、飘出障碍物覆盖的区域，周围就彻底
+# 没有几何特征可参考，只会越飘越远、没有任何东西能把它"拉回来"。四周补一圈跟
+# 树同样6米高的围墙（hard_forest按障碍物范围x:[4.6,301.6]y:[-19,18.8]再留点
+# 边距围起来，easy_forest同理x:[1.75,100]y:[-19.3,19.3]），给SLAM一个有边界
+# 的封闭空间，围墙本身也是现成的、离得最远也摸得到的大块平面特征，理论上能让
+# GICP在飘出树林覆盖区之后依然有东西可以配准，不至于彻底发散到没边。
+
+# mid360.xacro 里 IMU 传感器整段原来被注释掉——DLIO 需要点云+IMU两路输入才能算
+# 里程计，没有IMU的话DLIO永远初始化不了、mighty订阅的state话题永远没人发布。
+COPY patches/livox_mid360_imu.patch patches/livox_mid360_visual_gravity.patch /tmp/
+RUN cd /opt/mighty_ws/src/livox_laser_simulation_ros2 \
+    && (git apply --check /tmp/livox_mid360_imu.patch && git apply /tmp/livox_mid360_imu.patch \
+        || echo "!! livox_mid360_imu.patch 未能自动应用，需人工核对后手动改 urdf/mid360.xacro !!") \
+    && (git apply --check /tmp/livox_mid360_visual_gravity.patch && git apply /tmp/livox_mid360_visual_gravity.patch \
+        || echo "!! livox_mid360_visual_gravity.patch 未能自动应用，需人工核对后手动改 urdf/mid360.xacro !!")
+# mid360.xacro 里雷达那个link原来只有<xacro:box_inertia>（惯性属性），没有
+# <visual>标签，GUI里天然看不到任何雷达形状（不是bug，是模型压根没画）；射线
+# 传感器和插件两处<visualize>也都写死false（故意关掉扫描线调试显示）；
+# link自己的<gravity>也是0。补一个跟真实尺寸(length/width/height)一致的黑色
+# box当雷达外观，两处visualize都打开，gravity跟base_link一起改成1（雷达是
+# fixed关节焊死在base_link上，理论上不受自己这个开关单独影响，但保持一致，
+# 避免物理引擎有意外行为）。
+# livox_points_plugin.cpp 发布给DLIO的PointCloud2只塞了x/y/z——用的是ROS2早就
+# 废弃的legacy `sensor_msgs::msg::PointCloud` + `convertPointCloudToPointCloud2()`
+# 这条转换路径，只能转x/y/z，逐点算好的`offset_time`只喂给了另一个话题
+# （livox_ros_driver2::msg::CustomMsg，DLIO不订阅这个）。DLIO自己的传感器类型
+# 自动识别（src/dlio/odom.cc里的getScanFromROS()）靠点云里有没有名叫"t"/"time"/
+# "timestamp"的字段来判断，识别不出来就直接把deskew强制关掉（"Unknown"传感器
+# 类型分支），后续每帧状态面板里`deskewed points`永远是0——DLIO因此永远走不到
+# 逐点用IMU插值做运动畸变补偿的主路径，退化成"整帧点云套一个IMU积分先验再整体
+# 配准"这种精度低得多的备用路径，配上仿真里较稀疏的采样点数，GICP配准噪声明显，
+# 幾何观测器(geometric observer)会把这部分配准误差当成加速度计零偏去修正，
+# 实测两架飞机（哪怕命名空间隔离、互不串话之后）accel bias依然会顶到
+# `params.yaml`里配置的`abias_max: 5.0`上限、原地飘出几十到上千米——这是继
+# `livox_mid360_imu.patch`（IMU话题从无到有）之后，点云这条输入链路本身质量
+# 不够、而不是外参/命名空间问题的第二层坑。新增
+# `patches/livox_pointcloud_timestamp.patch`，把这段改成直接用
+# `sensor_msgs::PointCloud2Modifier`/`PointCloud2Iterator`构造一个
+# x/y/z/intensity/timestamp五字段的PointCloud2（字段名/类型完全对上DLIO
+# `include/dlio/dlio.h`里`dlio::Point`的`POINT_CLOUD_REGISTER_POINT_STRUCT`
+# 声明），`timestamp`是float64绝对纳秒级epoch时间（真实Livox驱动的惯例，
+# `odom.cc`里`timestamp > 1e14`那个分支就是拿这个数量级区分Livox和其它传感器
+# 的），复用了本来就在算的每点`elapsed_time`，不需要额外算一遍。
+COPY patches/livox_pointcloud_timestamp.patch patches/livox_zero_out_of_range.patch patches/livox_imu_lidar_sim_time.patch /tmp/
+RUN cd /opt/mighty_ws/src/livox_laser_simulation_ros2 \
+    && (git apply --check /tmp/livox_pointcloud_timestamp.patch && git apply /tmp/livox_pointcloud_timestamp.patch \
+        || echo "!! livox_pointcloud_timestamp.patch 未能自动应用，需人工核对后手动改 src/livox_points_plugin.cpp !!") \
+    && (git apply --check /tmp/livox_zero_out_of_range.patch && git apply /tmp/livox_zero_out_of_range.patch \
+        || echo "!! livox_zero_out_of_range.patch 未能自动应用，需人工核对后手动改 src/livox_points_plugin.cpp !!") \
+    && (git apply --check /tmp/livox_imu_lidar_sim_time.patch && git apply /tmp/livox_imu_lidar_sim_time.patch \
+        || echo "!! livox_imu_lidar_sim_time.patch 未能自动应用，需人工核对后手动改 src/livox_points_plugin.cpp !!")
+# livox_imu_lidar_sim_time.patch：跟mighty_imu_sim_time.patch是一对，见那边patch
+# 前面的详细注释。这边把cloud2（DLIO实际订阅的mid360_PointCloud2）的header.stamp
+# 从livox_pointcloud_timestamp.patch里改成的墙钟rclcpp::Clock(RCL_SYSTEM_TIME)
+# 再换成Gazebo sim time（同样套一层SimTimeAsFakeEpoch()大常数偏移，避免触发
+# odom.cc里那个Livox/Hesai自动识别阈值误判——livox_pointcloud_timestamp.patch
+# 自己的注释里详细记录过直接用裸sim time会导致的静默卡死）。两个patch用的是
+# 同一个偏移常数，让IMU和点云这两条流保持在同一条时间基准上。
+# 上面这段"accel bias顶到abias_max上限、原地飘出几十到上千米"的坑，
+# livox_pointcloud_timestamp.patch只解决了"退化成整帧配准"这一层，没解决另一层：
+# 射线打空时原来的代码是range=maxDist（20米处硬造一个假点，当成"真探测到了"发布
+# 出去）——simple_room.world之前没有天花板，mid360前倾30度后仍有一截视场朝上，
+# 实测一帧1000点里30%落在这个"打空了"区间，这些假点角度相邻、距离几乎完全相同，
+# 会被GICP当成真实结构参与配准。这次除了给simple_room.world补天花板（见
+# mighty_simple_room_world.patch），livox_zero_out_of_range.patch把打空的射线
+# 改成range=0——point直接坍缩成(0,0,0)，天然落在DLIO自己CropBox滤波器
+# （src/dlio/odom.cc，默认crop_size_=1.0米，本来就是为了滤掉贴近雷达原点的
+# 自身遮挡噪声设计的）的去除范围正中心，会被这同一个已有的滤波器顺带滤掉，
+# 双重保险（哪怕以后又换一个没顶的场景，也不会再把"打空"误当成"探测到"）。
+# Dockerfile.base 最后一层 rm -rf 掉了 /var/lib/apt/lists，这里的 apt-get update
+# 补回索引——不然 rosdep install 内部调用的 apt-get install 会报 "Unable to
+# locate package"（索引是空的，不是包真不存在）。之前这一步能凑巧成功，是因为
+# 上面PX4那层 ubuntu.sh 顺带自己跑了一次 apt-get update，索引"意外"留到了这层；
+# 不能依赖这种跨层的偶然顺序，显式补一次。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    apt-get update \
+    && source /opt/ros/humble/setup.bash \
+    && source /opt/decomp_ws/install/setup.bash \
+    && source /opt/livox_ws/install/setup.bash 2>/dev/null || true \
+    && cd /opt/mighty_ws \
+    && rosdep update \
+    && rosdep install --from-paths src --ignore-src -r -y || true \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_SIMULATION=ON
+
+# ============================================================
+# 3. hospital/office/tunnel 外部Gazebo模型资产（选做，见 fetch_sources.sh 里的说明）
+# ============================================================
+COPY staging/gazebo_models_external /opt/gazebo_models_external
+# `<uri>model://某个模型名</uri>` 这种引用，Gazebo是直接拿GAZEBO_MODEL_PATH每一段
+# 去拼 "<段>/<模型名>/model.sdf" 找的，不会自己往子目录里递归找——原来只把
+# gazebo_models_external这个根目录纳入搜索路径，但实际模型是分别嵌在
+# aws-robomaker-hospital-world/models/ 和 osrf-gazebo_models/ 这两层子目录下面
+# 的（fetch_sources.sh clone下来的两个仓库的原始目录结构），根目录本身既不叫
+# 任何一个模型名、也没有直接把模型平铺在第一层，所以hospital.world（用
+# model://aws_robomaker_hospital_*）、office.world（用model://willowgarage）、
+# empty_wo_ground.world（用model://sun）这三个worlds原来都会在Gazebo里报
+# "Unable to find uri[model://xxx]"、对应的墙体/地板/桌椅等模型全部加载失败——
+# 现在把这两层子目录都显式加进搜索路径就能解决。
+# 另外核实过：hospital.world里引用的64个模型名，有37个（AdjTable/Toilet/
+# ElderLadyPatient等家具人物模型）在 aws-robomaker-hospital-world 仓库里根本不存在
+# （不是路径问题，是这个仓库压根没有这些资产，可能属于另一个配套的
+# aws-robomaker-small-house-world之类的仓库，fetch_sources.sh没有拉取），这部分
+# 修了路径也没用，hospital场景目前只能加载出27个aws_robomaker_*前缀的模型（墙、
+# 地板、走廊结构等），家具/人物会在Gazebo日志里报错缺失、场景里看不到，不阻塞
+# 起飞但不完整；big_forest_high_res.world引用的models_high_res/terrain这两组资产
+# 在我们vendor的osrf-gazebo_models/osrf-subt里完全找不到同名目录，这个world目前
+# 没法修，需要额外去找/下载对应资产才行，不确定来源，没有瞎猜URL去拉。
+ENV GAZEBO_MODEL_PATH=/opt/gazebo_models_external/aws-robomaker-hospital-world/models:/opt/gazebo_models_external/osrf-gazebo_models:/opt/mighty_ws/src/mighty/urdf:/opt/PX4-Autopilot/Tools/simulation/gazebo-classic/sitl_gazebo-classic/models:${GAZEBO_MODEL_PATH}
+# 补PX4自己的models目录：iris.sdf.jinja内部<include>了model://gps等PX4自带的
+# 传感器模型（渲染iris时这几个mesh/传感器模型本身要能被Gazebo解析找到），
+# 原来没把这层加进搜索路径，实测报"Unable to find uri[model://gps]"。
+
+# ============================================================
+# 4. UWB 真值模拟节点（本仓库自己写的轻量ROS2包，见 ../src/uwb_sim）
+# ============================================================
+COPY src/uwb_sim /opt/uwb_ws/src/uwb_sim
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/uwb_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+ENV http_proxy= \
+    https_proxy=
+
+# ============================================================
+# 5. iris(PX4真机电机/mavlink_interface插件) + Mid-360 融合模型生成脚本
+#    ——sim-world-entrypoint.sh spawn阶段用，见脚本头部注释里的详细背景。
+# ============================================================
+COPY docker/scripts/gen_iris_mid360_sdf.py /opt/docker_scripts/gen_iris_mid360_sdf.py
+
+COPY docker/entrypoints/sim-world-entrypoint.sh /opt/entrypoint.sh
+RUN chmod +x /opt/entrypoint.sh
+
+ENTRYPOINT ["/opt/entrypoint.sh"]

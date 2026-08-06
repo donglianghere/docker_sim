@@ -1,0 +1,50 @@
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 269136c..1e04344 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -453,6 +453,45 @@ bool MIGHTY::findAandAtime(state& A, double& A_time, double current_time,
+     A_time = current_time;
+   }
+ 
++  // Sanity check: A is a near-future point taken from plan_ (the trajectory
++  // the drone is *assumed* to be tracking), not the drone's actual current
++  // state -- that's intentional, it's what lets the local optimizer run
++  // ahead of the vehicle instead of stalling it every cycle. But nothing
++  // upstream of this ever re-checks that assumption against the real
++  // localization state. If the vehicle stops tracking plan_ altogether --
++  // physically blocked by an obstacle/wall, or came down after a control
++  // problem -- A keeps being read from the same stale plan_ tail forever,
++  // completely decoupled from where the drone actually is. Confirmed live:
++  // a drone that came down out of the sky sat there for 10+ minutes while
++  // every replan attempt still used an in-air A point from before it
++  // stopped tracking, so replanning could never re-anchor to reality (and a
++  // brand new goal after that didn't help either, since plan_ itself was
++  // never reset). Bound how far A is allowed to lead the real state using
++  // the time gap between A and now: at full speed the drone could plausibly
++  // be up to v_max*lookahead_time from where it started, plus a fixed
++  // margin for normal tracking slop; 2x that as a hard cap comfortably
++  // covers legitimate lookahead (observed ~0.1-1.5m in practice) while still
++  // catching genuine divergence (observed ~3m+ once stuck/crashed). Beyond
++  // that, trust the real state over the stale plan. This threshold is
++  // purely a function of the vehicle's own v_max and elapsed time, not any
++  // scene-specific geometry, so it holds regardless of environment.
++  {
++    state actual_now;
++    getState(actual_now);
++    double lookahead_time = std::max(A_time - current_time, 0.0);
++    double max_plausible_lead = 1.0 + par_.v_max * lookahead_time;
++    double divergence = (A.pos - actual_now.pos).norm();
++    if (divergence > 2.0 * max_plausible_lead) {
++      printf("[MIGHTY] findAandAtime: A (%.2f,%.2f,%.2f) is %.2fm from actual state "
++             "(%.2f,%.2f,%.2f), exceeding the %.2fm plausible-tracking bound -- the drone "
++             "isn't tracking plan_ anymore, resyncing A to the real state.\n",
++             A.pos[0], A.pos[1], A.pos[2], divergence, actual_now.pos[0], actual_now.pos[1],
++             actual_now.pos[2], 2.0 * max_plausible_lead);
++      A = actual_now;
++      A_time = current_time;
++    }
++  }
++
+   // Check if A is within the map (especially for z)
+   if (A.pos[2] < par_.z_min || A.pos[2] > par_.z_max ||
+       A.pos[0] < par_.x_min || A.pos[0] > par_.x_max ||

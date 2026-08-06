@@ -1,0 +1,13 @@
+diff --git a/cfg/params.yaml b/cfg/params.yaml
+index 96b7852..c2b60a7 100755
+--- a/cfg/params.yaml
++++ b/cfg/params.yaml
+@@ -25,7 +25,7 @@
+     odom/gravity: 9.80665
+     odom/computeTimeOffset: true
+ 
+-    odom/imu/approximateGravity: false
++    odom/imu/approximateGravity: true
+     odom/imu/calibration/gyro: true
+     odom/imu/calibration/accel: true
+     odom/imu/calibration/time: 3.0

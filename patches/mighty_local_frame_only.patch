@@ -1,0 +1,24 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index 02779d5..f320ed4 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -15,7 +15,7 @@ mighty_node:
+         vehicle_type: "uav"                                     # ["uav", "ground_robot", "quadruped_robot"]
+ 
+         # Hardware-related parameters
+-        provide_goal_in_global_frame: true                     # [-] Provide goal in the global frame
++        provide_goal_in_global_frame: false                    # [-] Provide goal in the global frame
+         use_hardware: true                                     # [-] Use hardware
+         share_traj: true                                         # [-] Publish own planned traj on /trajs (off for solo runs to skip the swarm channel)
+         use_frame_alignment: true                                # [-] Use inter-agent frame alignment
+@@ -35,8 +35,8 @@ mighty_node:
+         x_max: 1000.0                                           # [m] x_max of the map
+         y_min: -1000.0                                          # [m] y_min of the map
+         y_max: 1000.0                                           # [m] y_max of the map
+-        z_min: 0.8                                              # [m] points below this are considered ground
+-        z_max: 2.0                                                   # [m] HGP is run with resolution=factor_hgp*(resolution of the map)
++        z_min: 0.3                                              # [m] points below this are considered ground
++        z_max: 5.0                                                   # [m] HGP is run with resolution=factor_hgp*(resolution of the map)
+         hgp_timeout_duration_ms: 10000                          # [ms] Timeout duration for the HGP
+         use_free_start: true                                    # [-] Use free start for the HGP
+         free_start_factor: 1.0                                       # [-] Factor for the free start

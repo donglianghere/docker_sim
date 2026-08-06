@@ -1,0 +1,13 @@
+diff --git a/urdf/quadrotor_base.urdf.xacro b/urdf/quadrotor_base.urdf.xacro
+index c5912ec..9d8dee7 100644
+--- a/urdf/quadrotor_base.urdf.xacro
++++ b/urdf/quadrotor_base.urdf.xacro
+@@ -31,7 +31,7 @@
+     </link>
+     
+     <gazebo reference="base_link">
+-      <gravity>0</gravity>
++      <gravity>1</gravity>
+     </gazebo>
+ 
+    </xacro:macro>

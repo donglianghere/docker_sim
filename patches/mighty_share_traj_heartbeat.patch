@@ -1,0 +1,129 @@
+diff --git a/include/mighty/mighty_node.hpp b/include/mighty/mighty_node.hpp
+index 278fae8..c1e76a4 100644
+--- a/include/mighty/mighty_node.hpp
++++ b/include/mighty/mighty_node.hpp
+@@ -165,6 +165,11 @@ class MIGHTY_NODE : public rclcpp::Node {
+   void publishPoly();
+   void publishTraj();
+   void publishOwnTraj();
++  void publishSelfAsStaticObstacleCallback();  // Low-rate heartbeat so idle/stationary
++                                                // agents are still visible to others'
++                                                // avoidance even when not actively
++                                                // replanning (publishOwnTraj() above only
++                                                // fires on a successful replan).
+   void publishActualTraj();
+   void publishGoal();          // Publish the goal (trajectory points)
+   void publishTrajectory();    // Publish the full trajectory with replan support
+@@ -196,6 +201,7 @@ class MIGHTY_NODE : public rclcpp::Node {
+   rclcpp::TimerBase::SharedPtr timer_update_tmap_;
+   rclcpp::TimerBase::SharedPtr timer_goal_reached_check_;
+   rclcpp::TimerBase::SharedPtr timer_cleanup_old_trajs_;
++  rclcpp::TimerBase::SharedPtr timer_share_heartbeat_;
+   rclcpp::TimerBase::SharedPtr timer_trajs_update_for_tmap_;
+   rclcpp::TimerBase::SharedPtr timer_check_plan_safety_;
+   rclcpp::TimerBase::SharedPtr timer_initial_pose_;
+diff --git a/src/mighty/mighty_node.cpp b/src/mighty/mighty_node.cpp
+index ba9ebc5..3e5a9d4 100644
+--- a/src/mighty/mighty_node.cpp
++++ b/src/mighty/mighty_node.cpp
+@@ -245,6 +245,14 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
+         100ms, std::bind(&MIGHTY_NODE::goalReachedCheckCallback, this), this->cb_groups_re_[2]);
+   timer_cleanup_old_trajs_ = this->create_wall_timer(
+       500ms, std::bind(&MIGHTY_NODE::cleanUpOldTrajsCallback, this), this->cb_groups_mu_[4]);
++  // Not cancelled below like timer_replanning_/timer_goal_ -- this one needs to run
++  // from startup even for an agent that never receives a term_goal (e.g. one that
++  // just takes off and holds), otherwise it's invisible to other agents' avoidance
++  // for its entire flight. 1Hz is well under traj_lifetime (default 7s), leaving
++  // margin for network hiccups before a receiver would consider it stale.
++  timer_share_heartbeat_ = this->create_wall_timer(
++      1000ms, std::bind(&MIGHTY_NODE::publishSelfAsStaticObstacleCallback, this),
++      this->cb_groups_mu_[4]);
+   if (par_.use_hardware)
+     timer_initial_pose_ = this->create_wall_timer(
+         100ms, std::bind(&MIGHTY_NODE::getInitialPoseHwCallback, this), this->cb_groups_mu_[8]);
+@@ -2535,6 +2543,85 @@ void MIGHTY_NODE::publishOwnTraj() {
+ 
+ // ----------------------------------------------------------------------------
+ 
++/**
++ * @brief Low-rate heartbeat (1Hz, see timer_share_heartbeat_) that publishes the
++ *        agent's *current* position to /trajs as a trivial constant (zero
++ *        velocity/accel) trajectory, independent of replanCallback's
++ *        "publish only on a successful replan" path (see publishOwnTraj()).
++ *
++ *        Without this, an agent that never receives a term_goal (e.g. one that
++ *        just takes off and holds in place) never calls replan() successfully,
++ *        never calls publishOwnTraj(), and is therefore never added to any other
++ *        agent's dynamic-obstacle list -- confirmed live: an idle NX02 had zero
++ *        entries in its own /tmp/mighty_debug.log for its entire flight, and a
++ *        passing NX01 flew through its position with no avoidance because NX01's
++ *        addTraj() cache had literally never received anything about NX02.
++ *
++ *        This does NOT replace publishOwnTraj() -- while actively flying, the
++ *        real planned pwp still gets shared (much more frequently, tied to
++ *        replan success) via that path, giving other agents the actual future
++ *        trajectory instead of just a static point. This heartbeat only fills
++ *        the gap while idle/stationary, and is cheap enough (1 small message/s)
++ *        to just always run rather than trying to detect "has this agent been
++ *        idle for a while" and toggle it on/off.
++ */
++void MIGHTY_NODE::publishSelfAsStaticObstacleCallback() {
++  if (!par_.share_traj) return;
++
++  state current_state;
++  mighty_ptr_->getState(current_state);
++
++  // Build a trivial single-interval PieceWiseQuinticPol: all higher-order
++  // coefficients zero, constant term = current position. 60s span is just "long
++  // enough to not run out between heartbeats" (this callback re-publishes a
++  // fresh one every 1s anyway) -- it does not mean receivers trust it for 60s;
++  // that's governed independently by traj_lifetime on the receiving side.
++  PieceWiseQuinticPol pwp_static;
++  double t0 = this->now().seconds();
++  pwp_static.times = {t0, t0 + 60.0};
++  Eigen::Matrix<double, 6, 1> cx = Eigen::Matrix<double, 6, 1>::Zero();
++  Eigen::Matrix<double, 6, 1> cy = Eigen::Matrix<double, 6, 1>::Zero();
++  Eigen::Matrix<double, 6, 1> cz = Eigen::Matrix<double, 6, 1>::Zero();
++  cx(5) = current_state.pos(0);
++  cy(5) = current_state.pos(1);
++  cz(5) = current_state.pos(2);
++  pwp_static.coeff_x.push_back(cx);
++  pwp_static.coeff_y.push_back(cy);
++  pwp_static.coeff_z.push_back(cz);
++
++  // Same frame-offset handling as publishOwnTraj() (only the constant term
++  // needs it here since every other coefficient is zero).
++  if (par_.use_frame_alignment && !sim_frame_offset_.isIdentity(1e-9)) {
++    Eigen::Vector4d h;
++    h << pwp_static.coeff_x[0](5), pwp_static.coeff_y[0](5), pwp_static.coeff_z[0](5), 1.0;
++    h = sim_frame_offset_ * h;
++    pwp_static.coeff_x[0](5) = h(0);
++    pwp_static.coeff_y[0](5) = h(1);
++    pwp_static.coeff_z[0](5) = h(2);
++  }
++
++  dynus_interfaces::msg::DynTraj msg;
++  msg.header.stamp = this->now();
++  msg.header.frame_id = par_.map_frame_id;
++  msg.bbox.push_back(par_.drone_bbox[0]);
++  msg.bbox.push_back(par_.drone_bbox[1]);
++  msg.bbox.push_back(par_.drone_bbox[2]);
++  msg.id = id_;
++  msg.mode = "pwp";
++  msg.quintic_pwp = mighty_utils::convertPwp2PwpMsg(pwp_static);
++  msg.is_agent = true;
++  // Goal = current position too (there isn't a meaningful "where am I headed"
++  // while idle); consumers of msg.goal in this codebase don't rely on it for
++  // the dynamic-obstacle/avoidance path, only pwp/quintic_pwp does.
++  msg.goal.push_back(current_state.pos(0));
++  msg.goal.push_back(current_state.pos(1));
++  msg.goal.push_back(current_state.pos(2));
++
++  pub_own_traj_->publish(msg);
++}
++
++// ----------------------------------------------------------------------------
++
+ /**
+  * @brief Publish the trajectory the agent actually followed.
+  *

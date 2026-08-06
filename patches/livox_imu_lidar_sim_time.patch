@@ -1,0 +1,84 @@
+diff --git a/src/livox_points_plugin.cpp b/src/livox_points_plugin.cpp
+index 1227663..428bd13 100644
+--- a/src/livox_points_plugin.cpp
++++ b/src/livox_points_plugin.cpp
+@@ -2,18 +2,50 @@
+ #include <gazebo_ros/node.hpp>
+ #include <rclcpp/logging.hpp>
+ 
++#include <gazebo/common/Time.hh>
+ #include <gazebo/physics/Model.hh>
+ #include <gazebo/physics/MultiRayShape.hh>// Store the latest laser scans into laserMsg
+ #include <gazebo/physics/PhysicsEngine.hh>
+ #include <gazebo/physics/World.hh>
+ #include <gazebo/sensors/RaySensor.hh>
+ #include <gazebo/transport/Node.hh>
++#include <builtin_interfaces/msg/time.hpp>
+ #include <chrono>
++#include <cstdint>
+ #include "ros2_livox/livox_points_plugin.h"
+ #include "ros2_livox/csv_reader.hpp"
+ #include "ros2_livox/livox_ode_multiray_shape.h"
+ #include <livox_ros_driver2/msg/custom_msg.hpp>
+ 
++namespace
++{
++// See the matching helper/comment in mighty's src/sim/gazebo_ros_imu_sensor.cpp for the
++// full rationale. Short version: real-time-factor drifts sustained below 1.0 under this
++// host's dual-drone load (measured ~0.96-0.97 live via `gz stats`), so a wall-clock-
++// stamped IMU/point-cloud dt is systematically larger than the sim time actually elapsed
++// -- almost certainly the dominant cause of this project's long-standing "DLIO diverges
++// to thousands of meters while stationary" bug. Gazebo sim time is immune to that drift
++// by definition, but a raw sim-time value (~seconds since sim start) is too small to
++// clear DLIO's own >1e14ns Livox-vs-Hesai autodetect threshold in getScanFromROS() (see
++// the comment this replaces, from livox_pointcloud_timestamp.patch) and gets
++// misclassified, silently freezing deskewing. Offsetting sim time by a fixed large
++// constant keeps it looking like a plausible absolute epoch for that heuristic while
++// every *delta* between consecutive stamps stays exactly equal to true elapsed sim time.
++// The IMU plugin uses the identical constant so both streams share one consistent clock,
++// which deskewing's IMU-buffer bracket search (integrateImu()) requires.
++constexpr int64_t kFakeEpochOffsetNs = 1735689600LL * 1000000000LL;  // 2025-01-01T00:00:00Z
++
++builtin_interfaces::msg::Time SimTimeAsFakeEpoch(const gazebo::common::Time & sim_time)
++{
++  int64_t sim_ns = static_cast<int64_t>(sim_time.sec) * 1000000000LL +
++    static_cast<int64_t>(sim_time.nsec) + kFakeEpochOffsetNs;
++  builtin_interfaces::msg::Time t;
++  t.sec = static_cast<int32_t>(sim_ns / 1000000000LL);
++  t.nanosec = static_cast<uint32_t>(sim_ns % 1000000000LL);
++  return t;
++}
++}  // namespace
++
+ namespace gazebo
+ {
+ 
+@@ -163,24 +195,11 @@ namespace gazebo
+             // a valid t=0 reference) plus the same per-point `elapsed_time` offset
+             // already computed below for the CustomMsg's `offset_time`.
+             //
+-            // Deliberately *not* using `node_->get_clock()->now()` here: that clock is
+-            // ROS/sim time (use_sim_time), which under Gazebo returns seconds-since-
+-            // sim-start (observed ~518s => ~5.18e11ns) -- far below the >1e14ns floor
+-            // odom.cc uses to tell Livox (real, huge absolute epoch ns) apart from Hesai
+-            // (small epoch-seconds-as-double). A sim-time stamp here gets misclassified
+-            // as Hesai, and DLIO stores that raw sim-time value as a literal Unix-epoch
+-            // *seconds* count (the Hesai extract_point_time lambda doesn't rescale it) --
+-            // i.e. this->scan_stamp becomes ~5*10^11 seconds (thousands of years in the
+-            // future) while imu_buffer's timestamps stay real wall-clock (~1.7*10^9s,
+-            // from the IMU sensor plugin's `ros_node_->now()`, which for this SDF/node
+-            // does resolve to real time). deskewPointcloud()'s IMU-buffer bracketing
+-            // (integrateImu()) then searches for that unreachable target and the node
+-            // never completes a scan again -- no crash, no log, `deskewed points` stays
+-            // 0 forever and NX01/NX02 freeze at their calibration pose. Using real wall-
+-            // clock time here keeps this in the same time base as the IMU plugin (and as
+-            // a real Livox driver, which has no notion of "sim time" either).
++            // Stamped with Gazebo sim time via SimTimeAsFakeEpoch() (see top of file),
++            // not wall clock -- see that comment for why plain sim time isn't safe here
++            // and why the offset trick is needed instead.
+             sensor_msgs::msg::PointCloud2 cloud2;
+-            cloud2.header.stamp = rclcpp::Clock(RCL_SYSTEM_TIME).now();
++            cloud2.header.stamp = SimTimeAsFakeEpoch(world->SimTime());
+             pp_livox.header.stamp = cloud2.header.stamp;
+             cloud2.header.frame_id = ns_ + "/" + raySensor->Name();
+             cloud2.height = 1;

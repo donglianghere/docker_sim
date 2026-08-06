@@ -1,0 +1,23 @@
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+index 66391b2428..ad50d23246 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+@@ -30,3 +30,18 @@ param set-default PWM_MAIN_FUNC1 101
+ param set-default PWM_MAIN_FUNC2 102
+ param set-default PWM_MAIN_FUNC3 103
+ param set-default PWM_MAIN_FUNC4 104
++
++# docker_sim: this airframe's real all-up mass in this project (iris body +
++# mid360/IMU payload, see gen_iris_mid360_sdf.py) is ~1.935kg, not the ~1.44kg
++# implied by the PX4 default MPC_THR_HOVER=0.5 (0.5 * 4-rotor max thrust 28.27N
++# / 9.81 =~ 1.44kg -- see motorConstant/maxRotVelocity below and
++# docker_sim/config/vehicle_profile.yaml for the derivation). Real hover
++# throttle fraction = mass*9.81 / max_thrust = 1.935*9.81 / 28.27 =~ 0.671.
++# Leaving this at the stock default under-supplies commanded thrust for the
++# real payload; PX4's online hover-thrust estimator (MPC_USE_HTE, on by
++# default) only nudges this seed value during flight, it doesn't fix a badly
++# wrong starting point for takeoff/aggressive-maneuver transients. If the
++# vehicle mass changes (different payload), recompute this the same way:
++# 4 rotors * motorConstant(5.84e-06) * maxRotVelocity(1100)^2 = 28.27N max
++# thrust (iris.sdf.jinja), hover_throttle = mass_kg * 9.81 / 28.27.
++param set-default MPC_THR_HOVER 0.671

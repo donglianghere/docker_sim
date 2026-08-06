@@ -1,0 +1,31 @@
+diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
+index 54a5839..08abc86 100644
+--- a/ros2_px4_stack/src/dynus_offboard_node.py
++++ b/ros2_px4_stack/src/dynus_offboard_node.py
+@@ -411,7 +411,25 @@ def get_drone_frame(point):
+ 
+     # Compute z_B
+     t = np.array([[sigma_dot_dot[0][0], sigma_dot_dot[1][0], sigma_dot_dot[2][0] + g]]).T
+-    z_B = t / np.linalg.norm(t)
++    t_norm = np.linalg.norm(t)
++    # Guard against near-zero net-force magnitude (desired acceleration close
++    # to free-fall, az=~-g with small ax/ay) -- dividing by a near-zero norm
++    # makes z_B (and everything derived from it: y_B, x_B, the whole
++    # orientation quaternion including yaw) numerically unstable, swinging
++    # wildly for tiny input perturbations. Confirmed live: a 15-second yaw
++    # oscillation across nearly the full +-180 degree range, coincident with
++    # a real altitude drop to -0.69m, tracked exactly to this condition (see
++    # README.md). Fall back to level/"pointing up" rather than dividing by
++    # ~0 -- this doesn't fix whatever upstream issue caused the near-free-
++    # fall command in the first place, it just stops the attitude
++    # computation itself from amplifying that into wild oscillation. 1.0 is
++    # a generous margin below the ~9.81 magnitude normal hover/flight
++    # produces (ax/ay/az are already zero-clamped below 0.1 above, so only a
++    # genuinely near-free-fall az triggers this, not ordinary maneuvering).
++    if t_norm < 1.0:
++        z_B = np.array([[0.0], [0.0], [1.0]])
++    else:
++        z_B = t / t_norm
+ 
+     # Compute intermediate yaw vector x_C
+     x_C = np.array([[np.cos(sigma[3][0]), np.sin(sigma[3][0]), 0]]).T

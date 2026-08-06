@@ -1,0 +1,52 @@
+diff --git a/include/hgp/map_util.hpp b/include/hgp/map_util.hpp
+index 8fbb241..1cd34cf 100644
+--- a/include/hgp/map_util.hpp
++++ b/include/hgp/map_util.hpp
+@@ -367,9 +367,31 @@ class MapUtil {
+ 
+     // 8b) Mark boundary walls — keep planner away from global y limits
+     //     so SFC corridors have room to expand.
+-    //     Note: z boundaries are NOT marked because z_min/z_max already
+-    //     constrain the map. Marking them creates false heat sources that
+-    //     push the global planner away from the floor/ceiling.
++    //     Note: z boundaries were previously NOT marked here, on the
++    //     assumption that z_min/z_max already constrain the map -- that
++    //     assumption turned out to be wrong in a dangerous way (confirmed
++    //     live, 2026-08-05): the window's actual dimZ, after the down/up
++    //     split above is clamped against z_ground, routinely tops out well
++    //     *below* z_max at normal hover altitude (e.g. ~3.4m vs the
++    //     configured z_max=5.0m) -- z_min/z_max bound where the window is
++    //     *allowed* to sit, they don't put any actual blocking data at
++    //     wherever the window's top slice happens to land. Combined with
++    //     isOccupied()'s existing (and correct, for x/y) convention that
++    //     anything outside the array is "free" -- a receding-horizon
++    //     planner boxed in horizontally by a wall spanning the whole window
++    //     (can't route around it left/right within the window, the way it
++    //     routes around a compact pillar) would treat the unmarked airspace
++    //     above the window as an open escape route and commit to a
++    //     trajectory that climbs straight through where the wall actually
++    //     continues, unseen, above the window's ceiling. Unlike x/y (where
++    //     "outside now" resolves itself as the window slides forward with
++    //     the drone's horizontal progress), the window's z-extent doesn't
++    //     self-resolve by flying *toward* a wall -- there's no future
++    //     moment where "up" becomes sensed just by continuing on the same
++    //     horizontal approach. So mark the window's own top z-slice
++    //     occupied unconditionally: getting boxed in by a real wall should
++    //     make replanning correctly fail (ok=0), not silently commit to an
++    //     unverified vertical escape.
+     {
+       const float buf = inflation;  // reuse the inflation radius as boundary buffer
+       for (int ix = 0; ix < dimX; ++ix) {
+@@ -382,6 +404,12 @@ class MapUtil {
+           }
+         }
+       }
++      const int top_iz = dimZ - 1;
++      for (int ix = 0; ix < dimX; ++ix) {
++        for (int iy = 0; iy < dimY; ++iy) {
++          map_[idx3(ix, iy, top_iz)] = val_occ_;
++        }
++      }
+     }
+ 
+     // 9) Update metadata

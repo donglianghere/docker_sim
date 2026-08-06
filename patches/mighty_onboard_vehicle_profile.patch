@@ -1,0 +1,46 @@
+diff --git a/launch/onboard_mighty.launch.py b/launch/onboard_mighty.launch.py
+index 26c3c17..298fb54 100644
+--- a/launch/onboard_mighty.launch.py
++++ b/launch/onboard_mighty.launch.py
+@@ -54,6 +54,11 @@ def generate_launch_description():
+         description='Set exploration.external_selector=true so mighty_node yields term_goal control (used by --use-vlm)')
+     map_frame_id_arg = DeclareLaunchArgument('map_frame_id', default_value='',
+         description='Override map frame ID (empty = auto from use_hardware)')
++    vehicle_profile_arg = DeclareLaunchArgument('vehicle_profile', default_value='',
++        description='Optional path to a yaml file whose mighty_node.ros__parameters get '
++                    'layered on top of mighty.yaml/hw_mighty.yaml (e.g. to keep mass/bbox '
++                    'consistent with ros2_px4_stack, which reads the same file via env vars '
++                    'exported in flight-stack-entrypoint.sh); empty = use config file as-is')
+     use_frame_alignment_arg = DeclareLaunchArgument('use_frame_alignment', default_value='',
+         description='Override use_frame_alignment (empty = use config default)')
+     sim_frame_offset_qz_arg = DeclareLaunchArgument('sim_frame_offset_qz', default_value='',
+@@ -151,6 +156,21 @@ def generate_launch_description():
+                 hw_params = yaml.safe_load(f)['mighty_node']['ros__parameters']
+             parameters.update(hw_params)
+ 
++        # Layer an optional vehicle_profile.yaml on top, AFTER the hw_params block above
++        # (not before it -- an earlier version of this override ran before hw_params and
++        # got silently clobbered by it for any overlapping key, e.g. mass/f_min/f_max,
++        # since use_hardware=true in this docker_sim and hw_params always wins whatever
++        # runs before it). vehicle_profile.yaml is meant to be the single source of truth
++        # for physical params shared with ros2_px4_stack (same file, read via env vars in
++        # flight-stack-entrypoint.sh), so it needs to be applied last to actually be
++        # authoritative.
++        vehicle_profile = LaunchConfiguration('vehicle_profile').perform(context)
++        if vehicle_profile:
++            with open(vehicle_profile, 'r') as vf:
++                vehicle_profile_yaml = yaml.safe_load(vf)
++            vehicle_profile_params = (vehicle_profile_yaml or {}).get('mighty_node', {}).get('ros__parameters', {})
++            parameters.update(vehicle_profile_params)
++
+         # Update parameters for benchmarking
+         parameters['file_path'] = data_file
+         parameters['use_benchmark'] = bool(use_benchmark)
+@@ -402,6 +422,7 @@ def generate_launch_description():
+         num_agents_arg,
+         external_selector_arg,
+         map_frame_id_arg,
++        vehicle_profile_arg,
+         use_frame_alignment_arg,
+         sim_frame_offset_qz_arg,
+         sim_frame_offset_qw_arg,

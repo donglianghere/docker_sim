@@ -1,0 +1,34 @@
+diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
+index 08abc86..1f6c690 100644
+--- a/ros2_px4_stack/src/dynus_offboard_node.py
++++ b/ros2_px4_stack/src/dynus_offboard_node.py
+@@ -436,7 +436,28 @@ def get_drone_frame(point):
+ 
+     # Compute x-axis and y-axis of drone frame measured in world frame
+     cross_prod = np.cross(z_B.T[0], x_C.T[0])
+-    y_B = np.array([cross_prod / np.linalg.norm(cross_prod)]).T
++    cross_norm = np.linalg.norm(cross_prod)
++    # Same category of bug as the t_norm guard above, second instability
++    # site in this same function: z_B and x_C are both unit vectors, so
++    # cross_norm = sin(angle between them) -- it only approaches zero when
++    # the desired thrust direction z_B is nearly parallel to the horizontal
++    # yaw reference x_C, i.e. an extreme ~90 degree tilt commanded almost
++    # exactly along the current yaw direction. Dividing by a near-zero
++    # cross_norm makes y_B (and x_B, and the whole orientation) swing
++    # wildly for tiny changes in z_B/yaw. Confirmed live: brief (~6-sample)
++    # bursts of thrust pegged at 1.0 with target_rpy swinging tens of
++    # degrees within half a second, during mid-flight maneuvering rather
++    # than near-free-fall -- smaller and shorter than the t_norm case, but
++    # the same failure shape (see README.md). Fall back to a fixed
++    # alternate reference (world Y) instead of x_C when this degenerates --
++    # loses exact yaw tracking only in this narrow edge case, but keeps the
++    # frame construction numerically stable. 0.1 corresponds to about a 6
++    # degree angle between z_B and x_C, so this only engages within ~6
++    # degrees of that ~90-degree-tilt edge case, not ordinary flight.
++    if cross_norm < 0.1:
++        cross_prod = np.cross(z_B.T[0], np.array([0.0, 1.0, 0.0]))
++        cross_norm = np.linalg.norm(cross_prod)
++    y_B = np.array([cross_prod / cross_norm]).T
+     x_B = np.array([np.cross(y_B.T[0], z_B.T[0])]).T
+ 
+     return x_B, y_B, z_B

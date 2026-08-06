@@ -1,0 +1,96 @@
+# ----------------------------------------------------------------------------
+# mighty-base：公共基础镜像。Ubuntu22.04 + ROS2 Humble + 经典Gazebo11 + 编译工具链。
+# 被 Dockerfile.sim-world 和 Dockerfile.flight-stack 共同 FROM。
+#
+# 构建：
+#   docker build --build-arg HTTP_PROXY=$http_proxy --build-arg HTTPS_PROXY=$https_proxy \
+#                 -f docker/Dockerfile.base -t mighty-base:humble .
+#
+# 只要这个文件（或它之前的任何一层）变了，下游 Dockerfile.sim-world/flight-stack
+# 里所有 RUN 层的 Docker 层缓存都会失效，被迫从头重新编译（哪怕改动只是加一个apt
+# 包）。这就是为什么装ccache——用 BuildKit cache mount 把编译产物缓存到镜像层之外
+# 的持久卷里，不随层缓存失效而失效，下游各 Dockerfile 里对应的编译 RUN 也都挂了
+# 同一个 cache mount（见那两个文件），重编译时绝大多数.cpp会直接命中ccache，
+# 几分钟的全量编译通常能缩到几十秒。
+FROM ros:humble-ros-base-jammy
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    DEBIAN_FRONTEND=noninteractive \
+    ROS_DISTRO=humble \
+    CCACHE_DIR=/ccache \
+    CCACHE_MAXSIZE=8G \
+    PATH=/usr/lib/ccache:${PATH}
+
+# --- 系统层依赖：编译工具、经典Gazebo、常用数值/点云库 ---
+# 注意：jammy(22.04)开始，OSRF不再往 packages.osrfoundation.org 发布 gazebo11
+# 这个版本化包名了，Gazebo Classic 改成从 Ubuntu 官方 universe 仓库装、且包名
+# 去掉了"11"后缀（gazebo / libgazebo-dev / gazebo-plugin-base）——之前那版
+# Dockerfile 多此一举加了OSRF源、还照抄了focal(20.04)时代的包名，两个都是错的，
+# 这里改成直接用 Ubuntu 官方源 + 正确包名。
+#
+# 拆成多个小RUN层 + 加 apt 自身的重试参数：单个apt-get install塞几十个包，
+# 代理在长时间下载后偶发502时，整层RUN失败要从头重来，之前一次就在下载了
+# 679MB/24分钟后功亏一篑。拆层之后，Docker会按层缓存，某一层失败重试时，
+# 前面已经成功的层不用重新下载；Acquire::Retries给单个包内建重试次数，
+# 减少偶发502直接判死刑的概率。
+# --mount=type=cache 缓存下载下来的.deb包本身（不是apt索引），同一台宿主机上
+# 哪怕这层因为改了包列表而重新触发，已经下载过的包也不用因为代理再走一遍网络。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        curl gnupg2 lsb-release wget git ccache \
+        build-essential cmake ninja-build python3-pip python3-colcon-common-extensions \
+        python3-rosdep python3-vcstool \
+        libeigen3-dev libyaml-cpp-dev libgoogle-glog-dev python3-empy python3-yaml \
+        nlohmann-json3-dev python3-scipy
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        gazebo gazebo-common gazebo-plugin-base libgazebo-dev \
+        ros-humble-gazebo-ros-pkgs ros-humble-gazebo-ros
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        ros-humble-mavros ros-humble-mavros-extras \
+        ros-humble-pcl-ros ros-humble-pcl-conversions libpcl-dev \
+        ros-humble-tf2-ros ros-humble-tf2-eigen ros-humble-robot-state-publisher \
+        ros-humble-xacro ros-humble-rviz2
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        bc dmidecode pkg-config libxml2-utils libimage-exiftool-perl protobuf-compiler \
+        libopencv-dev
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-ugly gstreamer1.0-libav libgstreamer-plugins-base1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# geographiclib 数据集（MAVROS 的 GPS 相关插件需要，否则运行时报错）
+RUN wget -qO /tmp/install_geo.sh \
+    https://raw.githubusercontent.com/mavlink/mavros/master/mavros/scripts/install_geographiclib_datasets.sh \
+    && bash /tmp/install_geo.sh && rm /tmp/install_geo.sh
+
+# pymavlink：ros2_px4_stack 里好几个节点（track_dynus_traj.py、
+# dynus_offboard_node.py）直接 `from pymavlink import mavutil`，apt 源里只有
+# ros-humble-mavlink/ros-humble-libmavconn 这两个C++库，没有python3-pymavlink
+# 这个包，只能pip装；没装之前这些节点启动时直接 ModuleNotFoundError 崩溃退出。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install pymavlink
+
+# 构建阶段用完代理即清掉，避免代理配置泄漏进最终镜像、影响容器运行时的实际网络行为
+ENV http_proxy= \
+    https_proxy=
+
+SHELL ["/bin/bash", "-c"]
+RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc
+
+WORKDIR /opt

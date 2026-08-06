@@ -1,0 +1,38 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index 5b8672c..c432641 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -35,8 +35,32 @@ mighty_node:
+         x_max: 1000.0                                           # [m] x_max of the map
+         y_min: -1000.0                                          # [m] y_min of the map
+         y_max: 1000.0                                           # [m] y_max of the map
++        # 第一版把z_min/z_max收到[1.0,2.0]（贴着default_goal_z=1.5，只留
++        # 0.5米余量）——实测直接炸机：findAandAtime()里A点越界检查是硬
++        # 失败（A.pos[2] < z_min || > z_max 直接return false），一旦真实
++        # 高度略微跌破z_min（起飞爬升阶段、或者正常的高度波动都会），
++        # replan直接失败、拿不到任何纠偏轨迹——飞机没有任何主动爬升的
++        # 指令，只会继续往下掉，掉了又更低于z_min，死循环，最后直接
++        # 落地。实测debug日志/容器stdout锁定："A (...,0.51) is out of
++        # the map"，z从0.51一路降到0.42，一直失败，从没恢复。z_max那边
++        # 是完全对称的风险——本session早前（MPC_THR_HOVER修复之前）就
++        # 实测过一次悬停爬升超调到3.6米，同样的硬失败逻辑一样会在超过
++        # z_max时把飞机焊死，不是只有z_min这一侧危险，第一版这条注释
++        # 判断错了。z_min本质上不只是"窗口下边界"，两个数字都是replan
++        # 能不能成功的硬门槛，必须给正常的起飞爬升路径（地面~0.1米到
++        # 悬停高度）和正常的高度波动/超调留够余量，不能只按"贴着目标
++        # 悬停高度留一点点"来定，尤其在没有实测过修复MPC_THR_HOVER之后
++        # 真实超调量级之前，不该赌一个很紧的余量。
++        # 改回z_min=0.3（这一路session里一直安全使用的值），z_max放宽到
++        # 4.0（给1.5米悬停目标留2.5米余量，比之前实测过的3.6米超调还要
++        # 宽松）。挡"翻墙"这类高度异常的活主要交给
++        # mighty_z_window_ceiling_occupied.patch——那个是跟着飞机当前
++        # 高度走的"窗口相对"天花板（大约当前高度+2米，不是写死的绝对值），
++        # 且触发的是正常的replan失败（能恢复、不会把飞机焊死），比这里这
++        # 两个全局硬边界更适合当第一道防线；这两个数字放宽之后仍然比
++        # 原始0.3~5.0窄了这么多：0.3~4.0，主要是兜底、不是主力防线。
+         z_min: 0.3                                              # [m] points below this are considered ground
+-        z_max: 5.0                                                   # [m] HGP is run with resolution=factor_hgp*(resolution of the map)
++        z_max: 4.0                                                   # [m] HGP is run with resolution=factor_hgp*(resolution of the map)
+         hgp_timeout_duration_ms: 10000                          # [ms] Timeout duration for the HGP
+         use_free_start: true                                    # [-] Use free start for the HGP
+         free_start_factor: 1.0                                       # [-] Factor for the free start

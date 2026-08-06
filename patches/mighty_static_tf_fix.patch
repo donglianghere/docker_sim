@@ -1,0 +1,20 @@
+diff --git a/launch/onboard_mighty.launch.py b/launch/onboard_mighty.launch.py
+index 5acf1f3..906a4a8 100644
+--- a/launch/onboard_mighty.launch.py
++++ b/launch/onboard_mighty.launch.py
+@@ -381,7 +381,14 @@ def generate_launch_description():
+         if use_hardware:
+             if use_onboard_localization:
+                 if robot_type == QUADROTOR:
+-                    nodes_to_start.append(hw_odom_to_state_node)
++                    # static_tf_node（{namespace}/map -> {namespace}/odom恒等TF）之前
++                    # 定义了但从没被加进nodes_to_start过——实测确认{namespace}/map这个
++                    # TF frame从来不存在（global_mapper_ros的lookupTransform报
++                    # "target_frame does not exist"，逐帧点云回调因此每次都直接返回，
++                    # occupancy_grid/unknown_grid话题看起来在正常发布，实际payload
++                    # 可能一直是空的/不更新的）。DLIO自己发布odom->base_link，链路上
++                    # 唯一缺的根就是这条map->odom恒等TF，补上。
++                    nodes_to_start.extend([hw_odom_to_state_node, static_tf_node])
+                 elif robot_type in [STAR_ROBOT, RED_ROVER]:
+                     nodes_to_start.extend([hw_odom_to_state_node, mpc_node]) #static_tf_node
+             else:

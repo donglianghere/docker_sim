@@ -1,0 +1,71 @@
+diff --git a/include/dlio/odom.h b/include/dlio/odom.h
+index d7a5e53..6a2f13f 100755
+--- a/include/dlio/odom.h
++++ b/include/dlio/odom.h
+@@ -139,6 +139,13 @@ private:
+   std::atomic<bool> imu_calibrated;
+   std::atomic<bool> submap_hasChanged;
+   std::atomic<bool> gicp_hasConverged;
++  // 只在callbackPointCloud()所在的主线程里写（跟gicp_hasConverged同一处），
++  // debug()跑在detached线程里，只读这个原子值，不直接调用this->gicp的任何
++  // 方法——this->gicp本身不是线程安全的，getNextPose()在主线程里持续对它做
++  // registerInputTarget()/align()，detached线程如果直接调用
++  // this->gicp.getFitnessScore()会跟主线程写它的kdtree/correspondence状态
++  // 产生数据竞争，实测直接段错误(SIGSEGV)。
++  std::atomic<double> gicp_fitness_score_;
+   std::atomic<bool> deskew_status;
+   std::atomic<int> deskew_size;
+ 
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index 4dbe664..a001dfb 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -847,6 +847,18 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
+   // Update some statistics
+   this->comp_times.push_back(this->now().seconds() - then);
+   this->gicp_hasConverged = this->gicp.hasConverged();
++  // 原来这里调this->gicp.getFitnessScore()——那是PCL Registration基类没被
++  // NanoGICP重写过的方法，内部要用基类自己的tree_(pcl::search::KdTree)做
++  // 最近邻查找。但NanoGICP自己的registerInputTarget()/computeTransformation()
++  // 走的是完全独立的一套nanoflann::KdTreeFLANN(target_kdtree_)，从来不会
++  // 触碰/构建基类那个tree_——不管等多久、不管submap_hasChanged是不是已经
++  // 翻了false，基类tree_永远是空的，getFitnessScore()对NanoGICP这个子类
++  // 来说本质上就是不安全的，不是时序问题，实测两次改法都段错误。换成
++  // LsqRegistration自己提供、真正在用的getFinalError()——GICP优化器自己
++  // 收敛时的代价函数值，纯粹读一个已经算好的成员变量，不碰任何树/指针，
++  // 什么时候调用都安全，语义上也比通用的"最近邻平均距离"更贴切（就是
++  // GICP自己在优化的那个目标函数）。
++  this->gicp_fitness_score_ = this->gicp.getFinalError();
+ 
+   // Debug statements and publish custom DLIO message
+   // 限流：原来这里每一帧点云回调都新起一个detached线程打印一次全屏仪表盘，
+@@ -2002,6 +2014,29 @@ void dlio::OdomNode::debug() {
+     << "Registration       :: keyframes: " + std::to_string(this->keyframes.size()) + ", "
+                                + "deskewed points: " + std::to_string(this->deskew_size)
+     << "|" << std::endl;
++  // 只读gicp_fitness_score_/gicp_hasConverged这两个原子成员，不直接调用
++  // this->gicp的任何方法——debug()跑在detached线程里，this->gicp本身不是
++  // 线程安全的，主线程的getNextPose()一直在对它做registerInputTarget()/
++  // align()，这里如果直接调this->gicp.getFitnessScore()会跟主线程写它的
++  // kdtree/correspondence状态产生数据竞争，实测直接段错误(SIGSEGV, exit
++  // -11)，比之前"发散→NotEnoughMemoryException"这个老崩溃方式还快，且什么
++  // 诊断信息都没打印出来就死了。fitness分值本身由主线程在submap_hasChanged
++  // 翻false（第一个submap ready）之后才捕获，这里只负责显示。
++  if (!this->submap_hasChanged) {
++    // to_string_with_precision(const T, int)按值传参、模板推导直接用实参的
++    // 静态类型——传std::atomic<double>会被推成T=std::atomic<double>，按值传参
++    // 要拷贝构造，而std::atomic的拷贝构造函数是deleted，编译直接报错（不是
++    // 运行时问题，重新build时colcon就报出来了）。先转成普通double再传。
++    double fitness = this->gicp_fitness_score_;
++    std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
++      << "GICP               :: converged: " + std::string(this->gicp_hasConverged ? "yes" : "NO")
++                                 + ", fitness: " + to_string_with_precision(fitness, 4)
++      << "|" << std::endl;
++  } else {
++    std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
++      << "GICP               :: waiting for first submap..."
++      << "|" << std::endl;
++  }
+   std::cout << "|                                                                   |" << std::endl;
+ 
+   std::cout << std::right << std::setprecision(2) << std::fixed;

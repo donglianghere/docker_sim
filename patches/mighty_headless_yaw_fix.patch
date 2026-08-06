@@ -1,0 +1,19 @@
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 10eaff8..a607ff1 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -1626,8 +1626,12 @@ bool MIGHTY::getNextGoal(state& next_goal) {
+     next_goal.dyaw = 0.0;
+   }
+ 
+-  // Hardware: zero out yaw tracking (ground robots can't track yaw commands)
+-  if (par_.use_hardware) {
++  // Hardware: zero out yaw tracking (ground robots can't track yaw commands).
++  // NOTE: this must gate on vehicle_type, not just use_hardware -- use_hardware
++  // is turned on for UAVs too (to get real DLIO odometry into mighty), and this
++  // used to zero out UAV yaw as a side effect, making the drone fly "headless"
++  // (heading never turns to face the direction of travel).
++  if (par_.use_hardware && par_.vehicle_type == "ground_robot") {
+     next_goal.yaw = 0.0;
+     next_goal.dyaw = 0.0;
+   }

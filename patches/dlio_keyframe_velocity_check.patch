@@ -1,0 +1,83 @@
+diff --git a/include/dlio/odom.h b/include/dlio/odom.h
+index 6a2f13f..00379fa 100755
+--- a/include/dlio/odom.h
++++ b/include/dlio/odom.h
+@@ -337,6 +337,7 @@ private:
+ 
+   double keyframe_thresh_dist_;
+   double keyframe_thresh_rot_;
++  double keyframe_max_velocity_;
+ 
+   int submap_knn_;
+   int submap_kcv_;
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index efc2169..338a42f 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -200,6 +200,10 @@ void dlio::OdomNode::getParams() {
+   // Keyframe Threshold
+   dlio::declare_param(this, "odom/keyframe/threshD", this->keyframe_thresh_dist_, 0.1);
+   dlio::declare_param(this, "odom/keyframe/threshR", this->keyframe_thresh_rot_, 1.0);
++  // 关键帧插入的隐含速度上限(m/s)——见updateKeyframes()里的用法说明。默认5.0
++  // 对这套仿真(20米见方小房间、四旋翼)来说是个很宽松的上限，正常飞行不会碰到，
++  // 只用来拦住"估计值一帧之内跳了好几米"这种明显不符合物理的情况。
++  dlio::declare_param(this, "odom/keyframe/maxVelocity", this->keyframe_max_velocity_, 5.0);
+ 
+   // Submap
+   dlio::declare_param(this, "odom/submap/keyframe/knn", this->submap_knn_, 10);
+@@ -1633,18 +1637,43 @@ void dlio::OdomNode::updateKeyframes() {
+ 
+   if (newKeyframe) {
+ 
+-    // 诊断：新关键帧的插入判据(updateKeyframes()上面这段)纯粹基于this->state.p
+-    // 这个"估计出来的"位置去跟已有关键帧比距离/角度，完全没有跟"飞机是否真的
+-    // 物理移动过"做任何交叉核实——如果估计值本身已经在飘，飘过1米
+-    // (keyframe_thresh_dist_)的阈值就会照样插入一个新关键帧，把当前(其实是
+-    // 错的)位姿和点云焊进地图里，后续的扫描很可能会对着这个已经被污染的
+-    // 地图配准得"很好"(因为都是同一条漂移轨迹自洽推出来的)，就是"GICP显示
+-    // 收敛完美、fitness≈0，但整条轨迹早就飘出去了"这个现象的一个具体候选
+-    // 解释。这里打印每次关键帧插入时触发它的dd(距最近关键帧的距离，超过
+-    // keyframe_thresh_dist_=1.0米就会触发)和当前估计位置，主线程内同步打印
+-    // (不经过debug()那个detached线程，不碰GICP/PCL任何内部状态，只读本函数
+-    // 内已经算好的普通局部变量，没有线程安全或空指针风险)。直接在main线程
+-    // 跑，没有节流，关键帧本来就不会每帧都插入，正常情况下频率很低。
++    // 上面这段newKeyframe判据纯粹基于this->state.p这个"估计出来的"位置去跟
++    // 已有关键帧比距离/角度，完全没有跟"飞机是否真的物理移动过"做任何交叉
++    // 核实——如果估计值本身已经在飘，飘过阈值就会照样插入一个新关键帧，把
++    // 当前(其实是错的)位姿和点云焊进地图里，后续的扫描会对着这个已经被
++    // 污染的地图配准得"很好"(因为都是同一条漂移轨迹自洽推出来的)，是一条
++    // 自我强化的发散循环——实测确认过：飞机全程静止，一架飞机能插出几百个
++    // 关键帧，估计位置飘出上百米，GICP全程还报告"收敛、fitness≈0"（因为
++    // 它对的是自己刚参与污染出来的地图，不是客观真值）。
++    //
++    // 加一层物理合理性检查：用dd(这次触发关键帧的位移)除以距上一个(空间上
++    // 最近的那个)关键帧的时间差，算出"隐含速度"——四旋翼在这套20米见方的
++    // 小房间里，正常飞行不可能达到keyframe_max_velocity_(默认5m/s)这么快，
++    // 真出现这么大的隐含速度基本可以确定是估计值本身在瞬间跳变，不是真的
++    // 飞过去的。这种情况下拒绝插入这个关键帧(跳过，不焊进地图)，只打印
++    // 一条警告——地图保持在最后一个"合理"的关键帧状态，不再被继续污染，
++    // 后续GICP会对着这份没被污染的地图配准，能不能把估计值拉回来取决于
++    // GICP这一层本身，但至少不会再帮着把错误"焊死"进地图里。第一个关键帧
++    // (this->keyframes为空)必须无条件接受，没有"上一个关键帧"可比较。
++    bool velocity_sane = true;
++    if (!this->keyframes.empty()) {
++      double dt_since_closest_kf = this->scan_stamp - rclcpp::Time(this->keyframe_timestamps[closest_idx]).seconds();
++      if (dt_since_closest_kf > 1e-3) {
++        double implied_speed = std::abs(dd) / dt_since_closest_kf;
++        if (implied_speed > this->keyframe_max_velocity_) {
++          velocity_sane = false;
++          std::cout << "[updateKeyframes] REJECTED new keyframe: implied speed "
++                    << implied_speed << "m/s over " << dt_since_closest_kf
++                    << "s (dd=" << dd << "m) exceeds keyframe_max_velocity_="
++                    << this->keyframe_max_velocity_ << "m/s -- estimate likely "
++                    << "jumped, not the robot. Keeping existing map as-is." << std::endl;
++        }
++      }
++    }
++    if (!velocity_sane) {
++      return;
++    }
++
+     std::cout << "[updateKeyframes] new keyframe #" << this->keyframes.size()
+               << " triggered by dd=" << dd << "m (thresh=" << this->keyframe_thresh_dist_
+               << "m), theta=" << theta_deg << "deg (thresh=" << this->keyframe_thresh_rot_

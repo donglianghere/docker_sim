@@ -1,0 +1,25 @@
+diff --git a/launch/dynus_mavros.launch.py b/launch/dynus_mavros.launch.py
+index d2d542d..0153a09 100644
+--- a/launch/dynus_mavros.launch.py
++++ b/launch/dynus_mavros.launch.py
+@@ -10,6 +10,10 @@ def generate_launch_description():
+     init_x, init_y, init_z = os.environ.get("INIT_X"), os.environ.get("INIT_Y"), os.environ.get("INIT_Z")
+     init_roll, init_pitch, init_yaw = os.environ.get("INIT_ROLL"), os.environ.get("INIT_PITCH"), os.environ.get("INIT_YAW")
+     veh = os.environ.get("VEH_NAME")
++    # 见 dynus_offboard_node.py 里 OffboardDynusFollower.__init__ 的大段注释：
++    # trajectory（默认）走位置/速度/加速度轨迹，attitude走微分平坦度姿态直控。
++    # entrypoint 脚本里 export CONTROL_LAW（默认trajectory），这里读出来传给节点参数。
++    control_law = os.environ.get("CONTROL_LAW", "trajectory")
+ 
+     return LaunchDescription([
+         # Declare launch arguments
+@@ -28,6 +32,9 @@ def generate_launch_description():
+             name='track_dynus_traj_py',
+             namespace=namespace,
+             output='screen',
++            parameters=[{
++                'control_law': control_law,
++            }],
+         ),
+ 
+         # Static transforms

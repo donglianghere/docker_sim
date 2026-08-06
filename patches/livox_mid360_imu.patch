@@ -1,0 +1,39 @@
+diff --git a/urdf/mid360.xacro b/urdf/mid360.xacro
+index a0c965b..35509dd 100644
+--- a/urdf/mid360.xacro
++++ b/urdf/mid360.xacro
+@@ -86,19 +86,24 @@
+       </sensor>
+ 
+       <!-- IMU -->
+-      <!-- <sensor name="${name}/imu" type="imu">
++      <!-- 原来这段被注释掉、且参数是<topicName>/<bodyName>这套写法——那是抄错了
++           别的老式Gazebo IMU插件的SDF接口，libimu_plugin.so（mighty自己vendor的
++           gazebo_ros_imu_sensor.cpp，逻辑照抄标准gazebo_ros_pkgs实现）根本不读
++           这几个字段，是通过<ros><namespace>/<remapping>这套gazebo_ros标准约定来
++           定位话题的。啥都不改直接取消注释是没用的，DLIO永远收不到IMU数据。
++           改成<ros>标签，让最终话题跟点云一样按 namespace+topic 拼成
++           "${namespace}/${topic}/imu"（比如 NX01/mid360/imu），
++           跟 flight-stack-entrypoint.sh 里传给DLIO的 imu_topic 对上。 -->
++      <sensor name="${name}_imu" type="imu">
+         <always_on>true</always_on>
+         <update_rate>${gyro_fps}</update_rate>
+-        <topic>${name}/imu/sample</topic>
+-        <plugin name="${name}_imu" filename="libimu_plugin.so">
+-          <topicName>${name}/imu/sample</topicName>
+-          <bodyName>${name}_link</bodyName>
+-          <updateRateHZ>${gyro_fps}</updateRateHZ>
+-          <gaussianNoise>0.0</gaussianNoise>
+-          <xyzOffset>0 0 0</xyzOffset>
+-          <rpyOffset>0 0 0</rpyOffset>
++        <plugin name="${name}_imu_plugin" filename="libimu_plugin.so">
++          <ros>
++            <namespace>${namespace}</namespace>
++            <remapping>~/out:=${topic}/imu</remapping>
++          </ros>
+         </plugin>
+-      </sensor> -->
++      </sensor>
+ 
+       <!-- Accel -->
+       <!-- <sensor name="${name}accel" type="imu">

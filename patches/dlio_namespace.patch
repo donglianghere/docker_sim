@@ -1,0 +1,86 @@
+diff --git a/launch/dlio.launch.py b/launch/dlio.launch.py
+index 340ac19..0693542 100644
+--- a/launch/dlio.launch.py
++++ b/launch/dlio.launch.py
+@@ -10,8 +10,8 @@
+ 
+ from launch import LaunchDescription
+ from launch.actions import DeclareLaunchArgument
+-from launch.conditions import IfCondition   
+-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
++from launch.conditions import IfCondition
++from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+ from launch_ros.actions import Node
+ from launch_ros.substitutions import FindPackageShare
+ 
+@@ -22,6 +22,7 @@ def generate_launch_description():
+     rviz = LaunchConfiguration('rviz', default='false')
+     pointcloud_topic = LaunchConfiguration('pointcloud_topic', default='points_raw')
+     imu_topic = LaunchConfiguration('imu_topic', default='imu_raw')
++    namespace = LaunchConfiguration('namespace', default='')
+ 
+     # Define arguments
+     declare_rviz_arg = DeclareLaunchArgument(
+@@ -39,6 +40,25 @@ def generate_launch_description():
+         default_value=imu_topic,
+         description='IMU topic name'
+     )
++    declare_namespace_arg = DeclareLaunchArgument(
++        'namespace',
++        default_value=namespace,
++        description='Vehicle namespace (e.g. NX01). Applied as the ROS node namespace '
++                     '(so multiple DLIO instances sharing one ROS graph get distinct node '
++                     'names/topics instead of colliding on dlio_odom_node/dlio/odom_node/*) '
++                     'and as a TF frame_id prefix (<ns>/odom, <ns>/base_link, ...) so their '
++                     'published transforms do not collide on the shared /tf topic either.'
++    )
++
++    # frame_id prefix: "<namespace>/<name>" if a namespace was given, else "<name>" unchanged
++    def _ns_frame(name):
++        return PythonExpression(
++            ["'", namespace, "/", name, "' if '", namespace, "' else '", name, "'"]
++        )
++    odom_frame = _ns_frame('odom')
++    baselink_frame = _ns_frame('base_link')
++    lidar_frame = _ns_frame('lidar')
++    imu_frame = _ns_frame('imu')
+ 
+     # Load parameters
+     dlio_yaml_path = PathJoinSubstitution([current_pkg, 'cfg', 'dlio.yaml'])
+@@ -48,8 +68,14 @@ def generate_launch_description():
+     dlio_odom_node = Node(
+         package='direct_lidar_inertial_odometry',
+         executable='dlio_odom_node',
++        namespace=namespace,
+         output='screen',
+-        parameters=[dlio_yaml_path, dlio_params_yaml_path],
++        parameters=[dlio_yaml_path, dlio_params_yaml_path, {
++            'frames/odom': odom_frame,
++            'frames/baselink': baselink_frame,
++            'frames/lidar': lidar_frame,
++            'frames/imu': imu_frame,
++        }],
+         remappings=[
+             ('pointcloud', pointcloud_topic),
+             ('imu', imu_topic),
+@@ -66,8 +92,11 @@ def generate_launch_description():
+     dlio_map_node = Node(
+         package='direct_lidar_inertial_odometry',
+         executable='dlio_map_node',
++        namespace=namespace,
+         output='screen',
+-        parameters=[dlio_yaml_path, dlio_params_yaml_path],
++        parameters=[dlio_yaml_path, dlio_params_yaml_path, {
++            'odom/odom_frame': odom_frame,
++        }],
+         remappings=[
+             ('keyframes', 'dlio/odom_node/pointcloud/keyframe'),
+         ],
+@@ -88,6 +117,7 @@ def generate_launch_description():
+         declare_rviz_arg,
+         declare_pointcloud_topic_arg,
+         declare_imu_topic_arg,
++        declare_namespace_arg,
+         dlio_odom_node,
+         dlio_map_node,
+         rviz_node

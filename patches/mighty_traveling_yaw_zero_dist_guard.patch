@@ -1,0 +1,31 @@
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 1e04344..3a6e641 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -1745,12 +1745,23 @@ void MIGHTY::getDesiredYaw(state& next_goal) {
+       // std::cout << "diff1= " << diff << std::endl;
+       break;
+     case DroneStatus::TRAVELING:
+-    case DroneStatus::GOAL_SEEN:
+-      desired_yaw =
+-          atan2(next_goal.pos[1] - local_state.pos.y(), next_goal.pos[0] - local_state.pos.x());
++    case DroneStatus::GOAL_SEEN: {
++      // next_goal.pos is the very next sample on the local spline, only
++      // centimeters ahead of local_state.pos in general -- right after a
++      // GOAL_REACHED -> TRAVELING transition (or on any near-stationary
++      // segment) that delta shrinks to noise level, and atan2() on a
++      // near-zero vector spins unpredictably across the full +-180deg
++      // range from one planner cycle to the next. Same failure class as
++      // the z_B/y_B degeneracies already guarded in get_drone_frame() on
++      // the ros2_px4_stack side -- hold the previous yaw instead of
++      // trusting a direction computed from noise.
++      const double dx = next_goal.pos[0] - local_state.pos.x();
++      const double dy = next_goal.pos[1] - local_state.pos.y();
++      desired_yaw = (std::hypot(dx, dy) > 0.05) ? atan2(dy, dx) : previous_yaw_;
+       diff = desired_yaw - local_state.yaw;
+       next_goal.yaw = desired_yaw;
+       break;
++    }
+     case DroneStatus::GOAL_REACHED:
+       next_goal.dyaw = 0.0;
+       next_goal.yaw = previous_yaw_;

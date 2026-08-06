@@ -1,0 +1,12 @@
+diff --git a/launch/base_mighty.launch.py b/launch/base_mighty.launch.py
+index 2873332..986b780 100644
+--- a/launch/base_mighty.launch.py
++++ b/launch/base_mighty.launch.py
+@@ -62,6 +62,7 @@ def generate_launch_description():
+         env_value = LaunchConfiguration('env').perform(context)
+         # Map environment names to corresponding Gazebo world file names.
+         world_mapping = {
++            'simple_room': 'simple_room.world',
+             'high_res_forest': 'big_forest_high_res.world',
+             'static_uncertainty_test2': 'static_uncertainty_test2.world',
+             'static_uncertainty_test3': 'static_uncertainty_test3.world',

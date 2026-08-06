@@ -1,0 +1,62 @@
+# ----------------------------------------------------------------------------
+# 单一飞机物理参数来源 —— 对应之前《专项报告：飞机物理参数配置问题》里发现的
+# mass=1.0(mighty) vs m=2.906(ros2_px4_stack硬编码) 数值不一致问题。
+#
+# 这里统一成一个数字，mighty 和 ros2_px4_stack 都从这一份文件读，不再各自硬编码。
+#
+# mass/f_min/f_max/hover_thrust 这几个是这套docker_sim当前实际用的仿真机型
+# （PX4官方iris + gen_iris_mid360_sdf.py挂载的mid360/IMU）算出来的真实值，
+# 不是占位数：
+#   - 质量：iris本体1.535kg（iris.sdf.jinja的base_link+imu_link+4个rotor）
+#     + mid360/IMU负载0.4kg（gen_iris_mid360_sdf.py的mid360_link mass）= 1.935kg
+#   - 单电机最大推力：motorConstant(5.84e-6) * maxRotVelocity(1100)^2 = 7.0664N，
+#     4电机合计28.27N理论上限，f_max取26N（留约8%余量，不假设电机能一直顶满理论
+#     最大转速）
+#   - hover_thrust：1.935kg*9.81 / 28.27N ≈ 0.671（悬停需要理论最大推力的67%）
+# 之前mighty这边实际生效的是hw_mighty.yaml的mass=1.0kg（比真实质量轻94%，
+# 见patches/mighty_onboard_vehicle_profile.patch的说明——这份vehicle_profile.yaml
+# 原来因为覆盖顺序bug，写在这里的值根本没生效，已经在那个patch里修掉了）；
+# f_max=12N配这个虚高的质量估算，规划器以为推力余量很宽松，实际按真实质量算
+# 悬停就要19N，跟26N上限比余量并不宽（约1.4倍），是"感觉动力不足、转不过来"的
+# 一个具体、可核实的根因。
+#
+# v_max/a_max/j_max/omega_max/tilt_max_rad/drone_bbox这几个**不在**这份文件里
+# （故意去掉了，见下面说明）——这些是"规划行为调优"参数，不是"飞机物理参数"，
+# 真正生效的版本在mighty自己的config/hw_mighty.yaml里、跟着这次仿真里其它
+# 调参（避障余量、多机避让权重等）一起维护，不重复放在这里造成两处不一致；
+# 上真机时如果需要跟这些行为参数联动，直接改hw_mighty.yaml，不要在这份文件里
+# 加回来（历史上这里曾经放过一套跟hw_mighty.yaml不一样的数值，靠一个patch顺序
+# bug才没有意外生效，教训是不要让同一批参数有两个不同步的副本）。
+#
+# ros2_px4_stack 目前(dynus分支)是把 mass/hover_thrust 写死在 .py 源码里的，
+# patches/ros2_px4_stack_dynus.patch 把 get_thrust()/get_angular() 里的
+# `m = 2.906` 改成读这份文件——但要注意 get_thrust()/get_angular() 所在的
+# `_pack_into_attitude()` 这条控制路径目前**从未被调用**（`dynus_offboard_node.py`
+# 里`self.attitude_setpoint`只在`__init__`赋值None、从没被真正赋过值），
+# 实际控制路径走的是`_pack_into_traj()`/`MultiDOFJointTrajectory`，PX4自己的
+# 位置控制器接管，这份mass/hover_thrust对ros2_px4_stack这边目前没有实际效果，
+# 只是保持数值一致、以后如果重新启用姿态直控这条路径能直接用。
+# ----------------------------------------------------------------------------
+
+# -------- mighty_node（轨迹可行性约束，参见 lbfgs_solver.cpp 里 mass_ 的使用） --------
+mighty_node:
+  ros__parameters:
+    mass: 1.935                   # [kg] 与下面 offboard_dynus_follower.mass 保持一致
+    f_min: 3.0                    # [N]  最小推力
+    f_max: 26.0                   # [N]  最大推力（4电机理论上限28.27N留8%余量）
+
+# -------- ros2_px4_stack dynus分支 offboard follower（推力/角速度换算） --------
+# 节点名对应 dynus_offboard_node.py 里 super().__init__(node_name=...)，
+# 具体名字要跟patch后的实际代码核对一致。目前实际控制路径没有调用到这几个数
+# （见上面大段说明），保留只是为了数值一致性/以后备用。
+offboard_dynus_follower:
+  ros__parameters:
+    mass: 1.935                   # [kg] 必须和上面 mighty_node.mass 完全一致
+    hover_thrust: 0.67             # [-] 1.935kg*9.81/28.27N理论上限≈0.671
+
+# -------- UWB 真值模拟节点 --------
+uwb_ground_truth_node:
+  ros__parameters:
+    range_noise_std: 0.05          # [m] 模拟UWB测距噪声标准差，先给个粗略量级
+    latency_ms: 30.0                # [ms] 模拟测距+解算延迟
+    publish_rate_hz: 10.0

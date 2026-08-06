@@ -1,0 +1,15 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index 02779d5..f2be38c 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -123,8 +123,8 @@ mighty_node:
+         yaw_spinning_dyaw: 1.0                  # [rd/s] Spinning dyaw
+ 
+         # Simulation env parameters
+-        force_goal_z: false                     # [-] Force the goal to be at the certain height since Rviz GUI's goal's z is 0
+-        default_goal_z: 1.0                     # [m] Default goal height
++        force_goal_z: true                      # [-] Force the goal to be at the certain height since Rviz GUI's goal's z is 0
++        default_goal_z: 1.5                     # [m] Default goal height
+ 
+         # Debug flags
+         global_planner_verbose: false           # debug output

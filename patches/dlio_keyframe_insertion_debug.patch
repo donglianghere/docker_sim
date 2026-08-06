@@ -1,0 +1,29 @@
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index a001dfb..efc2169 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -1633,6 +1633,24 @@ void dlio::OdomNode::updateKeyframes() {
+ 
+   if (newKeyframe) {
+ 
++    // 诊断：新关键帧的插入判据(updateKeyframes()上面这段)纯粹基于this->state.p
++    // 这个"估计出来的"位置去跟已有关键帧比距离/角度，完全没有跟"飞机是否真的
++    // 物理移动过"做任何交叉核实——如果估计值本身已经在飘，飘过1米
++    // (keyframe_thresh_dist_)的阈值就会照样插入一个新关键帧，把当前(其实是
++    // 错的)位姿和点云焊进地图里，后续的扫描很可能会对着这个已经被污染的
++    // 地图配准得"很好"(因为都是同一条漂移轨迹自洽推出来的)，就是"GICP显示
++    // 收敛完美、fitness≈0，但整条轨迹早就飘出去了"这个现象的一个具体候选
++    // 解释。这里打印每次关键帧插入时触发它的dd(距最近关键帧的距离，超过
++    // keyframe_thresh_dist_=1.0米就会触发)和当前估计位置，主线程内同步打印
++    // (不经过debug()那个detached线程，不碰GICP/PCL任何内部状态，只读本函数
++    // 内已经算好的普通局部变量，没有线程安全或空指针风险)。直接在main线程
++    // 跑，没有节流，关键帧本来就不会每帧都插入，正常情况下频率很低。
++    std::cout << "[updateKeyframes] new keyframe #" << this->keyframes.size()
++              << " triggered by dd=" << dd << "m (thresh=" << this->keyframe_thresh_dist_
++              << "m), theta=" << theta_deg << "deg (thresh=" << this->keyframe_thresh_rot_
++              << "deg), estimated pos=(" << this->state.p[0] << ", " << this->state.p[1]
++              << ", " << this->state.p[2] << ")" << std::endl;
++
+     // update keyframe vector
+     std::unique_lock<decltype(this->keyframes_mutex)> lock(this->keyframes_mutex);
+     this->keyframes.push_back(std::make_pair(std::make_pair(this->lidarPose.p, this->lidarPose.q), this->current_scan));

@@ -1,0 +1,47 @@
+diff --git a/urdf/mid360.xacro b/urdf/mid360.xacro
+index 35509dd..4de06df 100644
+--- a/urdf/mid360.xacro
++++ b/urdf/mid360.xacro
+@@ -34,6 +34,15 @@
+ 
+     <link name="${name}">
+       <xacro:box_inertia m="${length}" w="${width}" d="${length}" h="${height}"/>
++      <visual>
++        <origin xyz="0 0 0" rpy="0 0 0"/>
++        <geometry>
++          <box size="${length} ${width} ${height}"/>
++        </geometry>
++        <material name="${name}_material">
++          <color rgba="0.1 0.1 0.1 1"/>
++        </material>
++      </visual>
+     </link>
+ 
+     <joint name="${name}_joint" type="fixed">
+@@ -46,7 +55,7 @@
+       <sensor type="ray" name="${name}">
+         <pose>0 0 0 0 0 0</pose>
+         <always_on>true</always_on>
+-        <visualize>false</visualize>  <!-- Ensure no sensor visualization -->
++        <visualize>true</visualize>  <!-- 打开射线可视化，GUI里能看到扫描线 -->
+         <update_rate>${lidar_update_rate}</update_rate>
+         <!-- This ray plugin is for sensor data -->
+         <plugin name="${name}_plugin" filename="libros2_livox.so">
+@@ -76,7 +85,7 @@
+             <stddev>${noise_stddev}</stddev>
+             </noise>
+           </ray>
+-          <visualize>false</visualize>
++          <visualize>true</visualize>
+           <samples>${samples}</samples>
+           <downsample>1</downsample>
+           <csv_file_name>$(find ros2_livox_simulation)/scan_mode/mid360.csv</csv_file_name>
+@@ -140,7 +149,7 @@
+         </plugin>
+       </sensor> -->
+ 
+-      <gravity>0</gravity>
++      <gravity>1</gravity>
+ 
+     </gazebo>
+ 

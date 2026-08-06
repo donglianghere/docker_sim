@@ -1,0 +1,45 @@
+diff --git a/include/dlio/odom.h b/include/dlio/odom.h
+index 00379fa..621f230 100755
+--- a/include/dlio/odom.h
++++ b/include/dlio/odom.h
+@@ -159,6 +159,11 @@ private:
+   // 经常整段乱套）。限流到最多每debug_print_period_秒打印一次。
+   double last_debug_print_time_ = 0.0;
+   const double debug_print_period_ = 1.0;
++  // propagateState()里纯IMU死推算(在GICP/geometric observer任何矫正介入
++  // 之前)的诊断打印节流——只在callbackImu()所在的单一线程里读写(imu_cb_group
++  // 是MutuallyExclusive，同一时刻只有一个callbackImu()在跑)，且始终在
++  // this->geo.mtx这把已有的锁保护范围内访问，不需要额外加锁或原子类型。
++  double last_propagate_debug_print_time_ = 0.0;
+ 
+   // Trajectory
+   std::vector<std::pair<Eigen::Vector3f, Eigen::Quaternionf>> trajectory;
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index 338a42f..d929c8a 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -1332,6 +1332,24 @@ void dlio::OdomNode::propagateState() {
+   this->state.v.ang.b = this->imu_meas.ang_vel;
+   this->state.v.ang.w = this->state.q.toRotationMatrix() * this->state.v.ang.b;
+ 
++  // 诊断：打印纯IMU死推算(propagateState()这个函数本身，在updateState()里
++  // GICP/geometric observer任何矫正介入之前)算出来的world_accel/净加速度/
++  // 速度/位置——直接观察"不经GICP矫正、纯靠IMU积分"这条链路自己涨得有多快、
++  // 重力扣除后的Z轴净加速度是否长期接近0(静止应有的样子)。用
++  // this->imu_meas.stamp(已经是sim time+固定偏移，不受real-time-factor
++  // 漂移影响)节流到每秒最多打印一次，全程在this->geo.mtx这把已有的锁保护
++  // 范围内、propagateState()自身运行的这个线程(imu_cb_group是
++  // MutuallyExclusive，不会有第二个callbackImu()并发)，安全。
++  if (this->imu_meas.stamp - this->last_propagate_debug_print_time_ >= 1.0) {
++    this->last_propagate_debug_print_time_ = this->imu_meas.stamp;
++    std::cout << "[propagateState] dt=" << dt
++              << " world_accel=(" << world_accel[0] << ", " << world_accel[1] << ", " << world_accel[2] << ")"
++              << " net_accel_z=" << (world_accel[2] - this->gravity_)
++              << " vel=(" << this->state.v.lin.w[0] << ", " << this->state.v.lin.w[1] << ", " << this->state.v.lin.w[2] << ")"
++              << " pos=(" << this->state.p[0] << ", " << this->state.p[1] << ", " << this->state.p[2] << ")"
++              << std::endl;
++  }
++
+ }
+ 
+ void dlio::OdomNode::updateState() {

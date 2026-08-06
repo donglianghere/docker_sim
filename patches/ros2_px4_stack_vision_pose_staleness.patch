@@ -1,0 +1,82 @@
+diff --git a/ros2_px4_stack/transforms/repub_odom.py b/ros2_px4_stack/transforms/repub_odom.py
+index 76286cc..9ca14bf 100644
+--- a/ros2_px4_stack/transforms/repub_odom.py
++++ b/ros2_px4_stack/transforms/repub_odom.py
+@@ -9,6 +9,7 @@ from geometry_msgs.msg import PoseStamped, TwistStamped, PoseWithCovarianceStamp
+ import threading
+ from threading import Thread
+ from nav_msgs.msg import Odometry
++import time
+ 
+ class OdomRepublisher(Node):
+     def __init__(self, pub_hz=100.0):
+@@ -47,6 +48,16 @@ class OdomRepublisher(Node):
+ 
+         self._last_pose_msg = None
+         self._last_twist_msg = None
++        # 之前这个republish loop不管_last_pose_msg/_last_twist_msg是什么时候
++        # 收到的，只要不是None就一直按pub_hz重发——上游DLIO/mocap真的断了
++        # （比如DLIO崩溃），这里还是会用"最后一帧"的旧数据继续按正常频率发布，
++        # PX4那边看vision_pose的更新频率完全正常，检测不出数据其实已经冻结了，
++        # 真机上这是个安全隐患（vision timeout保护会被这种"假心跳"绕过）。
++        # 加一个"多久没收到新数据就停止转发"的看门狗，让PX4自己的vision
++        # timeout机制能正常触发。
++        self._last_recv_time = None
++        self.stale_timeout_sec = self.declare_parameter("~stale_timeout_sec", 0.5).value
++        self._was_stale = False
+ 
+         # Publish pose and twist with covariance at the specified rate in a separate thread
+         self._pub_hz = pub_hz
+@@ -71,6 +82,7 @@ class OdomRepublisher(Node):
+         pose_cov[35] = 0.005   # yaw   variance [rad^2]
+         pose_msg.pose.covariance = pose_cov
+         self._last_pose_msg = pose_msg
++        self._last_recv_time = time.monotonic()
+ 
+     def _mocap_twist_cb(self, msg):
+         twist_msg = TwistWithCovarianceStamped()
+@@ -87,6 +99,7 @@ class OdomRepublisher(Node):
+         twist_cov[35] = 0.005   # wz variance [(rad/s)^2]
+         twist_msg.twist.covariance = twist_cov
+         self._last_twist_msg = twist_msg
++        self._last_recv_time = time.monotonic()
+ 
+     def _livox_odom_cb(self, msg):
+         # Forward raw odom to PX4 (in camera_init frame).
+@@ -124,14 +137,32 @@ class OdomRepublisher(Node):
+         twist_cov[35] = 0.03    # wz variance [(rad/s)^2]
+         twist_msg.twist.covariance = twist_cov
+         self._last_twist_msg = twist_msg
++        self._last_recv_time = time.monotonic()
+ 
+     def _publish_loop(self):
+         rate = self.create_rate(self._pub_hz)
+         while rclpy.ok():
+-            if self._last_pose_msg:
+-                self._pose_pub.publish(self._last_pose_msg)
+-            if self._last_twist_msg:
+-                self._twist_pub.publish(self._last_twist_msg)
++            is_stale = (
++                self._last_recv_time is None
++                or (time.monotonic() - self._last_recv_time) > self.stale_timeout_sec
++            )
++            if is_stale:
++                # 上游（DLIO/mocap）超过stale_timeout_sec没给新数据了——停止转发，
++                # 而不是继续按pub_hz重发"最后一帧"旧数据。让PX4自己的vision
++                # timeout保护能正常触发，而不是被这种假心跳绕过去。
++                if not self._was_stale:
++                    self.get_logger().error(
++                        f"上游odom/pose源已经{self.stale_timeout_sec}秒没有新数据了，"
++                        f"停止向{self.pose_pub_topic_name}转发陈旧数据")
++                    self._was_stale = True
++            else:
++                if self._was_stale:
++                    self.get_logger().info("上游odom/pose源恢复了，继续转发")
++                    self._was_stale = False
++                if self._last_pose_msg:
++                    self._pose_pub.publish(self._last_pose_msg)
++                if self._last_twist_msg:
++                    self._twist_pub.publish(self._last_twist_msg)
+             rate.sleep()
+ 
+ def main():

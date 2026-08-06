@@ -1,0 +1,21 @@
+diff --git a/launch/onboard_mighty.launch.py b/launch/onboard_mighty.launch.py
+index 906a4a8..fe6b7f9 100644
+--- a/launch/onboard_mighty.launch.py
++++ b/launch/onboard_mighty.launch.py
+@@ -371,9 +371,15 @@ def generate_launch_description():
+             output='screen', emulate_tty=True)
+ 
+         # HW: Static TF (map->odom identity, for robots using external localization)
++        # namespace=namespace——之前这里没设置，NX01/NX02两边都会起一个叫
++        # /static_tf_map_to_odom的节点，`ros2 node list`实测确认了这个撞名
++        # （"share an exact name"警告）。这个节点本身发布的TF内容用的是
++        # {namespace}/map -> {namespace}/odom（正确加了命名空间），撞名不影响
++        # 已经发布出去的数据本身，但节点名冲突本身是个真实的ROS graph卫生问题，
++        # 顺手一起修掉。
+         static_tf_node = Node(
+             package='tf2_ros', executable='static_transform_publisher',
+-            name='static_tf_map_to_odom', output='screen',
++            name='static_tf_map_to_odom', namespace=namespace, output='screen',
+             arguments=['0','0','0','0','0','0','1', f'{namespace}/map', f'{namespace}/odom'])
+         
+         # Return launch description

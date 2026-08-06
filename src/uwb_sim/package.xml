@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uwb_sim</name>
+  <version>0.0.1</version>
+  <description>
+    用Gazebo仿真ground truth模拟双机UWB测距/相对定位，输出格式对齐mighty的
+    frame_align话题(/frame_align/{ns}/{other}, geometry_msgs/TransformStamped)，
+    这样不用改mighty任何代码即可复用它现成的frame_align订阅逻辑。
+  </description>
+  <maintainer email="todo@todo.todo">todo</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>gazebo_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf_transformations</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

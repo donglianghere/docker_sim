@@ -1,0 +1,35 @@
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index 1ae04e7..4dbe664 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -978,7 +978,14 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
+   } else {
+ 
+     double dt = imu_stamp_secs - this->prev_imu_stamp;
+-    if (dt == 0) { dt = 1.0/200.0; }
++    // 原来只挡dt严格等于0的情况——实测mid360/imu这套仿真的发布间隔极不规律
++    // （`ros2 topic hz`量出来平均~470Hz，但min interval显示0.000s，偶尔还有
++    // 0.104s的大间隙），"非零但极小"的dt比"正好是0"更常见也更危险：这个dt会
++    // 存进imu_meas.dt，被下面propagateState()直接用来做速度/位置积分，极小的
++    // dt配上仿真里几乎零噪声的IMU读数中偶发的微小抖动，会在积分时放大成异常
++    // 尖峰，是DLIO静止状态下依然发散（"走了两千米"）的一个可能推手。改成对
++    // "过小"也做同样的兜底，不只挡"正好是0"。
++    if (dt < 1e-4) { dt = 1.0/200.0; }
+     this->imu_rates.push_back( 1./dt );
+ 
+     // Apply the calibrated bias to the new IMU measurements
+@@ -1382,8 +1389,12 @@ sensor_msgs::msg::Imu::SharedPtr dlio::OdomNode::transformImu(const sensor_msgs:
+   static double prev_stamp = imu_stamp_secs;
+   double dt = imu_stamp_secs - prev_stamp;
+   prev_stamp = imu_stamp_secs;
+-  
+-  if (dt == 0) { dt = 1.0/200.0; }
++
++  // 同样的问题：这个dt直接给下面的杆臂修正项(ang_vel_cg - ang_vel_cg_prev)/dt
++  // 当分母——mid360/imu这套仿真发布间隔极不规律（实测min interval显示0.000s），
++  // dt"非零但极小"时这一项会被放大成数值尖峰，注入到"修正后"的线加速度里，比
++  // "正好是0"这种情况更常见也更危险。原来只挡dt==0，这里也改成挡"过小"。
++  if (dt < 1e-4) { dt = 1.0/200.0; }
+ 
+   // Transform angular velocity (will be the same on a rigid body, so just rotate to ROS convention)
+   Eigen::Vector3f ang_vel(imu_raw->angular_velocity.x,

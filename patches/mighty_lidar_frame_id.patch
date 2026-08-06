@@ -1,0 +1,15 @@
+diff --git a/src/mighty/mighty_node.cpp b/src/mighty/mighty_node.cpp
+index ba9ebc5..0499f31 100644
+--- a/src/mighty/mighty_node.cpp
++++ b/src/mighty/mighty_node.cpp
+@@ -267,7 +267,9 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
+ 
+   // Initialize the d435 depth frame ID and camera
+   d435_depth_frame_id_ = ns_ + "/" + ns_ + "_d435_depth_optical_frame";
+-  lidar_frame_id_ = ns_ + "/NX01_livox";
++  // 原来这里硬编码了"NX01"，多机场景下除NX01外其余agent的雷达TF frame名字
++  // 都会算错——改成跟d435那行一样，按当前agent自己的命名空间生成。
++  lidar_frame_id_ = ns_ + "/" + ns_ + "_livox";
+ 
+   // Construct the FOV marker
+   constructFOVMarker();

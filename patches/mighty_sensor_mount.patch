@@ -1,0 +1,24 @@
+diff --git a/urdf/quadrotor.urdf.xacro b/urdf/quadrotor.urdf.xacro
+index a518673..1d1961a 100644
+--- a/urdf/quadrotor.urdf.xacro
++++ b/urdf/quadrotor.urdf.xacro
+@@ -19,7 +19,18 @@
+     <!-- Livox -->
+     <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro" />
+     <xacro:mid360 name="$(arg namespace)_livox" namespace="$(arg namespace)" parent="base_link" topic="mid360" >
+-      <origin xyz="0 0 0.2" rpy="0 0.3 0"/>
++      <!-- 原来先是 rpy="0 0.3 0"（约17.2度前倾），后来改成30度=0.5236rad，
++           实测发现前倾反而有负面影响：mid360原生垂直FOV本来就整体偏上
++           (-7.2°~+55.2°)，再前倾30度变成22.8°~85.2°，几乎完全偏离水平面，
++           必须先转机头才能扫到正前方同高度的障碍物——这是"飞机快到障碍物
++           跟前机头还没转过来就撞上"的物理根因之一，见docker_sim/README.md。
++           改回水平安装(rpy全0)，原生FOV本身就跨越水平面，不再需要靠转向
++           对准正前方；z偏移也从0.2改成0.06，紧贴机体上表面(iris机体
++           collision box顶面在z=0.055，见gen_iris_mid360_sdf.py)，不再悬空。
++           注意这里没有下视相机——那部分在 generic_camera.urdf.xacro 里被注释掉，
++           作者自己留了"TODO: Not sure why but can't put them in namespace"这条注释，
++           是一个已知未解决的多机命名空间bug，需要你自己另外调查，这个patch没有碰它。 -->
++      <origin xyz="0 0 0.06" rpy="0 0 0"/>
+     </xacro:mid360>
+ 
+     <!-- Forward facing camera (d435)-->

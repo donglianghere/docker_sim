@@ -1,0 +1,262 @@
+diff --git a/worlds/easy_forest.world b/worlds/easy_forest.world
+index cb99a57..e9d168e 100644
+--- a/worlds/easy_forest.world
++++ b/worlds/easy_forest.world
+@@ -11414,5 +11414,126 @@
+         <projection_type>perspective</projection_type>
+       </camera>
+     </gui>
++    <!-- 四面围墙：把整个easy_forest场地(障碍物范围x:[1.75,99.95] y:[-19.3,19.3])围起来，高度6米（跟hard_forest的树干高度保持一致，比easy_forest自己最高的树4.96米还高一些），同样是为了给SLAM一个有边界的封闭空间 -->
++    <model name='boundary_wall_north'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>106 0.5 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>106 0.5 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>51.0 22 3.0 0 0 0</pose>
++    </model>
++    <model name='boundary_wall_south'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>106 0.5 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>106 0.5 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>51.0 -22 3.0 0 0 0</pose>
++    </model>
++    <model name='boundary_wall_east'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>0.5 44 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>0.5 44 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>104 0.0 3.0 0 0 0</pose>
++    </model>
++    <model name='boundary_wall_west'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>0.5 44 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>0.5 44 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>-2 0.0 3.0 0 0 0</pose>
++    </model>
+   </world>
+ </sdf>
+diff --git a/worlds/hard_forest.world b/worlds/hard_forest.world
+index 2ce9076..a3e4787 100644
+--- a/worlds/hard_forest.world
++++ b/worlds/hard_forest.world
+@@ -38254,5 +38254,126 @@
+         <projection_type>perspective</projection_type>
+       </camera>
+     </gui>
++    <!-- 四面围墙：把整个hard_forest走廊(障碍物范围x:[4.6,301.6] y:[-19.0,18.8])围起来，跟树干同样6米高，给LiDAR SLAM一个有边界的封闭空间，避免飞机/算法飘出去以后彻底没有几何特征可参考、发散到没边 -->
++    <model name='boundary_wall_north'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>310 0.5 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>310 0.5 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>153.0 21 3.0 0 0 0</pose>
++    </model>
++    <model name='boundary_wall_south'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>310 0.5 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>310 0.5 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>153.0 -21 3.0 0 0 0</pose>
++    </model>
++    <model name='boundary_wall_east'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>0.5 42 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>0.5 42 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>308 0.0 3.0 0 0 0</pose>
++    </model>
++    <model name='boundary_wall_west'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box>
++              <size>0.5 42 6.0</size>
++            </box>
++          </geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry>
++            <box>
++              <size>0.5 42 6.0</size>
++            </box>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <gravity>0</gravity>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++      <pose>-2 0.0 3.0 0 0 0</pose>
++    </model>
+   </world>
+ </sdf>

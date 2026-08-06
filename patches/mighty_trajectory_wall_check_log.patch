@@ -1,0 +1,52 @@
+diff --git a/src/mighty/mighty_node.cpp b/src/mighty/mighty_node.cpp
+index 91a60c0..5cfcfe7 100644
+--- a/src/mighty/mighty_node.cpp
++++ b/src/mighty/mighty_node.cpp
+@@ -1626,6 +1626,47 @@ void MIGHTY_NODE::replanCallback() {
+       if (gp.size() >= 4) dump(gp.size() - 1);
+       s << "\n";
+     }
++
++    // Wall/obstacle violation check: walk the *actual committed local
++    // trajectory* (fine, dc-spaced points -- not just the sparse global JPS
++    // waypoints dumped above) through the real occupancy map and flag any
++    // point that lands in an occupied cell. Confirmed live (2026-08-05): a
++    // drone flew straight through a wall; querying /occupancy_grid by hand
++    // right after found a real ~0.6m gap in the wall's sensed point cloud
++    // at the crossing location, but that required catching it with a live
++    // topic query at the right instant. This makes the same check automatic
++    // and permanent, so any future wall-graze shows up directly in this log
++    // with the exact trajectory point and the surrounding occupied/free/
++    // unknown cell pattern, no live repro needed.
++    if (replanning_result) {
++      std::vector<state> traj_pts;
++      mighty_ptr_->retrieveGoalSetpoints(traj_pts);
++      auto map_util = mighty_ptr_->getMapUtil();
++      if (map_util && !traj_pts.empty()) {
++        for (size_t i = 0; i < traj_pts.size(); ++i) {
++          const auto& p = traj_pts[i].pos;
++          Vec3f pf(static_cast<float>(p.x()), static_cast<float>(p.y()),
++                   static_cast<float>(p.z()));
++          if (map_util->isOccupied(pf)) {
++            const float res = static_cast<float>(map_util->getRes());
++            s << debug_log_t(this->now().seconds()) << " WALLHIT"
++              << " traj_idx=" << i << "/" << traj_pts.size() << " point=" << p.x() << ","
++              << p.y() << "," << p.z() << " NEIGHBORHOOD(z=" << pf.z() << ",dx/dy in [-3,3])";
++            // 'O' occupied, '.' free, '?' unknown -- one row per dy, left-to-right dx.
++            for (int dy = -3; dy <= 3; ++dy) {
++              s << "|";
++              for (int dx = -3; dx <= 3; ++dx) {
++                Vec3f q(pf.x() + dx * res, pf.y() + dy * res, pf.z());
++                s << (map_util->isOccupied(q) ? 'O' : (map_util->isFree(q) ? '.' : '?'));
++              }
++            }
++            s << "\n";
++            break;  // one hit per replan cycle is enough to know it happened
++          }
++        }
++      }
++    }
++
+     s.flush();
+   }
+ 

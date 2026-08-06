@@ -1,0 +1,128 @@
+diff --git a/include/ros2_livox/livox_points_plugin.h b/include/ros2_livox/livox_points_plugin.h
+index 4d035d0..9b3e335 100644
+--- a/include/ros2_livox/livox_points_plugin.h
++++ b/include/ros2_livox/livox_points_plugin.h
+@@ -12,6 +12,7 @@
+ #include "rclcpp/rclcpp.hpp"
+ #include "sensor_msgs/msg/point_cloud2.hpp"
+ #include "sensor_msgs/point_cloud_conversion.hpp"
++#include "sensor_msgs/point_cloud2_iterator.hpp"
+ #include "geometry_msgs/msg/transform_stamped.hpp"
+ #include <livox_ros_driver2/msg/custom_msg.hpp>
+ 
+diff --git a/src/livox_points_plugin.cpp b/src/livox_points_plugin.cpp
+index 1435a23..881de57 100644
+--- a/src/livox_points_plugin.cpp
++++ b/src/livox_points_plugin.cpp
+@@ -149,16 +149,56 @@ namespace gazebo
+ 
+             // Create a custom message pp_livox for publishing Livox CustomMsg type messages
+             livox_ros_driver2::msg::CustomMsg pp_livox;
+-            pp_livox.header.stamp = node_->get_clock()->now();
+             pp_livox.header.frame_id = ns_ + "/" + raySensor->Name();
+             int count = 0;
+             boost::chrono::high_resolution_clock::time_point start_time = boost::chrono::high_resolution_clock::now();
+ 
+-            // For publishing PointCloud2 type messages
+-            sensor_msgs::msg::PointCloud cloud;
+-            cloud.header.stamp = node_->get_clock()->now();
+-            cloud.header.frame_id = ns_ + "/" + raySensor->Name();
+-            auto &clouds = cloud.points;
++            // PointCloud2 message for DLIO. Fields (x/y/z/intensity/timestamp) match
++            // dlio::Point (include/dlio/dlio.h) exactly so DLIO's sensor-type autodetect
++            // (getScanFromROS(), odom.cc) recognizes this as a Livox cloud and enables
++            // its per-point deskewPointcloud() path instead of silently falling back to
++            // an un-deskewed whole-scan transform. "timestamp" is float64 absolute
++            // nanosecond epoch time per point (same convention as a real Livox driver),
++            // built from cloud2.header.stamp (captured *before* the loop below, so it is
++            // a valid t=0 reference) plus the same per-point `elapsed_time` offset
++            // already computed below for the CustomMsg's `offset_time`.
++            //
++            // Deliberately *not* using `node_->get_clock()->now()` here: that clock is
++            // ROS/sim time (use_sim_time), which under Gazebo returns seconds-since-
++            // sim-start (observed ~518s => ~5.18e11ns) -- far below the >1e14ns floor
++            // odom.cc uses to tell Livox (real, huge absolute epoch ns) apart from Hesai
++            // (small epoch-seconds-as-double). A sim-time stamp here gets misclassified
++            // as Hesai, and DLIO stores that raw sim-time value as a literal Unix-epoch
++            // *seconds* count (the Hesai extract_point_time lambda doesn't rescale it) --
++            // i.e. this->scan_stamp becomes ~5*10^11 seconds (thousands of years in the
++            // future) while imu_buffer's timestamps stay real wall-clock (~1.7*10^9s,
++            // from the IMU sensor plugin's `ros_node_->now()`, which for this SDF/node
++            // does resolve to real time). deskewPointcloud()'s IMU-buffer bracketing
++            // (integrateImu()) then searches for that unreachable target and the node
++            // never completes a scan again -- no crash, no log, `deskewed points` stays
++            // 0 forever and NX01/NX02 freeze at their calibration pose. Using real wall-
++            // clock time here keeps this in the same time base as the IMU plugin (and as
++            // a real Livox driver, which has no notion of "sim time" either).
++            sensor_msgs::msg::PointCloud2 cloud2;
++            cloud2.header.stamp = rclcpp::Clock(RCL_SYSTEM_TIME).now();
++            pp_livox.header.stamp = cloud2.header.stamp;
++            cloud2.header.frame_id = ns_ + "/" + raySensor->Name();
++            cloud2.height = 1;
++            cloud2.is_dense = false;
++            sensor_msgs::PointCloud2Modifier modifier(cloud2);
++            modifier.setPointCloud2Fields(5,
++                "x", 1, sensor_msgs::msg::PointField::FLOAT32,
++                "y", 1, sensor_msgs::msg::PointField::FLOAT32,
++                "z", 1, sensor_msgs::msg::PointField::FLOAT32,
++                "intensity", 1, sensor_msgs::msg::PointField::FLOAT32,
++                "timestamp", 1, sensor_msgs::msg::PointField::FLOAT64);
++            modifier.resize(points_pair.size());
++            sensor_msgs::PointCloud2Iterator<float> iter_x(cloud2, "x");
++            sensor_msgs::PointCloud2Iterator<float> iter_y(cloud2, "y");
++            sensor_msgs::PointCloud2Iterator<float> iter_z(cloud2, "z");
++            sensor_msgs::PointCloud2Iterator<float> iter_intensity(cloud2, "intensity");
++            sensor_msgs::PointCloud2Iterator<double> iter_timestamp(cloud2, "timestamp");
++            const int64_t cloud2_stamp_ns = rclcpp::Time(cloud2.header.stamp).nanoseconds();
+ 
+             // Iterate over ray scan point pairs
+             for (auto &pair : points_pair)
+@@ -191,18 +231,6 @@ namespace gazebo
+                 p.z = point.Z();
+                 p.reflectivity = intensity;
+ 
+-                // Fill the PointCloud point cloud message
+-                clouds.emplace_back();
+-                clouds.back().x = point.X();
+-                clouds.back().y = point.Y();
+-                clouds.back().z = point.Z();
+-
+-                // // Fill the PointCloud point cloud message
+-                // clouds.emplace_back();
+-                // clouds.back().x = point.X();
+-                // clouds.back().y = point.Y();
+-                // clouds.back().z = point.Z();
+-
+                 // Calculate timestamp offset
+                 boost::chrono::high_resolution_clock::time_point end_time = boost::chrono::high_resolution_clock::now();
+                 boost::chrono::nanoseconds elapsed_time = boost::chrono::duration_cast<boost::chrono::nanoseconds>(end_time - start_time);
+@@ -210,6 +238,15 @@ namespace gazebo
+ 
+                 // Add point cloud data to the CustomMsg message
+                 pp_livox.points.push_back(p);
++
++                // Fill the PointCloud2 message (see field/comment block above)
++                *iter_x = point.X();
++                *iter_y = point.Y();
++                *iter_z = point.Z();
++                *iter_intensity = intensity;
++                *iter_timestamp = static_cast<double>(cloud2_stamp_ns + elapsed_time.count());
++                ++iter_x; ++iter_y; ++iter_z; ++iter_intensity; ++iter_timestamp;
++
+                 count++;
+             }
+ 
+@@ -219,12 +256,7 @@ namespace gazebo
+             pp_livox.point_num = count;
+             custom_pub->publish(pp_livox);
+ 
+-            // Publish PointCloud2 type message
+-            sensor_msgs::msg::PointCloud2 cloud2;
+-            sensor_msgs::convertPointCloudToPointCloud2(cloud, cloud2);
+-            cloud2.header = cloud.header;
+-            // Get wall time (ROS2 time) and publish the PointCloud2 message
+-            cloud2.header.stamp = rclcpp::Clock().now();
++            // Publish PointCloud2 type message (fields/timestamps filled in the loop above)
+             cloud2_pub->publish(cloud2);
+         }
+     }

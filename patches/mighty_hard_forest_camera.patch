@@ -1,0 +1,17 @@
+diff --git a/worlds/hard_forest.world b/worlds/hard_forest.world
+index 2ce9076..21b7f58 100644
+--- a/worlds/hard_forest.world
++++ b/worlds/hard_forest.world
+@@ -38249,7 +38249,11 @@
+     </state>
+     <gui fullscreen='0'>
+       <camera name='user_camera'>
+-        <pose>144.746 5.67025 295.829 -1.1e-05 1.5698 1.57623</pose>
++        <!-- 原来是(144.7, 5.67, 295.8)——295米高空俯视整条走廊，飞机spawn在
++             (3,0,3)/(6,0,3)那一端，默认视角下看不见。改成对着两机spawn点：
++             相机放在两机连线中点(x=4.5)后方10米(y=-10)、略高(z=6)，朝+Y轴
++             方向看过去，带约17度俯角。-->
++        <pose>4.5 -10 6 0 0.29 1.5708</pose>
+         <view_controller>orbit</view_controller>
+         <projection_type>perspective</projection_type>
+       </camera>

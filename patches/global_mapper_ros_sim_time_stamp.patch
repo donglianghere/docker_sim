@@ -1,0 +1,82 @@
+diff --git a/global_mapper_ros/src/global_mapper_ros.cc b/global_mapper_ros/src/global_mapper_ros.cc
+index 1e109cc..45810a8 100644
+--- a/global_mapper_ros/src/global_mapper_ros.cc
++++ b/global_mapper_ros/src/global_mapper_ros.cc
+@@ -421,7 +421,22 @@ namespace global_mapper_ros
+ 
+     pcl::toROSMsg(cloud, *pointcloud);
+     pointcloud->header.frame_id = params_.global_frame;
+-    pointcloud->header.stamp = rclcpp::Clock().now();
++    // 这条以及本文件里其余6处output message的header.stamp，原来都是
++    // this->now()/rclcpp::Clock().now()（这个node的真实墙钟）。喂进这个
++    // mapper的点云/位姿全部来自DLIO，走的是仿真侧一个固定偏移过的"假epoch"
++    // 时钟（sim时间+1735689600，见mighty_imu_sim_time.patch的注释），两个
++    // clock域实测能差出接近5000万秒。RViz渲染occupancy_grid/unknown_grid
++    // 这类消息时，只要Fixed Frame跟消息本身的frame_id不是同一个namespace
++    // （比如Fixed Frame=NX01/map时看NX02/occupancy_grid），就必须在消息
++    // 自带的header.stamp那一刻查一次跨namespace的TF——查UWB桥接TF
++    // （NX01/map -> NX02/map，现在盖的是DLIO时钟域，见
++    // uwb_ground_truth_node.py的同类修复）时，如果这条消息自己盖的是墙钟
++    // 时间，两边就找不到公共有效时间窗，直接查不到，RViz里表现就是"同
++    // namespace能看到、跨namespace的另一架飞机看不到"。改用
++    // tstampLastPclFused_（PointCloudCallback里存的、来自DLIO点云本身
++    // header.stamp的时间戳），让这些输出消息回到跟点云/位姿一致的
++    // clock域，才能被tf2正常解算。
++    pointcloud->header.stamp = tstampLastPclFused_;
+   }
+ 
+   void GlobalMapperRos::PopulateOccupancyPointCloudMsg(const voxel_grid::VoxelGrid<float> &occupancy_grid,
+@@ -492,7 +507,7 @@ namespace global_mapper_ros
+ 
+     pcl::toROSMsg(cloud, *pointcloud);
+     pointcloud->header.frame_id = params_.global_frame;
+-    pointcloud->header.stamp = rclcpp::Clock().now();
++    pointcloud->header.stamp = tstampLastPclFused_;
+   }
+ 
+   void GlobalMapperRos::PopulateDistancePointCloudMsg(const voxel_grid::VoxelGrid<int> &distance_grid,
+@@ -553,7 +568,7 @@ namespace global_mapper_ros
+ 
+     pcl::toROSMsg(cloud, *pointcloud);
+     pointcloud->header.frame_id = params_.global_frame;
+-    pointcloud->header.stamp = this->now();
++    pointcloud->header.stamp = tstampLastPclFused_;
+   }
+ 
+   void GlobalMapperRos::PopulateCostPointCloudMsg(const voxel_grid::VoxelGrid<int> &cost_grid,
+@@ -634,7 +649,7 @@ namespace global_mapper_ros
+ 
+     pcl::toROSMsg(cloud, *pointcloud);
+     pointcloud->header.frame_id = params_.global_frame;
+-    pointcloud->header.stamp = this->now();
++    pointcloud->header.stamp = tstampLastPclFused_;
+   }
+ 
+   void GlobalMapperRos::PopulateEsdf2DMsg(const distance_grid_2d::DistanceGrid2D& grid,
+@@ -647,7 +662,7 @@ namespace global_mapper_ros
+     double resolution = grid.GetResolution();
+     int dmax = grid.GetMaxSquaredDistance();
+ 
+-    msg->header.stamp = this->now();
++    msg->header.stamp = tstampLastPclFused_;
+     msg->header.frame_id = params_.global_frame;
+ 
+     msg->info.resolution = static_cast<float>(resolution);
+@@ -697,7 +712,7 @@ namespace global_mapper_ros
+     grid.GetGridDimensions(dims);
+     double resolution = grid.GetResolution();
+ 
+-    msg->header.stamp = this->now();
++    msg->header.stamp = tstampLastPclFused_;
+     msg->header.frame_id = params_.global_frame;
+ 
+     msg->info.resolution = static_cast<float>(resolution);
+@@ -726,7 +741,7 @@ namespace global_mapper_ros
+ 
+   void GlobalMapperRos::PopulatePathMsg(const std::vector<std::array<double, 3>> &path, nav_msgs::msg::Path *path_msg)
+   {
+-    path_msg->header.stamp = this->now();
++    path_msg->header.stamp = tstampLastPclFused_;
+     path_msg->header.frame_id = params_.global_frame;
+     for (const auto &point : path)
+     {

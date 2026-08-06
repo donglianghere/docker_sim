@@ -1,0 +1,30 @@
+diff --git a/src/livox_points_plugin.cpp b/src/livox_points_plugin.cpp
+index 881de57..1227663 100644
+--- a/src/livox_points_plugin.cpp
++++ b/src/livox_points_plugin.cpp
+@@ -206,11 +206,22 @@ namespace gazebo
+                 auto range = rayShape->GetRange(pair.first);
+                 auto intensity = rayShape->GetRetro(pair.first);
+ 
+-                // Handle out-of-range data
++                // Handle out-of-range data. 原来这里"没打中任何东西"的射线是
++                // range=maxDist（20米），也就是在最大量程处硬造一个假点，
++                // 当成"20米外真的有障碍物"发布出去——这套simple_room.world之前
++                // 没有天花板，前倾30度后仍有一截视场朝上，实测一帧1000个点里
++                // 30%落在这个"打空了"区间，且这些假点角度相邻、距离几乎完全
++                // 相同，会被GICP当成真实结构参与配准，是DLIO在飞机静止状态下
++                // 依然发散（"走了1762米"）的一条具体线索。改成range=0——
++                // 这样point=range*axis直接坍缩成(0,0,0)，下游DLIO自己的
++                // CropBox滤波器（src/dlio/odom.cc，默认crop_size_=1.0米，
++                // setNegative(true)保留框外的点、去掉框内的点）本来就是为了
++                // 滤掉贴近雷达原点的自身遮挡噪声设计的，(0,0,0)天然落在这个框
++                // 正中心，会被这同一个已有的滤波器顺带滤掉，不需要额外加一层
++                // 过滤逻辑。
+                 if (range >= maxDist)
+                 {
+-                    range = maxDist;
+-                    // continue;
++                    range = 0;
+                 }
+                 else if (range <= RangeMin())
+                 {

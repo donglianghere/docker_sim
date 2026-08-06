@@ -1,0 +1,165 @@
+diff --git a/include/mighty/mighty.hpp b/include/mighty/mighty.hpp
+index 1b95957..eaee4e3 100644
+--- a/include/mighty/mighty.hpp
++++ b/include/mighty/mighty.hpp
+@@ -558,6 +558,18 @@ class MIGHTY {
+   // Counter for replanning failure
+   int replanning_failure_count_ = 0;
+ 
++  // Wall/sim-clock time (seconds, same clock as replan()'s current_time
++  // argument) of the last successful replan, or of the last setTerminalGoal()
++  // call, whichever is more recent -- used to give up on a goal after
++  // max_replan_failure_duration seconds of continuous failure. -1 means "no
++  // baseline yet" (skip the check). Deliberately time-based, not a raw
++  // attempt-count cap: a single replan() attempt can itself take anywhere
++  // from ~0ms to hgp_timeout_duration_ms (10s default) depending on how the
++  // HGP solve fails, so a fixed attempt count doesn't translate to a
++  // predictable wall-clock give-up time.
++  double last_replan_success_time_ = -1.0;
++  bool gave_up_on_current_goal_ = false;
++
+   // Map size
+   bool map_size_initialized_ = false;  // Map size initialized
+   int hgp_failure_count_ = 0;          // HGP failure count used for map size adaptation
+diff --git a/include/mighty/mighty_type.hpp b/include/mighty/mighty_type.hpp
+index 2b27f05..6d399fe 100644
+--- a/include/mighty/mighty_type.hpp
++++ b/include/mighty/mighty_type.hpp
+@@ -248,6 +248,14 @@ struct parameters {
+   int yaw_spinning_threshold;
+   double yaw_spinning_dyaw;
+ 
++  // Replanning reliability: give up on the current terminal goal after this
++  // many seconds of continuous replanning failure instead of retrying
++  // forever. Time-based (not an attempt-count cap) because a single replan()
++  // attempt's real duration is not fixed -- see the comment on
++  // last_replan_success_time_ in mighty.hpp. 0 or negative disables the cap
++  // (old behavior).
++  double max_replan_failure_duration;
++
+   // Simulation env parameters
+   bool force_goal_z;
+   double default_goal_z;
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 10eaff8..ce9db6f 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -716,6 +716,35 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
+   // Check if we need to replan
+   if (!checkReadyToReplan()) return std::make_tuple(false, false);
+ 
++  // Give up on the current terminal goal after too many seconds of
++  // continuous replanning failure, instead of retrying forever with no
++  // bound. Previously there was no cap here at all -- a genuinely
++  // unreachable goal (or a goal stuck inside occupied space that
++  // sanitizeTerminalGoal can't relocate) would burn CPU on replan attempts
++  // indefinitely. Time-based rather than an attempt-count cap: a single
++  // failing replan() call can itself take anywhere from ~0ms to
++  // hgp_timeout_duration_ms (10s default), so counting attempts doesn't
++  // translate to a predictable wall-clock give-up time the way counting
++  // seconds does. Print once when the cap is first crossed (not every
++  // cycle) and stop doing global/local planning work for this goal; plan_
++  // is left untouched so the drone just holds its last valid
++  // trajectory/position. last_replan_success_time_ (and therefore this
++  // budget) resets whenever a replan succeeds or a new goal is set via
++  // setTerminalGoal(), so this only gives up on the *current* goal, not the
++  // planner as a whole.
++  if (par_.max_replan_failure_duration > 0.0 && last_replan_success_time_ >= 0.0 &&
++      (current_time - last_replan_success_time_) >= par_.max_replan_failure_duration) {
++    if (!gave_up_on_current_goal_) {
++      gave_up_on_current_goal_ = true;
++      std::cout << bold << red << "[MIGHTY] Replanning has been failing for "
++                << (current_time - last_replan_success_time_)
++                << "s (cap: " << par_.max_replan_failure_duration
++                << "s) -- giving up on the current terminal goal until a new one is given."
++                << reset << std::endl;
++    }
++    return std::make_tuple(false, false);
++  }
++
+   // Get states we need
+   state local_state, local_G_term, last_plan_state;
+   getState(local_state);
+@@ -795,6 +824,8 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
+ 
+   // Reset the replanning failure count
+   replanning_failure_count_ = 0;
++  last_replan_success_time_ = current_time;
++  gave_up_on_current_goal_ = false;
+   if (par_.debug_verbose)
+     std::cout << "Final Housekeeping: " << timer_final.getElapsedMicros() / 1000.0 << " ms"
+               << std::endl;
+@@ -1781,6 +1812,17 @@ void MIGHTY::setTerminalGoal(const state& term_goal) {
+   state local_state;
+   getState(local_state);
+ 
++  // A new goal gets a fresh replanning-failure time budget -- see the
++  // max_replan_failure_duration check at the top of replan() for why this
++  // exists. Without this reset, once a goal got given up on,
++  // last_replan_success_time_ would just sit in the past forever and every
++  // subsequent goal (including perfectly reachable ones) would be given up
++  // on immediately. local_state.t is used as "now" here since
++  // setTerminalGoal() isn't otherwise given the current planner time.
++  replanning_failure_count_ = 0;
++  last_replan_success_time_ = local_state.t;
++  gave_up_on_current_goal_ = false;
++
+   // Set the terminal goal
+   setGterm(term_goal);
+ 
+diff --git a/src/mighty/mighty_node.cpp b/src/mighty/mighty_node.cpp
+index ba9ebc5..76603c8 100644
+--- a/src/mighty/mighty_node.cpp
++++ b/src/mighty/mighty_node.cpp
+@@ -694,6 +694,9 @@ void MIGHTY_NODE::declareParameters() {
+   this->declare_parameter("yaw_spinning_threshold", 10);
+   this->declare_parameter("yaw_spinning_dyaw", 0.1);
+ 
++  // Replanning reliability
++  this->declare_parameter("max_replan_failure_duration", 0.0);
++
+   // Simulation env parameters
+   this->declare_parameter("force_goal_z", true);
+   this->declare_parameter("default_goal_z", 2.5);
+@@ -1042,6 +1045,9 @@ void MIGHTY_NODE::setParameters() {
+   par_.yaw_spinning_threshold = this->get_parameter("yaw_spinning_threshold").as_int();
+   par_.yaw_spinning_dyaw = this->get_parameter("yaw_spinning_dyaw").as_double();
+ 
++  // Replanning reliability
++  par_.max_replan_failure_duration = this->get_parameter("max_replan_failure_duration").as_double();
++
+   // Simulation env parameters
+   par_.force_goal_z = this->get_parameter("force_goal_z").as_bool();
+   par_.default_goal_z = this->get_parameter("default_goal_z").as_double();
+@@ -1342,6 +1348,7 @@ void MIGHTY_NODE::printParameters() {
+   RCLCPP_INFO(this->get_logger(), "W Max: %f", par_.w_max);
+   RCLCPP_INFO(this->get_logger(), "Yaw Spinning Threshold: %d", par_.yaw_spinning_threshold);
+   RCLCPP_INFO(this->get_logger(), "Yaw Spinning Dyaw: %f", par_.yaw_spinning_dyaw);
++  RCLCPP_INFO(this->get_logger(), "Max Replan Failure Duration (s): %f", par_.max_replan_failure_duration);
+ 
+   // Simulation env parameters
+   RCLCPP_INFO(this->get_logger(), "Force Goal Z: %d", par_.force_goal_z);
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index f57f24e..2cde98c 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -122,6 +122,19 @@ mighty_node:
+         yaw_spinning_threshold: 10000              # [-] if the planner keeps failing more than this number, we switch to the spinning mode
+         yaw_spinning_dyaw: 1.0                  # [rd/s] Spinning dyaw
+ 
++        # Replanning reliability
++        max_replan_failure_duration: 30.0       # [s] give up on current terminal goal after this many seconds of
++                                                 # continuous replan failure instead of retrying forever (0 = no cap,
++                                                 # old behavior). Time-based, not an attempt-count cap, because a
++                                                 # single replan() attempt's real duration isn't fixed -- see
++                                                 # mighty.hpp's comment on last_replan_success_time_. 30s is a
++                                                 # judgment call: long enough to ride through transient occlusion/
++                                                 # sensor noise, short enough that "stuck" doesn't mean "silently
++                                                 # retrying for minutes". Well below yaw_spinning_threshold's
++                                                 # (10000 attempts) typical real-world duration, so with these
++                                                 # values the planner now gives up before the yaw-spin fallback
++                                                 # would realistically ever trigger for a manual goal.
++
+         # Simulation env parameters
+         force_goal_z: true                      # [-] Force the goal to be at the certain height since Rviz GUI's goal's z is 0
+         default_goal_z: 1.5                     # [m] Default goal height

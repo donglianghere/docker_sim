@@ -1,0 +1,43 @@
+diff --git a/src/mighty/mighty_node.cpp b/src/mighty/mighty_node.cpp
+index 0499f31..e22309f 100644
+--- a/src/mighty/mighty_node.cpp
++++ b/src/mighty/mighty_node.cpp
+@@ -277,15 +277,27 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
+   // Initialize the initial pose topic name
+   initial_pose_topic_ = ns_ + "/init_pose";
+ 
++  // rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(profile)) 是个经典陷阱：
++  // from_rmw() 只把profile里的history+depth抄过去，reliability/durability这些
++  // 其它字段依然是rclcpp::QoS默认值(RELIABLE)，不是profile本身的BEST_EFFORT——
++  // 下面ESDF那段的注释早就点出过这个坑("unlike QoSInitialization::from_rmw
++  // which only sets history+depth")，但occupancy_grid/unknown_grid/
++  // sensor_point_cloud这三处订阅当时没有一起改。实测确认过：
++  // `ros2 topic info /NX01/occupancy_grid -v`显示mighty_node这边订阅者是
++  // RELIABLE，global_mapper_ros发布者是BEST_EFFORT——RELIABLE订阅者连不上
++  // BEST_EFFORT发布者(DDS QoS兼容性规则)，这三个订阅从一开始就没真收到过数据，
++  // 跟话题名对不对、TF全不全都无关。统一换成rclcpp::SensorDataQoS()——
++  // 这是rclcpp提供的专门帮手类，真正完整复制了BEST_EFFORT+VOLATILE+
++  // KEEP_LAST/5这一整套sensor-data惯例，不会漏字段。
+   if (par_.use_hardware) {
+     // Hardware: subscribe independently (time-sync can fail due to timestamp mismatch)
+     sub_occupancy_grid_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+         "occupancy_grid",
+-        rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data)),
++        rclcpp::SensorDataQoS(),
+         std::bind(&MIGHTY_NODE::occupancyMapCallback, this, std::placeholders::_1), options_map);
+     sub_unknown_grid_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+         "unknown_grid",
+-        rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data)),
++        rclcpp::SensorDataQoS(),
+         std::bind(&MIGHTY_NODE::unknownMapCallback, this, std::placeholders::_1), options_map);
+     RCLCPP_INFO(this->get_logger(),
+                 "Hardware mode: subscribing to occupancy_grid and unknown_grid independently");
+@@ -299,7 +311,7 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
+   } else {
+     sub_fake_sim_occupancy_map_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+         "sensor_point_cloud",
+-        rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data)),
++        rclcpp::SensorDataQoS(),
+         std::bind(&MIGHTY_NODE::occupancyMapCallback, this, std::placeholders::_1), options_map);
+   }
+ 

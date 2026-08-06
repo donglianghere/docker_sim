@@ -1,0 +1,70 @@
+diff --git a/src/sim/gazebo_ros_imu_sensor.cpp b/src/sim/gazebo_ros_imu_sensor.cpp
+index e582f77..9185822 100644
+--- a/src/sim/gazebo_ros_imu_sensor.cpp
++++ b/src/sim/gazebo_ros_imu_sensor.cpp
+@@ -25,10 +25,47 @@
+ #endif
+ #include <sensor_msgs/msg/imu.hpp>
+ 
++#include <cstdint>
+ #include <iostream>
+ #include <memory>
+ #include <string>
+ 
++namespace
++{
++// DLIO integrates IMU samples using dt = header.stamp(N) - header.stamp(N-1) (see
++// odom.cc's IMU callback). Under PX4 lockstep + this host's dual-drone load, Gazebo's
++// achieved real-time-factor sits sustained around 0.96-0.97 (measured live via `gz
++// stats`: ~43s of sim-vs-wall drift accumulated after ~400s of runtime) -- so a
++// wall-clock dt is systematically ~3-10% larger than the sim time actually elapsed
++// for the motion that produced each accel/gyro sample, and that bias compounds every
++// integration step. This is very likely the dominant contributor to this project's
++// long-standing "diverges to thousands of meters while stationary" DLIO bug.
++//
++// Switching straight to Gazebo sim time (sensor_->LastUpdateTime()) is *not* safe on
++// its own: the matching fix in livox_points_plugin.cpp documents that DLIO's own
++// getScanFromROS() autodetects Livox-vs-Hesai point clouds by checking whether the
++// raw timestamp exceeds ~1e14ns (a real absolute Unix epoch is that large; "seconds
++// since sim start" is not) -- a small sim-time value there gets misclassified as
++// Hesai and silently freezes deskewing forever (see livox_pointcloud_timestamp.patch's
++// comment for the full story). Offsetting sim time by a fixed large constant keeps it
++// looking like a plausible absolute epoch (satisfies that >1e14ns heuristic) while
++// keeping every *delta* between consecutive stamps exactly equal to true elapsed sim
++// time -- immune to real-time-factor drift. The lidar plugin uses the identical
++// offset so the IMU and point cloud stay on one consistent clock, which is what
++// deskewing's IMU-buffer bracket search (integrateImu()) requires.
++constexpr int64_t kFakeEpochOffsetNs = 1735689600LL * 1000000000LL;  // 2025-01-01T00:00:00Z
++
++builtin_interfaces::msg::Time SimTimeAsFakeEpoch(const gazebo::common::Time & sim_time)
++{
++  int64_t sim_ns = static_cast<int64_t>(sim_time.sec) * 1000000000LL +
++    static_cast<int64_t>(sim_time.nsec) + kFakeEpochOffsetNs;
++  builtin_interfaces::msg::Time t;
++  t.sec = static_cast<int32_t>(sim_ns / 1000000000LL);
++  t.nanosec = static_cast<uint32_t>(sim_ns % 1000000000LL);
++  return t;
++}
++}  // namespace
++
+ namespace gazebo_plugins
+ {
+ 
+@@ -130,11 +167,12 @@ void GazeboRosImuSensorPrivate::OnUpdate()
+   IGN_PROFILE("GazeboRosImuSensorPrivate::OnUpdate");
+   IGN_PROFILE_BEGIN("fill ROS message");
+ #endif
+-  // Fill message with latest sensor data
+-  // msg_->header.stamp = gazebo_ros::Convert<builtin_interfaces::msg::Time>(
+-  //   sensor_->LastUpdateTime());
+-  // Get wall time (ROS2 time)
+-  msg_->header.stamp = rclcpp::Clock().now();
++  // Fill message with latest sensor data.
++  // Stamp with Gazebo sim time (offset to look like a plausible epoch -- see
++  // SimTimeAsFakeEpoch() above), not wall time: this keeps dt between consecutive
++  // IMU samples equal to *actual simulated elapsed time*, immune to Gazebo's
++  // real-time-factor drifting away from 1.0 under host load.
++  msg_->header.stamp = SimTimeAsFakeEpoch(sensor_->LastUpdateTime());
+   msg_->orientation =
+     gazebo_ros::Convert<geometry_msgs::msg::Quaternion>(sensor_->Orientation());
+   msg_->angular_velocity = gazebo_ros::Convert<geometry_msgs::msg::Vector3>(

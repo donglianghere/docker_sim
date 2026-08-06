@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>gt_odom_bridge</name>
+  <version>0.0.1</version>
+  <description>
+    "跳过DLIO SLAM、直接用Gazebo仿真真值做定位"测试模式用的桥接节点：把
+    /plug/model_states_plug（gazebo_ros_state插件发的世界真值）里自己那架飞机的
+    位姿/速度，转发成跟真实dlio_odom_node完全同名的nav_msgs/Odometry话题
+    (namespace/dlio/odom_node/odom)，让mighty的convert_odom_to_state节点、
+    ros2_px4_stack的repub_odom.py两条下游链路不用改代码就能直接消费——用于单独
+    验证mighty规划器+ros2_px4_stack板外控制器+PX4飞控这条链路，排除DLIO SLAM
+    本身收敛/漂移的影响。跟真正的dlio_odom_node二选一启动，不会同时跑（同时跑
+    会导致两个发布者抢同一个话题，下游收到的数据来源不确定）。
+  </description>
+  <maintainer email="todo@todo.todo">todo</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>gazebo_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>visualization_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

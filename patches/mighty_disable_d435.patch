@@ -1,0 +1,29 @@
+diff --git a/urdf/quadrotor.urdf.xacro b/urdf/quadrotor.urdf.xacro
+index 07aba82..27f2047 100644
+--- a/urdf/quadrotor.urdf.xacro
++++ b/urdf/quadrotor.urdf.xacro
+@@ -26,12 +26,22 @@
+       <origin xyz="0 0 0.2" rpy="0 0.5236 0"/>
+     </xacro:mid360>
+ 
+-    <!-- Forward facing camera (d435)-->
++    <!-- Forward facing camera (d435)——暂时禁用：realsense_gazebo_plugin的
++         RealSensePlugin::Load()里`smanager->GetSensor(prefix+DEPTH_CAMERA_NAME)
++         ->DepthCamera()`没判空直接解引用（判空检查写在解引用之后，形同虚设），
++         双机同时初始化多个相机传感器时，SensorManager处理队列一忙，后加载的
++         那台（这里是NX02）容易撞上"传感器还没注册完就被查找"的时序竞态，
++         GetSensor返回空指针，直接段错误崩溃gzserver——这是上游已知问题
++         （github.com/pal-robotics/realsense_gazebo_plugin issue #17），没有
++         找到简单可靠的修复补丁。先注释掉，只保留雷达+IMU，等以后有空再回来
++         处理相机（且当前压根没启用任何"下视"相机，前视/下视这套需求本来就
++         还没做完，不是这次改动引入的缺口）。
+     <xacro:include filename="$(find mighty)/urdf/_d435.urdf.xacro" />
+     <xacro:sensor_d435 name="$(arg namespace)_d435" topics_ns="$(arg namespace)" range_max_depth="$(arg d435_range_max_depth)" parent="base_link">
+       <origin xyz="0.05 0.0 0" rpy="0 0 0"/>
+     </xacro:sensor_d435>
+-    
++    -->
++
+     <!-- Forward facing camera (d435i)-->
+     <!-- <xacro:include filename="$(find mighty)/urdf/_d435i.urdf.xacro" />
+     <xacro:sensor_d435i name="$(arg namespace)_d435i" topics_ns="$(arg namespace)" parent="base_link">

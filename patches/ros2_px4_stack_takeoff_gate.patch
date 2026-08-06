@@ -1,0 +1,30 @@
+diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
+index 4634017..54a5839 100644
+--- a/ros2_px4_stack/src/dynus_offboard_node.py
++++ b/ros2_px4_stack/src/dynus_offboard_node.py
+@@ -332,7 +332,25 @@ class OffboardDynusFollower(BasicMavrosInterface):
+         flight_state = "TAKEOFF"
+         takeoff_pos = self.point_to_traj([self.local_position.pose.position.x, self.local_position.pose.position.y, altitude])
+ 
++        # 起飞口令：docker-compose up之后不再自动起飞，原地悬停在当前位置
++        # （不是目标高度）等这个文件出现——tmux里新增的"launch"窗口
++        # （watch_sim.sh）按一下回车就会给所有飞机的容器都touch这个文件。
++        # 故意继续正常发setpoint流、只是把目标钉在当前位置不动，而不是
++        # 整个卡在这里不发任何东西——PX4进OFFBOARD模式前必须已经有一路
++        # 连续的setpoint在发，卡住不发setpoint会让_kick_offboard()的自动
++        # 解锁/切OFFBOARD那部分永远等不到条件，反而更晚才能起飞。
++        takeoff_go_file = '/tmp/takeoff_go'
++
+         while rclpy.ok():
++            if flight_state == "TAKEOFF" and not os.path.exists(takeoff_go_file):
++                self.trajectory_setpoint = self.point_to_traj([
++                    self.local_position.pose.position.x,
++                    self.local_position.pose.position.y,
++                    self.local_position.pose.position.z])
++                self.attitude_setpoint = None
++                self.wait_for_seconds(0.1)
++                continue
++
+             if flight_state == "TAKEOFF":
+                 # self.get_logger().info("Taking Off")
+                 # TAKEOFF always uses the position/trajectory setpoint regardless of

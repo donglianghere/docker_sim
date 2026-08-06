@@ -1,0 +1,74 @@
+diff --git a/launch/dynus_mavros.launch.py b/launch/dynus_mavros.launch.py
+index d2d542d..9825bf8 100644
+--- a/launch/dynus_mavros.launch.py
++++ b/launch/dynus_mavros.launch.py
+@@ -31,6 +31,32 @@ def generate_launch_description():
+         ),
+ 
+         # Static transforms
++        # 只保留 world_mocap -> {veh}/init_pose 这一条——mocap_to_livox_frame.py
++        # 的 get_gf_to_af_tf() 真的用 tf2 查了 "{veh}/init_pose" <-> "world_mocap"，
++        # 是 term_goal(全局系) -> term_goal_af(机体局部系) 转换链路的实际依赖，
++        # 不能删。"world -> world_mocap" 这条边只是给 world_mocap 一个父frame，
++        # 保留是为了不让它变成断根（虽然目前没人真的从 "world" 往下查）。
++        #
++        # 下面删掉的四条，都是上游 DYNUS/Fast-LIO 单机+mocap 架构的遗留代码，
++        # 在这套 DLIO+多机UWB对齐 的仿真里全是死代码或者干脆是bug：
++        #   - "world -> map"（第二个同名 map_to_odom 节点）：裸 "map" 是个跟
++        #     {ns}/map 完全没关系的孤立frame，没人真的用它，留着只会在Fixed
++        #     Frame下拉框里骗人选中一个空世界。
++        #   - init_pose_to_camera_init / base_to_d455：Fast-LIO+D455 那套硬件
++        #     没在用（这套仿真是 DLIO+mid360），"camera_init"/"d455_link"
++        #     全仓库grep只在注释里出现过，没有任何活跃节点真的用tf2查它们。
++        #   - body_to_base_link（"body" -> "{veh}/base_link"恒等变换）：
++        #     **这条是真bug，不只是死代码**——DLIO自己的odom.cc会实时广播
++        #     "{ns}/odom -> {ns}/base_link"（真实位姿），这条静态TF同时又
++        #     声明"body -> {ns}/base_link"，同一个child frame被两个不同
++        #     父frame同时认领。实测/tf_static确认这条静态声明确实在发布，
++        #     /tf里DLIO的动态声明也在发布，tf2的行为在这种"双亲"情况下
++        #     不保证稳定解算到哪一条——而"body"本身是个死胡同（没有任何节点
++        #     发布过"谁是body的父frame"），一旦tf2解算走了这条，
++        #     {ns}/base_link以及挂在它下面的雷达/相机frame就从整棵TF树上
++        #     断开了，多机共享Fixed Frame（比如NX01/map）不管怎么设都
++        #     够不到NX02。这正是"RViz切到NX01/map之后NX02的话题还是显示
++        #     不出来"的根因。
+         Node(
+             package='tf2_ros',
+             executable='static_transform_publisher',
+@@ -43,36 +69,6 @@ def generate_launch_description():
+             name='map_to_odom',
+             arguments=['0', '0', '0', '0', '0', '0', 'world', 'world_mocap']
+         ),
+-        Node(
+-            package='tf2_ros',
+-            executable='static_transform_publisher',
+-            name='map_to_odom',
+-            arguments=['0', '0', '0', '0', '0', '0', 'world', 'map']
+-        ),
+-        # camera_init (Fast-LIO origin) = PX03/init_pose (DLIO origin)
+-        # Both represent the drone's starting position. Linking them with identity
+-        # ensures DYNUS's TF lookup (map -> PX03/init_pose) produces the correct
+-        # transform for converting goals to camera_init frame (which PX4 operates in).
+-        Node(
+-            package='tf2_ros',
+-            executable='static_transform_publisher',
+-            name='init_pose_to_camera_init',
+-            arguments=['0', '0', '0', '0', '0', '0', f'{veh}/init_pose', 'camera_init']
+-        ),
+-        # Fast-LIO publishes camera_init -> body; map this to PX03/base_link so the
+-        # mapper's TF chain (world -> camera_init -> body -> PX03/base_link) works
+-        Node(
+-            package='tf2_ros',
+-            executable='static_transform_publisher',
+-            name='body_to_base_link',
+-            arguments=['0', '0', '0', '0', '0', '0', 'body', f'{veh}/base_link']
+-        ),
+-        Node(
+-            package='tf2_ros',
+-            executable='static_transform_publisher',
+-            name='base_to_d455',
+-            arguments=['0', '0', '0', '0', '0', '0', f"{veh}/base_link", f"{veh}/d455_link"]
+-        ),
+ 
+         # Run repub_livox node
+         Node(

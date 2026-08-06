@@ -1,0 +1,131 @@
+# ----------------------------------------------------------------------------
+# 1个 sim-world + 2个 flight-stack(NX01/NX02)。
+#
+# 全部用 host 网络模式：ROS2 DDS(默认Fast DDS)靠多播做节点发现，Docker默认的
+# bridge网络对多播支持不好，容器间发现不稳定；MAVROS<->PX4 SITL之间是本地UDP端口
+# 通信，同理放host模式最省心。副作用是这几个容器会直接用宿主机的网络栈，
+# 端口/话题都跟宿主机共享，本机同时跑其它ROS2节点时注意 ROS_DOMAIN_ID 别冲突。
+#
+# 用法：
+#   ./fetch_sources.sh                                  # 宿主机侧手动预取
+#   docker build --network=host \
+#                --build-arg HTTP_PROXY=$http_proxy --build-arg HTTPS_PROXY=$https_proxy \
+#                -f docker/Dockerfile.base -t mighty-base:humble .
+#   docker compose build sim-world && docker compose build flight-stack-nx01
+#   docker compose up
+#
+# 注意：不要直接裸跑 `docker compose build`（不带 service 名）——sim-world 和
+# flight-stack-nx01 会被并发构建，叠加各自内部 colcon/make 的并行编译，在核数多、
+# 内存相对紧张的机器上（比如32核/31G那种核数远超内存的配置）很容易把内存吃穿、
+# 系统死机/卡死。上面分两条命令按顺序 build，同一时间只有一个镜像在编译。
+# 单个镜像内部的编译并发度由 Dockerfile 里的 BUILD_JOBS 控制（默认4，按“内存GB/2”
+# 估算的保守值），内存宽裕的机器可以调大，例如：
+#   docker compose build --build-arg BUILD_JOBS=8 sim-world
+# ----------------------------------------------------------------------------
+services:
+
+  sim-world:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sim-world
+      network: host   # 代理是127.0.0.1:7897，容器默认网络下127.0.0.1指向自己连不上，
+                       # build阶段用host网络栈让代理能被正确访问到
+      args:
+        HTTP_PROXY: ${http_proxy:-}
+        HTTPS_PROXY: ${https_proxy:-}
+        BUILD_JOBS: ${BUILD_JOBS:-4}
+    image: sim-world:latest
+    network_mode: host
+    ipc: host   # network_mode:host只共享网络命名空间，不共享/dev/shm——Fast-DDS默认
+                # 会优先用共享内存做同机加速，discovery阶段的组播能跨容器工作，但SHM
+                # 传输不共享/dev/shm时会直接丢包且没有任何报错/警告，表现就是"两边互相
+                # 发现了对方、topic info也显示QoS匹配，但数据一条都收不到"。三个
+                # 容器都要加，只加一边没用（发布/订阅双方的SHM都得能互相看见）。
+    environment:
+      - ROS_DOMAIN_ID=20
+      - WORLD_ENV=simple_room      # 按需切换: simple_room/hard_forest/easy_forest/hospital/office/tunnel/...
+                                    # simple_room是20x20x5米室内房间+4根柱子，比森林场景
+                                    # 简单得多，先用它把MAVROS/DLIO/规划全流程跑通，
+                                    # 森林场景的gzserver崩溃(exit -6)暂不深挖
+      - NUM_AGENTS=2
+      - USE_GAZEBO_GUI=true
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all   # 默认只给utility,compute，OpenGL渲染需要的
+                                          # graphics能力必须显式要，否则GPU passthrough
+                                          # 配了也没用，gzclient/rviz2还是会摸不到硬件加速
+      # 宿主机是Intel iGPU+NVIDIA混合显卡笔记本(Optimus)，nvidia-smi/glxinfo实测
+      # 确认：X server默认绑在Intel screen上，PRIME是on-demand模式，NVIDIA虽然
+      # 设备/GL库都直通进容器了(nvidia-container-toolkit工作正常)，但默认不会被
+      # 选用，不加下面这两个变量的话gzclient/rviz2走的是Intel iGPU硬件加速。
+      # 加了__NV_PRIME_RENDER_OFFLOAD=1/__GLX_VENDOR_LIBRARY_NAME=nvidia强制offload
+      # 到NVIDIA后，`docker stats`实测sim-world容器的CPU%数字从151%涨到226%——但
+      # 这个百分比是"CPU时间片总量"，包含了NVIDIA驱动往返拷贝画面的开销，不代表
+      # 卡顿感；用户实测体感是Intel iGPU方案更卡（Intel iGPU本身要跟PX4/DLIO/
+      # mighty这些计算密集节点抢CPU核心，图形渲染和物理仿真辗转在同批CPU核心上），
+      # offload到独立的NVIDIA GPU后渲染这部分负载搬到独立显卡上，CPU核心能更专注
+      # 于仿真计算，体感更流畅，按体感效果保留NVIDIA offload方案：
+      - __NV_PRIME_RENDER_OFFLOAD=1
+      - __GLX_VENDOR_LIBRARY_NAME=nvidia
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"
+
+  flight-stack-nx01:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.flight-stack
+      network: host   # 代理是127.0.0.1:7897，容器默认网络下127.0.0.1指向自己连不上，
+                       # build阶段用host网络栈让代理能被正确访问到
+      args:
+        HTTP_PROXY: ${http_proxy:-}
+        HTTPS_PROXY: ${https_proxy:-}
+        BUILD_JOBS: ${BUILD_JOBS:-4}
+    image: flight-stack:latest
+    network_mode: host
+    ipc: host   # 跟sim-world下面那条注释同理——Fast-DDS SHM传输要求容器间共享
+                # /dev/shm，不然discovery能跨容器工作、但实际数据传输会静默丢包。
+    depends_on:
+      - sim-world
+    environment:
+      - ROS_DOMAIN_ID=20
+      - NAMESPACE=NX01
+      - AGENT_INDEX=1
+      - NUM_AGENTS=2
+      - LOCALIZATION_SOURCE=dlio  # dlio=真实DLIO SLAM(默认，三个模块一起测)；
+                                  # gt=跳过SLAM、直接用Gazebo真值(只测规划+控制)
+      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # trajectory=位置/速度/加速度轨迹
+                                  # (默认，唯一实测飞过的模式)；attitude=微分平坦
+                                  # 姿态直控——写完但从没实测飞过，联网查过jrached/
+                                  # kotakondo所有可查版本也都没有真正飞行先例，见
+                                  # README。写死在这里改完要重新docker compose up
+                                  # 才生效；想不改文件临时切，用
+                                  # `CONTROL_LAW=attitude docker compose up`，
+                                  # ${CONTROL_LAW:-trajectory}这个写法两种都支持。
+    restart: "no"
+
+  flight-stack-nx02:
+    image: flight-stack:latest   # 复用同一份镜像，不用单独build
+    network_mode: host
+    ipc: host   # 同上，Fast-DDS SHM传输要求容器间共享/dev/shm。
+    depends_on:
+      - sim-world
+      - flight-stack-nx01
+    environment:
+      - ROS_DOMAIN_ID=20
+      - NAMESPACE=NX02
+      - AGENT_INDEX=2
+      - NUM_AGENTS=2
+      - LOCALIZATION_SOURCE=dlio  # 两架飞机要保持一致，别一个dlio一个gt
+      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # 同上，两架飞机也要保持一致，
+                                  # 见flight-stack-nx01那边的完整注释
+    restart: "no"

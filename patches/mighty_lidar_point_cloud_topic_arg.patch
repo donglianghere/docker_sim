@@ -1,0 +1,45 @@
+diff --git a/launch/onboard_mighty.launch.py b/launch/onboard_mighty.launch.py
+index 3c0cb42..5acf1f3 100644
+--- a/launch/onboard_mighty.launch.py
++++ b/launch/onboard_mighty.launch.py
+@@ -59,6 +59,14 @@ def generate_launch_description():
+                     'layered on top of mighty.yaml/hw_mighty.yaml (e.g. to keep mass/bbox '
+                     'consistent with ros2_px4_stack, which reads the same file via env vars '
+                     'exported in flight-stack-entrypoint.sh); empty = use config file as-is')
++    lidar_point_cloud_topic_arg = DeclareLaunchArgument('lidar_point_cloud_topic', default_value='',
++        description="Override lidar_cloud_in source topic (empty = auto from use_hardware: "
++                     "'livox/lidar' for real hardware driver, 'mid360_PointCloud2' for sim). "
++                     "use_hardware really only toggles the *state estimation* source (DLIO vs "
++                     "fake_sim), not the point cloud topic naming, so a sim run that sets "
++                     "use_hardware:=true (to get real DLIO state) still needs this overridden "
++                     "back to 'mid360_PointCloud2' or mighty ends up subscribed to a topic "
++                     "nobody publishes ('livox/lidar' is the real Livox driver's name).")
+     use_frame_alignment_arg = DeclareLaunchArgument('use_frame_alignment', default_value='',
+         description='Override use_frame_alignment (empty = use config default)')
+     sim_frame_offset_qz_arg = DeclareLaunchArgument('sim_frame_offset_qz', default_value='',
+@@ -113,6 +121,7 @@ def generate_launch_description():
+         robot_type = LaunchConfiguration('robot_type').perform(context)
+         num_agents = int(LaunchConfiguration('num_agents').perform(context))
+         map_frame_id_override = LaunchConfiguration('map_frame_id').perform(context)
++        lidar_point_cloud_topic_override = LaunchConfiguration('lidar_point_cloud_topic').perform(context)
+         use_frame_alignment_str = LaunchConfiguration('use_frame_alignment').perform(context)
+         sim_frame_offset_qz_str = LaunchConfiguration('sim_frame_offset_qz').perform(context)
+         sim_frame_offset_qw_str = LaunchConfiguration('sim_frame_offset_qw').perform(context)
+@@ -212,7 +221,8 @@ def generate_launch_description():
+         parameters = {k: v for k, v in parameters.items() if not (isinstance(v, list) and len(v) == 0)}
+ 
+         # Lidar topic remapping for hardware vs simulation
+-        lidar_point_cloud_topic = 'livox/lidar' if use_hardware else 'mid360_PointCloud2'
++        lidar_point_cloud_topic = lidar_point_cloud_topic_override if lidar_point_cloud_topic_override \
++            else ('livox/lidar' if use_hardware else 'mid360_PointCloud2')
+ 
+         # Create a Dynus node
+         mighty_node = Node(
+@@ -418,6 +428,7 @@ def generate_launch_description():
+         external_selector_arg,
+         map_frame_id_arg,
+         vehicle_profile_arg,
++        lidar_point_cloud_topic_arg,
+         use_frame_alignment_arg,
+         sim_frame_offset_qz_arg,
+         sim_frame_offset_qw_arg,

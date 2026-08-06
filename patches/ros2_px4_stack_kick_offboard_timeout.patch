@@ -1,0 +1,24 @@
+diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
+index 3dd3cb6..ebeb892 100644
+--- a/ros2_px4_stack/src/dynus_offboard_node.py
++++ b/ros2_px4_stack/src/dynus_offboard_node.py
+@@ -157,7 +157,18 @@ class OffboardDynusFollower(BasicMavrosInterface):
+         set_mode_req.custom_mode = "OFFBOARD"
+         arm_req = CommandBool.Request()
+         arm_req.value = True
+-        for _ in range(20):
++        # 原来这里是range(20)、每次sleep 0.5秒，总共10秒真实时间的重试预算——
++        # 这个预算是按real-time-factor≈1假设的。PX4是跟着Gazebo仿真时钟lockstep
++        # 走的，set_mode/arming这些指令要等PX4自己内部的状态机(EKF2就绪、解锁
++        # 安全检查等)在*仿真时间*里走完才会真正生效；20000点密度改动之后
++        # real-time-factor实测掉到了0.27~0.30（`gz stats`），同样10秒真实时间
++        # 里PX4实际只经历了不到3秒仿真时间——NX01/NX02两架飞机在这个比原来
++        # 严重收紧的时间预算里谁先谁后纯粹看运气，之前一次实测NX01卡线蹭过去了、
++        # NX02没赶上，5分钟后重新查还是停在armed:false没有任何进一步重试（这个
++        # 函数只有这一轮循环，超时就直接放弃、线程直接退出，不会再自己恢复）。
++        # 把预算从10秒放宽到120秒（240次×0.5秒），留出实测RTF这个量级下足够的
++        # 仿真时间余量，两架飞机不再需要抢一个太紧的窗口。
++        for _ in range(240):
+             if self.state.mode != "OFFBOARD":
+                 self.set_mode_srv.call_async(set_mode_req)
+             if not self.state.armed:

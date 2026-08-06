@@ -1,0 +1,28 @@
+diff --git a/cfg/dlio.yaml b/cfg/dlio.yaml
+index dd7251c..107d85b 100755
+--- a/cfg/dlio.yaml
++++ b/cfg/dlio.yaml
+@@ -27,11 +27,21 @@
+                                  0.,  0.,  1. ]
+     imu/intrinsics/gyro/bias: [ 0.0, 0.0, 0.0 ]
+ 
+-    extrinsics/baselink2imu/t: [ 0.006253, -0.011775, 0.007645 ] 
++    # 原来baselink2imu/t是随手抄的某个真实硬件标定值，baselink2lidar/t是零，
++    # 两个R都是单位矩阵——都跟这套仿真里mid360.xacro实际的安装完全对不上。
++    # 之前mid360是30度前倾+z=0.2，这两个R曾经被改成对应的Ry(30°)矩阵（见git
++    # log/README里"dlio_extrinsics_tilt.patch"那段历史）。现在mount改成水平
++    # 安装（rpy全0）+z=0.06（紧贴机体上表面，见gen_iris_mid360_sdf.py），
++    # R正好又变回单位矩阵了（水平安装=lidar/imu坐标系跟base_link不需要额外
++    # 旋转），所以这版patch只需要覆盖t（两个传感器都挂在同一个mid360_link上，
++    # 高度一致），R保留默认单位矩阵不用碰。t不对同样是systematic错误的源头：
++    # DLIO用这个t做杆臂效应修正（transformImu()里线加速度那项），t错了会在
++    # 积分链路里引入一个恒定的系统性偏差，不是普通噪声累积。
++    extrinsics/baselink2imu/t: [ 0.,  0.,  0.06 ]
+     extrinsics/baselink2imu/R: [ 1.,  0.,  0.,
+                                  0.,  1.,  0.,
+                                  0.,  0.,  1. ]
+-    extrinsics/baselink2lidar/t: [ 0.,  0.,  0. ]
++    extrinsics/baselink2lidar/t: [ 0.,  0.,  0.06 ]
+     extrinsics/baselink2lidar/R: [ 1.,  0.,  0.,
+                                    0.,  1.,  0.,
+                                    0.,  0.,  1. ]

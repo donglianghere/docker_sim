@@ -1,0 +1,64 @@
+diff --git a/include/dlio/odom.h b/include/dlio/odom.h
+index 621f230..32eba16 100755
+--- a/include/dlio/odom.h
++++ b/include/dlio/odom.h
+@@ -164,6 +164,10 @@ private:
+   // 是MutuallyExclusive，同一时刻只有一个callbackImu()在跑)，且始终在
+   // this->geo.mtx这把已有的锁保护范围内访问，不需要额外加锁或原子类型。
+   double last_propagate_debug_print_time_ = 0.0;
++  // getNextPose()里"GICP找不到足够对应点、悄悄退化成直通IMU先验"这个状态
++  // 的打印节流——只在callbackPointCloud()所在的单一线程里读写(lidar_cb_group
++  // 是MutuallyExclusive)。
++  double last_gicp_lost_print_time_ = 0.0;
+ 
+   // Trajectory
+   std::vector<std::pair<Eigen::Vector3f, Eigen::Quaternionf>> trajectory;
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index c793ece..726e83c 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -1077,9 +1077,41 @@ void dlio::OdomNode::getNextPose() {
+   pcl::PointCloud<PointType>::Ptr aligned = std::make_shared<pcl::PointCloud<PointType>>();
+   this->gicp.align(*aligned);
+ 
+-  // Get final transformation in global frame
+-  this->T_corr = this->gicp.getFinalTransformation(); // "correction" transformation
+-  this->T = this->T_corr * this->T_prior;
++  // 深挖到的真实根因（不是IMU积分本身的问题，是GICP优化器对"完全没有对应点"
++  // 这个退化情况没有任何防护）：一旦T_prior（IMU推算的初始猜测）偏得太远，
++  // 超出maxCorrespondenceDistance（0.5米），target_kdtree_里所有点的最近邻
++  // 搜索全部失败（correspondences_全是-1），NanoGICP::linearize()算出的
++  // sum_errors/H/b全部精确为0——喂进LsqRegistration::step_lm()的
++  // rho=(y0-yi)/(d·(lambda*d-b))变成0/0=NaN。C++里"rho<0"这个判断对NaN
++  // 永远是false，代码因此走进"success"分支：x0基本不变（等于原样返回了
++  // 没修正的T_prior）、final_error_被设成精确的0.0（仪表盘上看起来像
++  // "配准完美"）、is_converged()对着一个几乎是单位阵的delta自然也判定为
++  // true——GICP从这一刻起悄悄变成纯直通IMU先验的空转状态，却一直报"收敛、
++  // 误差0"，完全看不出已经失效；后续updateState()拿GICP这份（其实等于
++  // 什么都没修正的）输出去跟同样靠IMU积分出来的state.p比，两者本来就接近
++  // 一致，误差信号也跟着失真变小，整个几何观测器因此也停止有效矫正，
++  // 位姿彻底自由发散。用this->gicp.num_correspondences（NanoGICP这次实际
++  // 配对上的点数）识破这种伪装——真正配准成功时这个数字是几百，退化到
++  // 对着不存在的匹配空转时会是0或者极少。
++  if (this->gicp.num_correspondences < this->gicp_min_num_points_) {
++    if (this->scan_stamp - this->last_gicp_lost_print_time_ >= 1.0) {
++      this->last_gicp_lost_print_time_ = this->scan_stamp;
++      std::cout << "[getNextPose] GICP LOST TRACK: only " << this->gicp.num_correspondences
++                << " correspondences (< " << this->gicp_min_num_points_ << ") -- prior too far "
++                << "from map, GICP cannot correct it this cycle. Keeping last known-good T_corr "
++                << "instead of trusting this cycle's (fake) alignment." << std::endl;
++    }
++    // this->T_corr/this->T故意不更新，保留上一次真正配准成功时的值——
++    // propagateGICP()因此会把lidarPose钉在最后一个可信锚点上，
++    // updateState()的err = pin - state.p才能继续反映"当前积分状态相对
++    // 最后一次可信观测究竟飘了多远"这个有意义的量，而不是对着一个自己
++    // 也在跟着飘的"影子目标"算出一个虚假的小误差、让几何观测器误以为
++    // 一切正常。
++  } else {
++    // Get final transformation in global frame
++    this->T_corr = this->gicp.getFinalTransformation(); // "correction" transformation
++    this->T = this->T_corr * this->T_prior;
++  }
+ 
+   // Update next global pose
+   // Both source and target clouds are in the global frame now, so tranformation is global

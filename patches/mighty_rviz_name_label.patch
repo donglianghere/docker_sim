@@ -1,0 +1,44 @@
+diff --git a/rviz/multi_mighty.rviz b/rviz/multi_mighty.rviz
+index 8d8d333..dd9f28a 100644
+--- a/rviz/multi_mighty.rviz
++++ b/rviz/multi_mighty.rviz
+@@ -778,6 +778,19 @@ Visualization Manager:
+                 Reliability Policy: Best Effort
+                 Value: /NX01/vel_text
+               Value: true
++            - Class: rviz_default_plugins/Marker
++              Enabled: true
++              Name: NX01 Name Label
++              Namespaces:
++                {}
++              Topic:
++                Depth: 5
++                Durability Policy: Volatile
++                Filter size: 10
++                History Policy: Keep Last
++                Reliability Policy: Reliable
++                Value: /NX01/name_label
++              Value: true
+             - Class: rviz_default_plugins/Marker
+               Enabled: false
+               Name: NX01 FOV
+@@ -1451,6 +1464,19 @@ Visualization Manager:
+                 Reliability Policy: Best Effort
+                 Value: /NX02/vel_text
+               Value: true
++            - Class: rviz_default_plugins/Marker
++              Enabled: true
++              Name: NX02 Name Label
++              Namespaces:
++                {}
++              Topic:
++                Depth: 5
++                Durability Policy: Volatile
++                Filter size: 10
++                History Policy: Keep Last
++                Reliability Policy: Reliable
++                Value: /NX02/name_label
++              Value: true
+             - Class: rviz_default_plugins/Marker
+               Enabled: false
+               Name: NX02 FOV

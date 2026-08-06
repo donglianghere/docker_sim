@@ -1,0 +1,37 @@
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+index ad50d23246..a7ceb62c96 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+@@ -45,3 +45,32 @@ param set-default PWM_MAIN_FUNC4 104
+ # 4 rotors * motorConstant(5.84e-06) * maxRotVelocity(1100)^2 = 28.27N max
+ # thrust (iris.sdf.jinja), hover_throttle = mass_kg * 9.81 / 28.27.
+ param set-default MPC_THR_HOVER 0.671
++
++# MPC_YAWRAUTO_MAX (max yaw rate in autonomous/offboard modes) defaults to
++# 45 deg/s -- confirmed via source (mc_pos_control/multicopter_autonomous_
++# params.c) to be the actual bottleneck behind "机头转不过来"/nose can't
++# keep up with flight direction, even after mighty's own w_max was raised
++# from 1.0 to 3.0 rad/s (~172 deg/s): mavros's setpoint_trajectory plugin
++# forwards mighty's commanded yaw/yaw_rate to PX4, but PX4 clamps the
++# actual yaw setpoint rate-of-change to this parameter regardless of what's
++# commanded -- 45 deg/s is the real ceiling, not mighty's 172 deg/s ask.
++#
++# First tried raising this to 180 deg/s (headroom above mighty's
++# w_max=3.0rad/s~172deg/s so mighty's own limit stays the binding
++# constraint instead of PX4's default silently re-capping it lower) --
++# reverted back to the stock 45 after live testing: both NX01 and NX02
++# started crashing repeatedly right after this change, and a dedicated
++# attitude/thrust logger (docker_sim/scripts/attitude_thrust_logger.py,
++# subscribing to mavros/setpoint_raw/target_attitude) caught both vehicles
++# persistently commanding thrust=1.0 (pegged at max) while chasing a large,
++# non-converging yaw error at max body rate. There's a still-unresolved,
++# confirmed-persistent (not transient/overshoot) yaw discrepancy elsewhere
++# in the stack (see README.md) -- at 45 deg/s that bug only produced a slow,
++# relatively harmless drift toward the wrong heading; giving PX4 permission
++# to chase it much faster turned the same underlying bug into violent,
++# thrust-saturating loss of control. Reverting this single parameter back
++# to stock is a stability-first mitigation, not a fix for the underlying
++# yaw bug -- don't re-raise this until that root cause is found and fixed,
++# see README.md for the ongoing investigation and the exact captured
++# telemetry that motivated this revert.
++param set-default MPC_YAWRAUTO_MAX 45

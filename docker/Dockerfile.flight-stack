@@ -1,0 +1,547 @@
+# ----------------------------------------------------------------------------
+# flight-stack：机载软件侧。DLIO + mighty(规划) + ros2_px4_stack(dynus分支，含
+# 三处已知修复：create_rate死锁、自动解锁/切OFFBOARD、lidar_frame_id_硬编码)。
+# 跑两份容器实例，一机一个（NX01 / NX02），今后真机部署也是同一个镜像。
+#
+# 构建：
+#   docker build --build-arg HTTP_PROXY=$http_proxy --build-arg HTTPS_PROXY=$https_proxy \
+#                 -f docker/Dockerfile.flight-stack -t flight-stack:latest ..
+# ----------------------------------------------------------------------------
+FROM mighty-base:humble
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+# 编译并发度：colcon/make 默认都会吃满 nproc，这台机器核数(32)远超内存(31G)，
+# sim-world 和 flight-stack 两个镜像又会被 docker compose build 并发构建，
+# 核数x核数 x 2镜像 的并发编译直接把内存打爆、系统死机。用 BUILD_JOBS 统一收窄，
+# 按 "内存(GB)/2" 估算一个安全值，构建时可用 --build-arg BUILD_JOBS=N 覆盖默认值。
+ARG BUILD_JOBS=4
+ENV http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    DEBIAN_FRONTEND=noninteractive \
+    MAKEFLAGS=-j${BUILD_JOBS}
+
+# ============================================================
+# 1. DLIO（vectr-ucla, feature/ros2 分支）
+# ============================================================
+COPY staging/dlio_ws_src /opt/dlio_ws/src
+# DLIO 自己的点云订阅用裸整数1构造QoS，默认是RELIABLE；Gazebo那边Livox插件发布点云
+# 用的是BEST_EFFORT（sensor数据的常规约定，IMU那行DLIO自己也用了SensorDataQoS，
+# 唯独点云这行没有）——RELIABLE订阅者收不到BEST_EFFORT发布者的消息，DDS QoS
+# 兼容性规则决定的，导致DLIO压根收不到Gazebo的雷达点云，算不出里程计，`mighty`
+# 订阅的state话题因此从来没人真正发布过（`ros2 topic hz`会报"does not appear
+# to be published yet"）。改成跟IMU那行一致的 rclcpp::SensorDataQoS()。
+# DLIO自己的debug()原来在callbackPointCloud里——每一帧点云回调都触发一次，新起
+# 一个detached线程清屏+打印一份完整仪表盘。雷达帧率有多快终端就刷多快（这套
+# mid360仿真是100Hz），人眼根本看不清，多个并发线程还会互相抢着清屏/打印导致
+# 输出经常整段乱套。限流到最多每1秒打印一次。
+# output限流生效之后终于能在崩溃前的最后状态里看清具体数字：飞机静止不动，DLIO
+# 却算出"走了两千多米"，accel bias顶到params.yaml里abias_max的上限。查了
+# mid360/imu的实际发布规律（`ros2 topic hz`）：平均~470Hz，但min interval显示
+# 0.000s（近零间隔的相邻消息）、偶尔还有0.104s的大间隙，非常不规律。odom.cc里
+# 有两处"dt作分母"的地方：一处是transformImu()里的杆臂修正项
+# `(ang_vel_cg - ang_vel_cg_prev) / dt`，另一处是主IMU回调里存进imu_meas.dt、
+# 直接被propagateState()拿去做速度/位置积分的那个dt。两处原来都只挡了
+# `dt == 0`这一种情况，挡不住"非零但极小"——极小dt配上仿真里几乎零噪声的IMU
+# 读数中偶发的微小抖动，会在除法/积分时被放大成数值尖峰，是DLIO在静止状态下
+# 依然发散的一个具体、可验证的推手。两处都改成`dt < 1e-4`的下限钳位。
+COPY patches/dlio_pointcloud_qos.patch patches/dlio_debug_throttle.patch patches/dlio_imu_dt_clamp.patch patches/dlio_extrinsics_mount.patch patches/dlio_namespace.patch patches/dlio_gicp_fitness_debug.patch patches/dlio_bias_bounds_tighten.patch patches/dlio_keyframe_insertion_debug.patch patches/dlio_keyframe_velocity_check.patch patches/dlio_propagate_debug.patch patches/dlio_prev_imu_stamp_fix.patch patches/dlio_gravity_align_default.patch patches/dlio_spaciousness_oob_fix.patch patches/dlio_gicp_lost_track_fallback.patch /tmp/
+RUN cd /opt/dlio_ws/src/direct_lidar_inertial_odometry \
+    && (git apply --check /tmp/dlio_pointcloud_qos.patch && git apply /tmp/dlio_pointcloud_qos.patch \
+        || echo "!! dlio_pointcloud_qos.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
+    && (git apply --check /tmp/dlio_debug_throttle.patch && git apply /tmp/dlio_debug_throttle.patch \
+        || echo "!! dlio_debug_throttle.patch 未能自动应用，需人工核对后手动改 include/dlio/odom.h、src/dlio/odom.cc !!") \
+    && (git apply --check /tmp/dlio_imu_dt_clamp.patch && git apply /tmp/dlio_imu_dt_clamp.patch \
+        || echo "!! dlio_imu_dt_clamp.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
+    && (git apply --check /tmp/dlio_extrinsics_mount.patch && git apply /tmp/dlio_extrinsics_mount.patch \
+        || echo "!! dlio_extrinsics_mount.patch 未能自动应用，需人工核对后手动改 cfg/dlio.yaml !!") \
+    && (git apply --check /tmp/dlio_namespace.patch && git apply /tmp/dlio_namespace.patch \
+        || echo "!! dlio_namespace.patch 未能自动应用，需人工核对后手动改 launch/dlio.launch.py !!") \
+    && (git apply --check /tmp/dlio_gicp_fitness_debug.patch && git apply /tmp/dlio_gicp_fitness_debug.patch \
+        || echo "!! dlio_gicp_fitness_debug.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
+    && (git apply --check /tmp/dlio_bias_bounds_tighten.patch && git apply /tmp/dlio_bias_bounds_tighten.patch \
+        || echo "!! dlio_bias_bounds_tighten.patch 未能自动应用，需人工核对后手动改 cfg/params.yaml !!") \
+    && (git apply --check /tmp/dlio_keyframe_insertion_debug.patch && git apply /tmp/dlio_keyframe_insertion_debug.patch \
+        || echo "!! dlio_keyframe_insertion_debug.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
+    && (git apply --check /tmp/dlio_keyframe_velocity_check.patch && git apply /tmp/dlio_keyframe_velocity_check.patch \
+        || echo "!! dlio_keyframe_velocity_check.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h !!") \
+    && (git apply --check /tmp/dlio_propagate_debug.patch && git apply /tmp/dlio_propagate_debug.patch \
+        || echo "!! dlio_propagate_debug.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h !!") \
+    && (git apply --check /tmp/dlio_prev_imu_stamp_fix.patch && git apply /tmp/dlio_prev_imu_stamp_fix.patch \
+        || echo "!! dlio_prev_imu_stamp_fix.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
+    && (git apply --check /tmp/dlio_gravity_align_default.patch && git apply /tmp/dlio_gravity_align_default.patch \
+        || echo "!! dlio_gravity_align_default.patch 未能自动应用，需人工核对后手动改 cfg/params.yaml !!") \
+    && (git apply --check /tmp/dlio_spaciousness_oob_fix.patch && git apply /tmp/dlio_spaciousness_oob_fix.patch \
+        || echo "!! dlio_spaciousness_oob_fix.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
+    && (git apply --check /tmp/dlio_gicp_lost_track_fallback.patch && git apply /tmp/dlio_gicp_lost_track_fallback.patch \
+        || echo "!! dlio_gicp_lost_track_fallback.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h !!")
+# 用户问"NX02这个现象到底是不是IMU积分的问题，还是IMU本身有问题"——
+# 顺着GICP fitness全程可疑地卡在0.0000这条线，直接读了NanoGICP/
+# LsqRegistration(nano_gicp.cc、lsq_registration.cc)的优化器实现，找到了
+# 目前为止最深的一层根因：不是IMU积分本身的问题，是GICP优化器对"完全没有
+# 对应点"这个退化情况没有任何防护。一旦T_prior(IMU推算的初始猜测)偏得太
+# 远、超出maxCorrespondenceDistance(0.5米)，target_kdtree_里所有点的最近
+# 邻搜索全部失败(correspondences_全是-1)，NanoGICP::linearize()算出的
+# sum_errors/H/b全部精确为0——喂进LsqRegistration::step_lm()的
+# rho=(y0-yi)/(d·(lambda*d-b))变成0/0=NaN。C++里"rho<0"这个判断对NaN永远
+# 是false，代码因此走进"success"分支：x0基本不变(等于原样返回了没修正的
+# T_prior)、final_error_被设成精确的0.0(仪表盘上看起来像"配准完美")、
+# is_converged()对着一个几乎是单位阵的delta自然也判定为true——GICP从这一
+# 刻起悄悄变成纯直通IMU先验的空转状态，却一直报"收敛、误差0"，完全看不出
+# 已经失效；后续updateState()拿GICP这份(其实等于什么都没修正的)输出去跟
+# 同样靠IMU积分出来的state.p比，两者本来就接近一致，误差信号也跟着失真
+# 变小，整个几何观测器因此也停止有效矫正，位姿彻底自由发散、只受纯IMU
+# 积分本身残留的微小偏置驱动，表现为近似匀速的持续漂移(NX02实测最终稳定
+# 在约1800~4100 m/s量级的"匀速"发散，直到崩溃时走了64万米)。
+# 这也回答了用户的问题：propagateState/updateState/integrateImu三处核心
+# 积分数学本身跟DLIO官方master分支逐字节一致(上一轮agent已核实)，不是
+# IMU积分公式写错了；也不是"IMU本身数据有问题"(用的还是同一个mid360仿真
+# IMU)——是GICP这一层在失去对应点之后没有诚实地报告失败，反而伪装成功，
+# 导致上游依赖"GICP还在工作"这个假设的整条矫正链路失效。换飞机本体IMU
+# 换不掉这个bug：不管用哪个IMU源，只要某一次积分误差恰好让先验漂出
+# 0.5米对应点搜索半径，同样的NaN伪成功链路照样会触发，区别只是"多久之后
+# 触发"，不是"会不会触发"。
+# 修复：patches/dlio_gicp_lost_track_fallback.patch在getNextPose()里用
+# this->gicp.num_correspondences(NanoGICP这次实际配对上的点数，真正配准
+# 成功时是几百，退化到空转时是0或极少)识破这种伪装——低于
+# gicp_min_num_points_(已有参数，配置里是64，之前一直没被用来做这个用途)
+# 时，故意不更新this->T_corr/this->T，保留上一次真正配准成功时的值，让
+# propagateGICP()把lidarPose钉在最后一个可信锚点上，updateState()的
+# err = pin - state.p才能继续反映"当前积分状态相对最后一次可信观测究竟
+# 飘了多远"这个有意义的量，而不是对着一个自己也在跟着飘的"影子目标"算出
+# 虚假的小误差。这是这一整轮IMU/SLAM排查里目前为止改动最深、涉及信任
+# 判断逻辑本身的一次修复，风险和潜在收益都比之前的诊断/参数类patch更大，
+# 需要重点验证。
+# 用户要求systematic比对DLIO的master(ROS1)和feature/ros2分支在IMU处理上的
+# 差异——派了个agent直接在本地git clone上跑`git diff master feature/ros2`，
+# 加上我自己手动核对issue #92对应的fix-imu-init分支，一共确认了这一轮
+# 之前那个prev_imu_stamp修复之外还有两处真实差异（都已经用本地git diff
+# 逐字核实过，不是agent的转述）：
+# (1) cfg/params.yaml里odom/imu/approximateGravity，feature/ros2分支这套
+# 配置是false，master是true——两个分支在共同祖先61a9a08("Release v1.0.0")
+# 时都是false，master后来在75c875f里改成了true，但feature/ros2那时候已经
+# 分叉出去了，从没跟上这个默认值变化。这个参数对应odom.cc里的
+# gravity_align_标志，为true时标定阶段会根据实测重力方向重新估计初始姿态
+# （state.q），为false时姿态直接保持默认值不做这一步修正——如果base_link
+# 没有恰好完全水平，这个跳过的修正步骤会在从第一条IMU消息开始的重力扣除
+# 计算里引入一个系统性残差。改回true，跟master的（更新过的）默认值对齐。
+# (2) src/dlio/odom.cc的computeSpaciousness()里有个越界读：
+# `for (int i = 0; i <= this->original_scan->points.size(); i++)`多读了
+# points[size()]一个不存在的元素（未定义行为）。master在c389288
+# ("Fix segmentation fault caused by out-of-bounds array access")里已经
+# 改回`<`，但feature/ros2分支比master落后23个commit、从来没同步到这个
+# 修复。这个函数算出来的spaciousness直接喂给setAdaptiveParams()，正是
+# 之前发现"关键帧插入阈值被自适应放大到默认值5倍"这个机制的输入——越界
+# 读到的垃圾值有可能是那次异常放大的一部分原因。
+# agent还额外核实到一处"master和feature/ros2都有、不是ROS2移植独有"的
+# 已知upstream bug（Livox IMU未按g单位换算，feature/livox-support分支有
+# 未合并的修复）——这套仿真里mid360 IMU插件直接输出SI单位m/s²（之前实测
+# 静止时线加速度模长约9.8，不是约1.0），不受这个问题影响，本轮未处理，
+# 留给以后接真实Livox硬件时再核对。
+# propagateState/updateState/integrateImu三处核心积分数学逻辑，agent确认
+# 跟master逐字节一致，没有额外差异。
+# 上一轮关键帧修复验证后，用户要求查IMU积分本身是否有问题，并让查DLIO是不是
+# 官方clone、查官方issue列表——都是对的：staging/dlio_ws_src/direct_lidar_
+# inertial_odometry确实是从https://github.com/vectr-ucla/direct_lidar_
+# inertial_odometry.git官方clone的，用的是feature/ros2这个社区贡献的ROS2
+# 移植分支，不是原作者一直维护、用户口中"ROS1版本很好用"的master分支——查了
+# 一下，feature/ros2分支比master落后23个commit，有一个还没合并的PR #100
+# 明确写着想把master后续的bug修复同步过来。
+# 顺着"ROS2移植可能有独有bug"这条线查到了两个跟本项目症状高度吻合的官方
+# issue：#78("ros2 IMU calibration"，Ouster，Z轴accel bias锁死在-5导致
+# 严重漂移，作者原话"there is no calibration step when compared to the
+# main branch")、#71（Livox Mid-360，同样accel bias锁死在-5附近）——两个
+# 都是"静止/低速状态下Z轴/整体发散、accel bias顶到硬边界"，跟这个项目
+# 从最开始"走了两千多米"到现在"六万八千米"这整条主线症状完全对得上。修这两个
+# issue的PR #79只改了cfg/dlio.yaml的外参数值（跟本项目自己的
+# dlio_extrinsics_mount.patch做的事类似——这个patch原名dlio_extrinsics_
+# tilt.patch，mid360从30度前倾改成水平安装之后改名并重写了内容，历史沿革
+# 见README.md），完全没碰源码——issue本身描述的
+# "缺少标定步骤"这层代码逻辑问题从来没被真正修过。
+# 顺着这条线又挖到了issue #92("Set prev_imu_stamp on IMU calibration")，
+# 直接对上src/dlio/odom.cc里能独立复现验证的一个真实bug：this->prev_imu_
+# stamp在构造函数里初始化成0.，标定阶段（imu_calibrated还是false的那个
+# if分支）整个过程从来没碰过它——calibrate_accel_/calibrate_gyro_只在标定
+# 结束那一刻跑一次，标定期间的每条IMU消息走的是外层"没标定"分支，压根不会
+# 执行到下面"已标定"分支里"double dt = imu_stamp_secs - this->prev_imu_
+# stamp;"这行。等标定真正结束、第一条"已标定"消息进来才第一次执行到这行，
+# prev_imu_stamp依然是那个从没被更新过的0.，imu_stamp_secs此时已经是
+# 十亿量级的epoch绝对时间戳（这套仿真里是mighty_imu_sim_time.patch/
+# livox_imu_lidar_sim_time.patch那个固定偏移1735689600+几秒，真机上是墙钟
+# epoch，同样是十亿级），算出来的dt是一个天文数字，直接喂进
+# propagateState()的`0.5*dt*dt*(...)`这一项，一步就能把position/velocity
+# 冲到无穷大或者巨大数值——这解释了为什么"accel bias秒杀式顶到abias_max
+# 上限"贯穿了这整个项目从第一次发现发散问题到现在的每一轮排查，也解释了
+# 为什么此前那么多轮修复（点云假点、IMU dt钳位、IMU零噪声、sim time时间戳）
+# 都没解决核心问题——它们都没碰到这个只在"标定刚结束那一刻"触发一次的
+# 天文数字级dt。也解释了为什么之前测的"墙钟"和"仿真时钟"两种方案都同样
+# 发散：不管哪种，两者都是epoch量级的绝对值，减去0都是天文数字，这个bug
+# 对两种clock策略都成立，是本项目这条时间戳调查线里唯一没被排除、且已经
+# 被DLIO官方仓库issue独立记录过的候选根因。
+# 两个patch：dlio_propagate_debug.patch是纯诊断（propagateState()里打印
+# 纯IMU死推算——不经GICP/geometric observer矫正——算出来的world_accel/净
+# 加速度/速度/位置，直接在callbackImu()所在的单一线程内、geo.mtx这把已有
+# 锁保护范围内打印，不新增线程安全风险）；dlio_prev_imu_stamp_fix.patch是
+# 真正的修复：标定完成的那一刻把prev_imu_stamp显式设成当前时间戳，让"已
+# 标定"分支第一次算dt时用的是正确的采样间隔，不是从0开始算的天文数字。
+# 效果待重新build验证。
+# 上面dlio_keyframe_insertion_debug.patch的诊断实测确认了：飞机全程静止，
+# 一架能插出几百个关键帧，估计位置飘出上百米——updateKeyframes()的插入
+# 判据只看this->state.p(估计位置)，从没跟"是否真的物理移动过"做过交叉
+# 核实，一旦估计值开始飘，每次飘过阈值就照样插入新关键帧，把错误位姿焊进
+# 地图，后续扫描对着被污染的地图继续"配准得很好"（GICP fitness全程接近0，
+# 因为对的是自己刚参与污染出来的地图，不是客观真值），是一条自我强化的
+# 发散循环。这个patch加一层物理合理性检查：新关键帧触发时，用这次的位移
+# dd除以距最近关键帧的时间差算出"隐含速度"，超过keyframe_max_velocity_
+# （新增参数odom/keyframe/maxVelocity，默认5m/s——这套仿真是20米见方小
+# 房间里的四旋翼，正常飞行不可能达到，参考此前日志里"dd=6.99m"级别的跳变
+# 几乎肯定不是真实物理运动）就拒绝这次插入，只打印警告，地图保持在最后
+# 一个"合理"的关键帧状态、不再继续被污染。不是"确认解决发散"的根因修复
+# （估计值本身为什么会开始飘还没查清楚），是一个直接针对已确认机制
+# （关键帧插入对估计值盲目信任）的定向circuit breaker，效果待重新build
+# 验证——具体要看：地图不再被污染之后，GICP会不会真的把估计值拉回来，
+# 还是estimate继续自己飘、只是不再连累地图。
+# 加了GICP fitness诊断之后（见上面dlio_gicp_fitness_debug.patch）实测发现：
+# 静止的飞机"走了几米到十几米"再崩溃之前，仪表盘里GICP那一行几乎全程显示
+# "converged: yes, fitness: 0.0000"——配准本身报告的是完美收敛，跟"轨迹在
+# 跑飞"这个表象完全对不上，基本排除了"点云配准精度差/房间几何退化导致GICP
+# 配准病态"这个假说。直接看updateKeyframes()的关键帧插入判据：newKeyframe
+# 完全基于this->state.p（估计出来的位置）去跟已有关键帧比距离/角度，没有
+# 任何跟"飞机是否真的物理移动过"的交叉核实——如果估计值本身已经在飘，飘过
+# keyframe_thresh_dist_(1.0米)照样会插入新关键帧，把当前(其实是错的)位姿和
+# 点云焊进地图。后续扫描很可能对着这个已经被污染的地图配准得"很好"（因为
+# 都是同一条漂移轨迹自洽推出来的），这能完整解释"GICP显示完美收敛，但整条
+# 轨迹早就飘出去了"这个现象。这个patch在关键帧真正插入的那一刻打印触发它的
+# dd（距最近关键帧的距离）和当前估计位置，直接在callbackPointCloud所在的
+# 主线程里同步打印（不经过debug()那个detached线程，不碰GICP/PCL任何内部
+# 状态，只读updateKeyframes()内部本来就已经算好的普通局部变量），没有线程
+# 安全或空指针风险——前面三轮GICP fitness诊断折腾出的教训（PCL基类方法对
+# NanoGICP这个子类不安全、跨线程调用GICP对象有数据竞争）这次都避开了。
+# 用户问"mighty原本的仿真程序里根本没跑DLIO吧"——查证属实：mighty自己的
+# run_sim.py/onboard_mighty.launch.py里，use_hardware=false（原生仿真分支）
+# 那段代码明确标注"=== EXISTING SIM CODE — COMPLETELY UNCHANGED ==="，用的是
+# fake_sim_node（不经过Gazebo物理、直接对规划轨迹积分），DLIO只出现在
+# use_hardware=true这个硬件分支里（"HW: Odom to state (DLIO remapping)"）——
+# 这套docker_sim为了端到端验证真实机载软件栈，故意让mighty在Gazebo里走
+# use_hardware=true分支，这是mighty/DLIO原作者都没测过的组合。
+# 顺着这个思路查DLIO自己的cfg/dlio.yaml、cfg/params.yaml：git log显示这两个
+# 文件从来没被这个项目自己的开发者改过（历史只有DLIO上游自己的commit，加
+# ROS2支持、加Hesai支持这些），GICP/关键帧/体素分辨率、accel/gyro bias上限
+# 全是DLIO官方示例（大尺度Ouster室外/校园场景）的原始默认值，从没针对这套
+# 20x20米小房间+Mid-360（20米量程、单帧仅1000点）重新调过。
+# 两处改动：(1) dlio_gicp_fitness_debug.patch纯诊断，在仪表盘里加一行GICP
+# 收敛状态+fitness score（PCL Registration标准API，NanoGICP经LsqRegistration
+# 继承自pcl::Registration），之前这两个量只在代码里算了从没打印过，想直接
+# 看清"配准本身是不是在正常收敛"就得先有这个数据，零风险、不改变任何行为。
+# (2) dlio_bias_bounds_tighten.patch把abias_max从5.0（m/s²）收紧到0.3、
+# gbias_max从0.5（rad/s）收紧到0.05——5.0 m/s²对任何真实MEMS IMU来说都是
+# 荒谬的量级（真实bias一般在0.01~0.3量级），这么松的上限等于给了在线bias估计
+# 一个几乎没有约束的容器，配准误差可以被它悄悄吸收、越攒越大直到真的顶到
+# 5.0才现形（"原地飘几千米"）。收紧上限本身不解决配准误差从哪来，但能让
+# 这类误差在到达灾难性量级之前就先被"卡住"、暴露出来，是一个诊断性质更强
+# 的改动，不是确认有效的根因修复。改的是odom/geo/abias_max/gbias_max这两个
+# 运行时钳位（geometric observer每次更新后的钳位），不影响启动时的一次性
+# IMU标定（那段代码不读这两个参数）。
+# 上游 dlio.launch.py 里的 Node() 从来没有设置 namespace= ——entrypoint 传的
+# namespace:=NX01/NX02 这个launch参数其实是`ros2 launch`静默忽略的死参数（launch
+# 文件根本没声明它），实际生效的只有pointcloud_topic/imu_topic两个显式remap，output
+# 话题(odom/pose/keyframes/...)和节点名本身都还是裸的全局名字 `dlio_odom_node`、
+# `dlio/odom_node/odom` 等。sim-world/flight-stack-nx01/nx02三个容器全是
+# network_mode: host + ipc: host，共享同一个ROS graph——NX01和NX02两边的DLIO因此
+# 节点名/话题/服务全部撞在一起：`ros2 node list`能看到"share an exact name"的警告，
+# 两边的keyframe点云互相串话，实测NX02那边最终直接因为fastcdr反序列化到不匹配的
+# buffer而`terminate called after throwing 'NotEnoughMemoryException'`崩溃退出，
+# NX01这边则是里程计内部状态被另一台飞机的数据污染后原地飘到几千米开外（accel bias
+# 也被顶到硬编码的±5.0上限）——这才是"两架飞机里程计都飘得很厉害"的真正根因，跟前面
+# 那个30度外参修正没关系（外参修正本身是对的，问题出在这一层）。这个patch给
+# dlio.launch.py补上真正生效的namespace参数（Node(namespace=...)），顺带把
+# frames/odom、frames/baselink等TF frame_id也按namespace加前缀（跟mighty自己
+# `${namespace}/base_link`等约定对齐，见 onboard_mighty.launch.py），否则/tf上
+# 还是会用裸的"odom"/"base_link"两边打架。配套修复见下面 entrypoint 里
+# pointcloud_topic/imu_topic 传参方式的调整——现在namespace由Node自己加，
+# entrypoint不能再重复拼一遍前缀。
+# dlio.yaml 里 baselink2imu/baselink2lidar 的外参R原来是单位矩阵，t也是抄的某个
+# 真实硬件标定值——没考虑 mid360.xacro 里雷达30度前倾的安装角度（对应
+# quadrotor.urdf.xacro 里 joint origin rpy="0 0.5236 0"），DLIO会把倾斜坐标系
+# 下的传感器读数当成base_link是水平的来处理，重力对齐从第一步就是错的，
+# 里程计会systematic地飘，不是噪声累积那种慢慢飘。上面这个patch按同一个30度
+# 重新算了R（IMU传感器跟lidar挂在同一个link上，两者外参完全一致）。
+# Dockerfile.base 最后一层 rm -rf 掉了 /var/lib/apt/lists，这里的 apt-get update
+# 补回索引——不然 rosdep install 内部调用的 apt-get install 会报 "Unable to
+# locate package"（索引是空的，不是包真不存在），静默失败后colcon build时才在
+# find_package这一步炸出来，很难联想到根因。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    apt-get update \
+    && source /opt/ros/humble/setup.bash \
+    && cd /opt/dlio_ws \
+    && rosdep update \
+    && rosdep install --from-paths src --ignore-src -r -y || true \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 2. mighty（规划器本体 + 其全部依赖，同 sim-world 镜像一致的源码）
+#    注意：这里只需要规划算法本身，不需要 -DBUILD_SIMULATION=ON（不含Gazebo相关
+#    target），减小这个镜像的体积，也避免机载侧误依赖Gazebo。
+# ============================================================
+COPY staging/decomp_ws_src /opt/decomp_ws/src
+# decomp_rviz_plugins 的 package.xml 没有把 decomp_util 声明成依赖，colcon 不会
+# 自动把 decomp_util 的安装路径注入 CMAKE_PREFIX_PATH——光按顺序build不够，
+# 中间必须手动 source 一次 decomp_util 的 install/setup.bash 才能让后续
+# find_package(decomp_util) 找到 decomp_utilConfig.cmake。
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/decomp_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --packages-select decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && source /opt/decomp_ws/install/setup.bash \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+COPY staging/mighty_ws_src /opt/mighty_ws/src
+COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_onboard_vehicle_profile.patch patches/mighty_lidar_point_cloud_topic_arg.patch patches/mighty_static_tf_fix.patch patches/mighty_static_tf_namespace_fix.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_force_goal_z.patch patches/mighty_headless_yaw_fix.patch patches/mighty_local_frame_only.patch patches/mighty_avoidance_tuning.patch patches/mighty_replan_failure_cap.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_z_range_narrow.patch patches/mighty_traveling_yaw_zero_dist_guard.patch /tmp/
+RUN cd /opt/mighty_ws/src/mighty \
+    && (git apply --check /tmp/mighty_lidar_frame_id.patch && git apply /tmp/mighty_lidar_frame_id.patch \
+        || echo "!! mighty_lidar_frame_id.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_occupancy_grid_qos_fix.patch && git apply /tmp/mighty_occupancy_grid_qos_fix.patch \
+        || echo "!! mighty_occupancy_grid_qos_fix.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_sensor_mount.patch && git apply /tmp/mighty_sensor_mount.patch \
+        || echo "!! mighty_sensor_mount.patch 未能自动应用，需人工核对后手动改 quadrotor.urdf.xacro !!") \
+    && (git apply --check /tmp/mighty_onboard_vehicle_profile.patch && git apply /tmp/mighty_onboard_vehicle_profile.patch \
+        || echo "!! mighty_onboard_vehicle_profile.patch 未能自动应用，需人工核对后手动改 onboard_mighty.launch.py !!") \
+    && (git apply --check /tmp/mighty_lidar_point_cloud_topic_arg.patch && git apply /tmp/mighty_lidar_point_cloud_topic_arg.patch \
+        || echo "!! mighty_lidar_point_cloud_topic_arg.patch 未能自动应用，需人工核对后手动改 onboard_mighty.launch.py !!") \
+    && (git apply --check /tmp/mighty_static_tf_fix.patch && git apply /tmp/mighty_static_tf_fix.patch \
+        || echo "!! mighty_static_tf_fix.patch 未能自动应用，需人工核对后手动改 onboard_mighty.launch.py !!") \
+    && (git apply --check /tmp/mighty_static_tf_namespace_fix.patch && git apply /tmp/mighty_static_tf_namespace_fix.patch \
+        || echo "!! mighty_static_tf_namespace_fix.patch 未能自动应用，需人工核对后手动改 onboard_mighty.launch.py !!") \
+    && (git apply --check /tmp/mighty_disable_d435.patch && git apply /tmp/mighty_disable_d435.patch \
+        || echo "!! mighty_disable_d435.patch 未能自动应用，需人工核对后手动改 quadrotor.urdf.xacro !!") \
+    && (git apply --check /tmp/mighty_enable_gravity.patch && git apply /tmp/mighty_enable_gravity.patch \
+        || echo "!! mighty_enable_gravity.patch 未能自动应用，需人工核对后手动改 quadrotor_base.urdf.xacro !!") \
+    && (git apply --check /tmp/mighty_force_goal_z.patch && git apply /tmp/mighty_force_goal_z.patch \
+        || echo "!! mighty_force_goal_z.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!") \
+    && (git apply --check /tmp/mighty_headless_yaw_fix.patch && git apply /tmp/mighty_headless_yaw_fix.patch \
+        || echo "!! mighty_headless_yaw_fix.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
+    && (git apply --check /tmp/mighty_local_frame_only.patch && git apply /tmp/mighty_local_frame_only.patch \
+        || echo "!! mighty_local_frame_only.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!") \
+    && (git apply --check /tmp/mighty_avoidance_tuning.patch && git apply /tmp/mighty_avoidance_tuning.patch \
+        || echo "!! mighty_avoidance_tuning.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!") \
+    && (git apply --check /tmp/mighty_replan_failure_cap.patch && git apply /tmp/mighty_replan_failure_cap.patch \
+        || echo "!! mighty_replan_failure_cap.patch 未能自动应用，需人工核对后手动改 include/mighty/mighty.hpp、include/mighty/mighty_type.hpp、src/mighty/mighty_node.cpp、src/mighty/mighty.cpp、config/hw_mighty.yaml !!") \
+    && (git apply --check /tmp/mighty_share_traj_heartbeat.patch && git apply /tmp/mighty_share_traj_heartbeat.patch \
+        || echo "!! mighty_share_traj_heartbeat.patch 未能自动应用，需人工核对后手动改 include/mighty/mighty_node.hpp、src/mighty/mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_replan_state_resync.patch && git apply /tmp/mighty_replan_state_resync.patch \
+        || echo "!! mighty_replan_state_resync.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
+    && (git apply --check /tmp/mighty_trajectory_wall_check_log.patch && git apply /tmp/mighty_trajectory_wall_check_log.patch \
+        || echo "!! mighty_trajectory_wall_check_log.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty_node.cpp !!") \
+    && (git apply --check /tmp/mighty_z_window_ceiling_occupied.patch && git apply /tmp/mighty_z_window_ceiling_occupied.patch \
+        || echo "!! mighty_z_window_ceiling_occupied.patch 未能自动应用，需人工核对后手动改 include/hgp/map_util.hpp !!") \
+    && (git apply --check /tmp/mighty_z_range_narrow.patch && git apply /tmp/mighty_z_range_narrow.patch \
+        || echo "!! mighty_z_range_narrow.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!") \
+    && (git apply --check /tmp/mighty_traveling_yaw_zero_dist_guard.patch && git apply /tmp/mighty_traveling_yaw_zero_dist_guard.patch \
+        || echo "!! mighty_traveling_yaw_zero_dist_guard.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!")
+
+# acl-mapping是一个git仓库，global_mapper_ros只是它下面的一个子目录
+# （不是独立的git repo，跟"mighty"那个repo结构不一样）——patch的cwd必须是
+# acl-mapping本身（repo root），不能是global_mapper_ros子目录：第一次调试
+# 这个patch时就是从子目录里cd+git apply，--check和实际apply都返回exit 0
+# 却什么都没改（git apply在这种"cwd在repo内但不是repo root"的场景下，会
+# 按repo root而不是cwd去解析patch里的相对路径，子目录深度不对就悄悄找不到
+# 目标文件、但又不会报错退出——没有对比apply前后的`git status`/`grep`实际
+# 生效与否的话很容易误判patch已经生效）。patch文件本身路径也相应改成
+# `global_mapper_ros/src/global_mapper_ros.cc`（相对acl-mapping根目录）。
+# 见global_mapper_ros_sim_time_stamp.patch的注释：occupancy_grid/
+# unknown_grid等输出消息原来盖的是这个node自己的墙钟时间，跟DLIO/UWB桥接
+# TF用的假epoch时钟域对不上，导致RViz里Fixed Frame跨namespace查看另一架
+# 飞机的occupancy_grid时解不出变换（同namespace因为是零跳恒等变换、不用
+# 查TF，看起来正常，容易误判成"只有跨机才有问题、这条消息本身没事"）。
+COPY patches/global_mapper_ros_sim_time_stamp.patch /tmp/
+RUN cd /opt/mighty_ws/src/acl-mapping \
+    && (git apply --check /tmp/global_mapper_ros_sim_time_stamp.patch && git apply /tmp/global_mapper_ros_sim_time_stamp.patch \
+        || echo "!! global_mapper_ros_sim_time_stamp.patch 未能自动应用，需人工核对后手动改 global_mapper_ros/src/global_mapper_ros.cc !!")
+
+# 用户反馈"飞机起来了，但用RViz的2D Goal Pose给点，飞机不动"——查了
+# mighty_node.cpp的debug日志（/tmp/mighty_debug.log，debug_log_file参数
+# 指定的路径）确认RViz发的term_goal确实收到了两次
+# （TERM_GOAL 4.1270 -3.3065 0.0000、TERM_GOAL -3.7283 -2.6457 0.0000）——
+# 话题/QoS都是通的，不是连接问题。真正原因：RViz的"2D Goal Pose"工具
+# 只能设x/y，z恒为0；mighty_node.cpp里有一段专门处理这个的逻辑
+# （force_goal_z为true时用default_goal_z覆盖掉RViz传来的z=0），但这套
+# docker_sim用的hw_mighty.yaml（use_hardware=true分支加载这份配置）里
+# force_goal_z是false——横向比较了mighty仓库其余四份配置文件
+# （mighty.yaml、mighty_ground_robot.yaml、hw_mighty_ground_robot.yaml、
+# multi_mighty.yaml），全部都是force_goal_z: true，只有hw_mighty.yaml这
+# 一份是false，大概率是个遗漏，不是故意的。原始z=0.0低于z_min(0.8)，被
+# mighty_node.cpp自己的边界检查直接拒绝，日志里能看到两条对应的ERROR
+# "Goal z is out of bounds: 0.000000"。改成force_goal_z: true、
+# default_goal_z从1.0改成1.5（配合这次起飞高度1.5米，2D Goal Pose点的
+# 目标点会保持在跟起飞一样的高度，不用额外爬升/下降）。
+# （convert_odom_to_state），onboard_mighty.launch.py原来的
+# `lidar_point_cloud_topic = 'livox/lidar' if use_hardware else 'mid360_PointCloud2'`
+# 把"状态估计源"和"点云话题名"这两件事绑在了同一个开关上，看起来像是
+# use_hardware=true把mighty的点云订阅带偏了——一开始也是照这个思路加了下面这个
+# lidar_point_cloud_topic覆盖参数。
+# ⚠️ 更正：这个判断是错的。后来直接读mighty_node.cpp源码+`ros2 node info`查实际
+# 运行中节点的订阅列表，确认mighty_node.cpp压根没有一个叫lidar_cloud_in的订阅
+# ——onboard_mighty.launch.py里mighty_node Node()定义的
+# `remappings=[('lidar_cloud_in', lidar_point_cloud_topic), ...]`是死代码，
+# 映射到哪个话题名都不影响mighty_node的实际行为。真正订阅点云的是
+# occupancy_grid/unknown_grid这对同步话题（无论use_hardware=true还是
+# sim_env=gazebo都一样），这两个话题要靠global_mapper_ros包的
+# global_mapper_node节点从原始点云+位姿算出来——这个节点之前在整套docker_sim
+# 里从来没被启动过，才是mighty从一开始就收不到任何障碍物数据的真正原因，见
+# flight-stack-entrypoint.sh里新增的global_mapper_ros启动步骤。
+# 下面这个lidar_point_cloud_topic覆盖参数留着无害（万一以后mighty_node.cpp
+# 重新加回这个订阅名，这里已经准备好了），但不要再当成"点云链路的修复"。
+# 接入global_mapper_ros之后实测发现它疯狂刷`lookupTransform(NX01/map ->
+# NX01/NX01_livox) failed: "NX01/map" ... does not exist`——onboard_mighty.
+# launch.py里`static_tf_node`（发布{namespace}/map -> {namespace}/odom恒等TF）
+# 早就定义好了，但`nodes_to_start`列表拼接逻辑里，quadrotor+use_hardware+
+# use_onboard_localization这个分支只append了`hw_odom_to_state_node`，
+# `static_tf_node`从来没被真正加进去过（隔壁star_robot/red_rover分支里甚至有个
+# `#static_tf_node`的孤立注释，像是本来想加、后来漏掉了）。DLIO自己发布
+# odom->base_link，链路上唯一缺的根就是这条map->odom恒等TF——没有它，
+# global_mapper_node每一帧点云的坐标变换都失败、直接跳过，occupancy_grid/
+# unknown_grid话题看起来在正常发布（有订阅者能看到消息在走），但payload可能
+# 一直是空的/不更新的。mighty_static_tf_fix.patch补上这一处。
+# 排查"两架飞机SLAM有没有互相串扰"时，`ros2 node list`实测报了
+# "share an exact name"警告：static_tf_node这个Node()原来没设置namespace=，
+# NX01/NX02两边都会起一个叫/static_tf_map_to_odom的节点——发布的TF内容本身
+# 用的是{namespace}/map -> {namespace}/odom（正确加了命名空间，数据不会串），
+# 但节点名冲突本身是个真实的ROS graph卫生问题。mighty_static_tf_namespace_fix.patch
+# 补上namespace=namespace。
+# 补完TF之后，`ros2 topic info /NX01/occupancy_grid -v`实测又发现了第三个问题：
+# mighty_node这边的订阅者QoS是RELIABLE，global_mapper_ros发布者QoS是
+# BEST_EFFORT——DDS QoS兼容性规则下RELIABLE订阅者连不上BEST_EFFORT发布者，
+# mighty_node实际一条occupancy_grid/unknown_grid消息都收不到。追到
+# mighty_node.cpp源码：`rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(
+# rmw_qos_profile_sensor_data))`这个写法是个经典陷阱——from_rmw()只把profile
+# 里的history+depth抄过去，reliability依然是rclcpp::QoS的默认值RELIABLE，不是
+# profile本身的BEST_EFFORT。这个文件里另一处ESDF订阅的注释其实早就点破过这个坑
+# （"unlike QoSInitialization::from_rmw which only sets history+depth"），但
+# occupancy_grid/unknown_grid/sensor_point_cloud这三处订阅当时没有一起改。
+# mighty_occupancy_grid_qos_fix.patch统一换成`rclcpp::SensorDataQoS()`（真正
+# 完整复制BEST_EFFORT+VOLATILE+KEEP_LAST/5的专用帮手类）。
+# 跟sim-world那边同一个原因：realsense_gazebo_plugin双机初始化时序竞态导致
+# gzserver段错误崩溃（上游issue pal-robotics/realsense_gazebo_plugin#17），
+# 先禁用D435相机。这份quadrotor.urdf.xacro虽然flight-stack不直接用来spawn
+# 模型（sim-world才做spawn），但mighty这边源码是同一份、要保持两边一致，
+# 避免以后哪边漏改。
+# gt_odom_bridge：定位数据来源切换开关（LOCALIZATION_SOURCE=gt|dlio，见
+# flight-stack-entrypoint.sh）用的桥接节点，跟mighty包源码无关但塞进同一个
+# workspace一起用colcon编译，省得单开一个workspace/COPY/colcon build三件套。
+COPY src/gt_odom_bridge /opt/mighty_ws/src/gt_odom_bridge
+# mighty的CMakeLists.txt里`find_package(example_interfaces REQUIRED)`是
+# pristine源码里本来就有的依赖（不是这次改动引入的），但`rosdep install
+# --from-paths src --ignore-src -r -y || true`那个`|| true`会把这个包装不上的
+# 失败原因整个吞掉，直到几十秒后colcon build真正跑到mighty这个包的
+# find_package步骤才报CMake Error——这条RUN指令在这次改动之前，因为它之前的
+# 每一层COPY内容都没变过，一直命中Docker构建缓存、从来没有真正重新执行过，这个
+# 依赖缺口一直没暴露出来（sim-world镜像那边同样的rosdep模式反而成功装上了，说明
+# 不是这个包在apt源里不存在，大概率是rosdep/网络层面偶发的）。与其继续依赖
+# 可能失败的rosdep，这里显式apt装一次，不吞异常，装不上直接在这一步报错，不用
+# 等colcon build跑几十秒才在一个跟真正原因不相关的报错点炸出来。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    apt-get update \
+    && apt-get install -y --no-install-recommends ros-humble-example-interfaces \
+    && source /opt/ros/humble/setup.bash \
+    && source /opt/decomp_ws/install/setup.bash \
+    && cd /opt/mighty_ws \
+    && rosdep update \
+    && rosdep install --from-paths src --ignore-src -r -y || true \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --packages-skip ros2_livox_simulation \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_SIMULATION=OFF
+
+# ============================================================
+# 3. ros2_px4_stack（kotakondo, dynus分支）
+#    ⚠️ 源码 COPY 进来之后，打两个补丁，对应之前调研发现的问题：
+#    - create_rate().sleep() 死锁 -> time.sleep(0.01)
+#    - 缺自动解锁/切OFFBOARD -> 补 _kick_offboard 风格逻辑
+#    - 顺带把硬编码的 m=2.906/hover_thrust=0.50 改成读环境变量
+#      VEHICLE_MASS_KG/VEHICLE_HOVER_THRUST（由 entrypoint 从
+#      config/vehicle_profile.yaml 解析后 export，见 flight-stack-entrypoint.sh）
+#    （lidar_frame_id_ 硬编码"NX01"那处bug是在 mighty 里，见下面第2步的patch，
+#      不在 ros2_px4_stack 这边）
+#    具体patch内容见 ../patches/ros2_px4_stack_dynus.patch（需要你根据实际代码行号
+#    自己核对一遍再应用，我没有在真实环境里跑过这个patch，只是把结论落成待办）。
+# ============================================================
+COPY staging/ros2_px4_stack /opt/ros2_px4_stack_ws/src/ros2_px4_stack
+COPY patches/ros2_px4_stack_dynus.patch patches/ros2_px4_stack_vision_pose_staleness.patch patches/ros2_px4_stack_takeoff_altitude.patch patches/ros2_px4_stack_kick_offboard_fix.patch patches/ros2_px4_stack_kick_offboard_timeout.patch patches/ros2_px4_stack_control_law.patch patches/ros2_px4_stack_control_law_launch.patch patches/ros2_px4_stack_takeoff_gate.patch patches/ros2_px4_stack_zb_norm_guard.patch patches/ros2_px4_stack_yb_cross_norm_guard.patch patches/ros2_px4_stack_base_link_tf_conflict.patch /tmp/
+RUN cd /opt/ros2_px4_stack_ws/src/ros2_px4_stack \
+    && (git apply --check /tmp/ros2_px4_stack_dynus.patch && git apply /tmp/ros2_px4_stack_dynus.patch \
+        || echo "!! patch 未能自动应用，需要人工核对后手动改，见 docker/README的已知问题章节 !!") \
+    && (git apply --check /tmp/ros2_px4_stack_vision_pose_staleness.patch && git apply /tmp/ros2_px4_stack_vision_pose_staleness.patch \
+        || echo "!! ros2_px4_stack_vision_pose_staleness.patch 未能自动应用，需人工核对后手动改 transforms/repub_odom.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_takeoff_altitude.patch && git apply /tmp/ros2_px4_stack_takeoff_altitude.patch \
+        || echo "!! ros2_px4_stack_takeoff_altitude.patch 未能自动应用，需人工核对后手动改 src/track_dynus_traj.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_kick_offboard_fix.patch && git apply /tmp/ros2_px4_stack_kick_offboard_fix.patch \
+        || echo "!! ros2_px4_stack_kick_offboard_fix.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_kick_offboard_timeout.patch && git apply /tmp/ros2_px4_stack_kick_offboard_timeout.patch \
+        || echo "!! ros2_px4_stack_kick_offboard_timeout.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_control_law.patch && git apply /tmp/ros2_px4_stack_control_law.patch \
+        || echo "!! ros2_px4_stack_control_law.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_control_law_launch.patch && git apply /tmp/ros2_px4_stack_control_law_launch.patch \
+        || echo "!! ros2_px4_stack_control_law_launch.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_takeoff_gate.patch && git apply /tmp/ros2_px4_stack_takeoff_gate.patch \
+        || echo "!! ros2_px4_stack_takeoff_gate.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_zb_norm_guard.patch && git apply /tmp/ros2_px4_stack_zb_norm_guard.patch \
+        || echo "!! ros2_px4_stack_zb_norm_guard.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_yb_cross_norm_guard.patch && git apply /tmp/ros2_px4_stack_yb_cross_norm_guard.patch \
+        || echo "!! ros2_px4_stack_yb_cross_norm_guard.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_base_link_tf_conflict.patch && git apply /tmp/ros2_px4_stack_base_link_tf_conflict.patch \
+        || echo "!! ros2_px4_stack_base_link_tf_conflict.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py !!")
+# 上面这个patch让_kick_offboard()真的跑起来之后，用户反馈"二号机没起来"——
+# 实测mavros/state：NX01最终armed:true、mode:OFFBOARD，NX02停在
+# armed:false、mode:OFFBOARD，5分钟后重新查依然没变。两架飞机日志里
+# "Sensor Rates: Livox"这时都只有~22Hz（20000点密度改动之前是~90-100Hz），
+# `gz stats`实测real-time-factor只有0.27~0.30——不是NX02比NX01更卡（两边
+# 传感器速率实测几乎一样），是_kick_offboard()原来range(20)*0.5秒=10秒
+# 真实时间的重试预算，是按real-time-factor≈1设计的；PX4的解锁/切模式安全
+# 检查是跟着仿真时钟lockstep走的，10秒真实时间在RTF=0.3下只对应不到3秒
+# 仿真时间，两架飞机谁能在这个被严重压缩的窗口内蹭过去纯粹看运气——这次
+# NX01蹭过去了，NX02没蹭过去，而且这个函数超时就直接放弃、线程退出，
+# 不会自己再重试。放宽到range(240)=120秒真实时间预算。
+# 用户反馈"起飞程序没有被执行"——查了才发现ros2_px4_stack_dynus.patch里
+# 加的_kick_offboard()（自动解锁+切OFFBOARD那个方法）从头到尾只写了方法体，
+# 从来没有被实际调用过：__init__()里只给_publish_setpoint()起了线程，
+# _kick_offboard没有对应的Thread(...)/start()。起飞状态机
+# （takeoff_and_track_trajectory）确实在正常发setpoint，但PX4从来没被
+# 真正解锁/切到OFFBOARD——实测mavros/state：connected:true，但
+# armed:false、mode:AUTO.LOITER，飞机就那么一直停在地上纹丝不动。不是
+# 数据/配置问题，是这个patch本身漏掉了最后一步"真正启动这个线程"。补上
+# 跟_publish_setpoint同样写法的Thread(target=self._kick_offboard, ...)。
+# 20000点密度修复验证稳定之后，用户要求现在就试试解锁起飞——查了这套栈的
+# 起飞触发机制：dynus_mavros.launch.py启动的track_dynus_traj_py节点
+# （track_dynus_traj.py）本来就在自动跑takeoff_and_track_trajectory()，
+# 目标高度原来硬编码1.0米；自动解锁/切OFFBOARD逻辑在
+# ros2_px4_stack_dynus.patch里、base_mavros_interface.py里已经有了，整套
+# 流程本来就是全自动的，不需要额外手动触发arm/offboard——之前一直没真正
+# 飞起来，是因为PX4 EKF2要求vision数据合理才会真正允许解锁/保持OFFBOARD，
+# DLIO一直在发散，喂给它的位姿本身就是垃圾，现在20000点修复稳定之后应该
+# 有机会真的起飞了。这次只改了目标高度1.0→1.5米，配合这个已有的全自动
+# 流程使用。
+# repub_odom.py原来那个republish loop不管_last_pose_msg/_last_twist_msg是什么
+# 时候收到的，只要不是None就一直按pub_hz(100Hz)重发——排查"数据链路通不通"时
+# 发现：DLIO崩溃之后，mavros/vision_pose/pose_cov这个话题居然还在正常速率
+# 发布，因为这个循环在无脑重发"最后一帧"旧数据，PX4那边看更新频率完全正常，
+# 检测不出数据其实已经冻结了。真机上这是个安全隐患（vision timeout保护会被
+# 这种"假心跳"绕过）。加了个"超过stale_timeout_sec(默认0.5秒)没收到新数据就
+# 停止转发"的看门狗，让PX4自己的vision timeout机制能正常触发。
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/ros2_px4_stack_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 4. 统一飞机物理参数配置（对应《专项报告：飞机物理参数配置问题》里的建议——
+#    mass/f_min/f_max/drone_bbox 等不再分散硬编码，容器启动时用同一份yaml覆盖）
+# ============================================================
+COPY config/vehicle_profile.yaml /opt/config/vehicle_profile.yaml
+
+ENV http_proxy= \
+    https_proxy=
+
+COPY docker/entrypoints/flight-stack-entrypoint.sh /opt/entrypoint.sh
+RUN chmod +x /opt/entrypoint.sh
+
+ENTRYPOINT ["/opt/entrypoint.sh"]

@@ -1,0 +1,23 @@
+diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
+index 9f1ff73..3dd3cb6 100644
+--- a/ros2_px4_stack/src/dynus_offboard_node.py
++++ b/ros2_px4_stack/src/dynus_offboard_node.py
+@@ -100,6 +100,18 @@ class OffboardDynusFollower(BasicMavrosInterface):
+         self.trajectory_publish_thread.daemon = True
+         self.trajectory_publish_thread.start()
+ 
++        # _kick_offboard()（下面定义）之前只写了方法体、从来没被实际调用过——
++        # 起飞状态机(takeoff_and_track_trajectory)一直在正常发setpoint，
++        # 但PX4从来没被真正解锁/切到OFFBOARD，实测mavros/state显示
++        # armed:false、mode:AUTO.LOITER，飞机就那么一直停在地上，这才是
++        # "起飞程序没有被执行"的真正原因，不是数据/配置问题。补上这个
++        # 线程调用，让自动解锁真的跑起来。
++        self.kick_offboard_thread = Thread(
++            target=self._kick_offboard, args=()
++        )
++        self.kick_offboard_thread.daemon = True
++        self.kick_offboard_thread.start()
++
+ 
+     # Method to wait for FCU connection
+     def wait_for_seconds(self, seconds):

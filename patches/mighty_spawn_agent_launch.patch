@@ -1,0 +1,92 @@
+diff --git a/launch/spawn_agent.launch.py b/launch/spawn_agent.launch.py
+new file mode 100644
+index 0000000..64f9b1a
+--- /dev/null
++++ b/launch/spawn_agent.launch.py
+@@ -0,0 +1,86 @@
++# /* ----------------------------------------------------------------------------
++#  * 只做一件事：把 mighty 自己的 quadrotor.urdf.xacro（Mid-360 + d435）发布成
++#  * robot_description，再 spawn 进 Gazebo。不启动 mighty_node 规划器——那部分由
++#  * flight-stack 容器里的 onboard_mighty.launch.py（sim_env:=none）单独负责，
++#  * 避免同一架飞机的规划器在 sim-world 和 flight-stack 两边各起一份。
++#  * robot_state_publisher/spawn_entity 这两个节点的写法照抄
++#  * onboard_mighty.launch.py 里 sim_env=='gazebo' 分支的对应逻辑。
++#  * -------------------------------------------------------------------------- */
++
++from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument, OpaqueFunction
++from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
++from launch_ros.actions import Node
++from launch_ros.parameter_descriptions import ParameterValue
++from launch_ros.substitutions import FindPackageShare
++from math import radians
++
++
++def generate_launch_description():
++
++    namespace_arg = DeclareLaunchArgument(
++        'namespace', default_value='NX01',
++        description='Agent namespace: TF prefix / topic namespace / Gazebo entity name')
++    instance_arg = DeclareLaunchArgument(
++        'instance', default_value='0',
++        description='PX4 SITL instance index; unused here, kept so callers can pass the same '
++                    'args they pass to px4 -i without ros2 launch rejecting an undeclared arg')
++    x_arg = DeclareLaunchArgument('x', default_value='0.0', description='Spawn x position')
++    y_arg = DeclareLaunchArgument('y', default_value='0.0', description='Spawn y position')
++    z_arg = DeclareLaunchArgument('z', default_value='0.3', description='Spawn z position')
++    yaw_arg = DeclareLaunchArgument('yaw', default_value='0.0', description='Spawn yaw, in degrees')
++    d435_range_max_depth_arg = DeclareLaunchArgument(
++        'd435_range_max_depth', default_value='5.0', description='d435 max depth range, meters')
++
++    def launch_setup(context, *args, **kwargs):
++        namespace = LaunchConfiguration('namespace').perform(context)
++        x = LaunchConfiguration('x').perform(context)
++        y = LaunchConfiguration('y').perform(context)
++        z = LaunchConfiguration('z').perform(context)
++        yaw_deg = LaunchConfiguration('yaw').perform(context)
++        yaw_rad = str(radians(float(yaw_deg)))
++        d435_range_max_depth = LaunchConfiguration('d435_range_max_depth').perform(context)
++
++        urdf_path = PathJoinSubstitution([FindPackageShare('mighty'), 'urdf', 'quadrotor.urdf.xacro'])
++
++        robot_state_publisher_node = Node(
++            package='robot_state_publisher',
++            executable='robot_state_publisher',
++            name='robot_state_publisher',
++            namespace=namespace,
++            output='screen',
++            parameters=[{
++                'robot_description': ParameterValue(
++                    Command(['xacro ', urdf_path,
++                             ' namespace:=', namespace,
++                             ' d435_range_max_depth:=', d435_range_max_depth]),
++                    value_type=str),
++                'use_sim_time': False,
++                'frame_prefix': namespace + '/',
++            }],
++            arguments=['--ros-args', '--log-level', 'error'],
++        )
++
++        spawn_entity_node = Node(
++            package='gazebo_ros',
++            executable='spawn_entity.py',
++            name='spawn_entity',
++            namespace=namespace,
++            parameters=[{'use_sim_time': False}],
++            arguments=['-topic', 'robot_description', '-entity', namespace,
++                       '-x', x, '-y', y, '-z', z, '-Y', yaw_rad,
++                       '--ros-args', '--log-level', 'error'],
++        )
++
++        return [robot_state_publisher_node, spawn_entity_node]
++
++    return LaunchDescription([
++        namespace_arg,
++        instance_arg,
++        x_arg,
++        y_arg,
++        z_arg,
++        yaw_arg,
++        d435_range_max_depth_arg,
++        OpaqueFunction(function=launch_setup),
++    ])

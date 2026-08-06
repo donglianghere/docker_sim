@@ -1,0 +1,36 @@
+diff --git a/launch/base_mighty.launch.py b/launch/base_mighty.launch.py
+index 986b780..c2d5f48 100644
+--- a/launch/base_mighty.launch.py
++++ b/launch/base_mighty.launch.py
+@@ -31,6 +31,12 @@ def generate_launch_description():
+     use_rviz_arg = DeclareLaunchArgument(
+         'use_rviz', default_value='true', description='Flag to enable or disable RViz'
+     )
++    rviz_config_arg = DeclareLaunchArgument(
++        'rviz_config', default_value='',
++        description='Override RViz config filename in mighty/rviz (empty = auto-select '
++                     'mighty.rviz/mighty_sim_ground_robot.rviz like before). '
++                     'multi_mighty.rviz已经按NX01/NX02两机命名空间配好了，双机场景用这个。'
++    )
+     use_gazebo_gui_arg = DeclareLaunchArgument(
+         'use_gazebo_gui', default_value='false', description='Flag to enable or disable gazebo gui'
+     )
+@@ -101,7 +107,9 @@ def generate_launch_description():
+         use_ground_robot = convert_str_to_bool(LaunchConfiguration('use_ground_robot').perform(context))
+ 
+         # Create a rviz node - prefer source rviz config over installed one
+-        rviz_config_filename = 'mighty_sim_ground_robot.rviz' if use_ground_robot else 'mighty.rviz'
++        rviz_config_override = LaunchConfiguration('rviz_config').perform(context)
++        rviz_config_filename = rviz_config_override if rviz_config_override else \
++            ('mighty_sim_ground_robot.rviz' if use_ground_robot else 'mighty.rviz')
+         # Derive workspace root from installed package path (install/mighty/share/mighty -> workspace root)
+         install_share_dir = get_package_share_directory('mighty')
+         ws_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(install_share_dir))))
+@@ -176,6 +184,7 @@ def generate_launch_description():
+     return LaunchDescription([
+         env_arg,
+         use_rviz_arg,
++        rviz_config_arg,
+         use_gazebo_gui_arg,
+         use_dyn_obs_arg,
+         use_ground_robot_arg,

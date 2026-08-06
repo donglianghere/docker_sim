@@ -1,0 +1,33 @@
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index d929c8a..c16dd0e 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -987,6 +987,28 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
+                                              << to_string_with_precision(this->state.b.gyro[2], 8) << std::endl;
+       }
+ 
++      // this->prev_imu_stamp从构造函数里初始化成0.，标定阶段(上面这一整个
++      // if分支)从来没碰过它——calibrate_accel_/calibrate_gyro_这两块只在
++      // 标定"结束"这一刻执行一次，标定期间的每一条IMU消息走的是外层
++      // if(!this->imu_calibrated)这个分支，完全不会到下面else分支里
++      // "double dt = imu_stamp_secs - this->prev_imu_stamp;"这行。等标定
++      // 真正结束、第一条"已标定"的IMU消息进来才第一次执行到这行时，
++      // prev_imu_stamp依然是那个从没被更新过的0.，而imu_stamp_secs此时是
++      // 一个epoch量级的绝对时间戳(仿真里是1735689600这个固定偏移+几秒钟，
++      // 真机上是墙钟epoch，同样是十亿级别)——算出来的dt是接近整个epoch
++      // 数值那么大的一个天文数字，直接喂进propagateState()的
++      // `0.5*dt*dt*(...)`这一项，一步就能把position/velocity冲到无穷大或者
++      // 巨大的数值。DLIO官方仓库issue #92("Set prev_imu_stamp on IMU
++      // calibration")记录的就是这个bug，社区诊断跟这里独立复现的分析完全
++      // 一致；这套仿真里此前反复出现的"accel bias秒杀式顶到abias_max上限、
++      // 静止状态下几十秒内飘出几千米"，很可能就是标定一结束这一次天文数字
++      // 级dt造成的单次灾难性冲击，后续观测到的"逐渐发散"其实是geometric
++      // observer(updateState()，增益dt*Kp_很小)在缓慢往回拉这一次巨大误差
++      // 的过程，不是持续性的积分误差累积。修复很直接：标定完成的这一刻把
++      // prev_imu_stamp显式设成当前时间戳，让"已标定"分支第一次算dt时用的
++      // 是正确的、真正的采样间隔，不是从0开始算的天文数字。
++      this->prev_imu_stamp = imu_stamp_secs;
++
+       this->imu_calibrated = true;
+ 
+     }

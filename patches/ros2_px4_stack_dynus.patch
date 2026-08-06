@@ -1,0 +1,108 @@
+diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
+index 2b23875..9f1ff73 100644
+--- a/ros2_px4_stack/src/dynus_offboard_node.py
++++ b/ros2_px4_stack/src/dynus_offboard_node.py
+@@ -7,6 +7,7 @@ we can try uncommenting the hacky wait_for_seconds() method and using that inste
+ Be careful because the function is blocking and ros might yell at you
+ """
+ import os
++import time as _time
+ import rclpy
+ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+ from rclpy.node import Node
+@@ -109,9 +110,58 @@ class OffboardDynusFollower(BasicMavrosInterface):
+     def dynus_cb(self, msg):
+         self.received_trajectory_setpoint = msg
+ 
++    def _set_px4_param(self, name, value, is_int=False):
++        # 照抄 kotakondo main 分支 track_gen_traj.py 里已验证过的写法：
++        # 放宽 PX4 起飞未检测到会自动上锁、OFFBOARD丢失超时太紧这几个失控保护，
++        # dynus分支原来完全没有这段，真机/SITL 起飞时容易被 PX4 自己判失控踢出。
++        if not self.set_param_srv.wait_for_service(timeout_sec=3.0):
++            self.get_logger().warn(f"param/set unavailable; skip {name}")
++            return
++        req = ParamSet.Request()
++        req.param_id = name
++        req.value = ParamValue()
++        if is_int:
++            req.value.integer = int(value)
++            req.value.real = 0.0
++        else:
++            req.value.integer = 0
++            req.value.real = float(value)
++        self.set_param_srv.call_async(req)
++        self.get_logger().info(f"set PX4 param {name} = {value}")
++
++    def _kick_offboard(self):
++        # 同样照抄 main 分支的自动解锁+切OFFBOARD逻辑，dynus分支原来没有，
++        # 只能靠人工用QGC/遥控器操作 —— 补上这个不是必须的，但能让仿真里
++        # 不用每次都手动切模式，真机上要不要用这个自动解锁，请你自己权衡风险。
++        self.get_logger().info("Waiting for trajectory setpoints...")
++        while rclpy.ok() and self.trajectory_setpoint is None and self.attitude_setpoint is None:
++            _time.sleep(0.1)
++        self._set_px4_param("COM_DISARM_PRFLT", -1.0)
++        self._set_px4_param("COM_OF_LOSS_T", 5.0)
++        self._set_px4_param("COM_DISARM_LAND", -1.0)
++        _time.sleep(1.0)
++        set_mode_req = SetMode.Request()
++        set_mode_req.base_mode = 0
++        set_mode_req.custom_mode = "OFFBOARD"
++        arm_req = CommandBool.Request()
++        arm_req.value = True
++        for _ in range(20):
++            if self.state.mode != "OFFBOARD":
++                self.set_mode_srv.call_async(set_mode_req)
++            if not self.state.armed:
++                self.set_arming_srv.call_async(arm_req)
++            _time.sleep(0.5)
++            if self.state.mode == "OFFBOARD" and self.state.armed:
++                break
++        self.get_logger().info(f"PX4 mode={self.state.mode} armed={self.state.armed}")
++
+     def _publish_setpoint(self):
+         rate = 100  # Hz
+-        rate = self.create_rate(rate)
++        # create_rate().sleep() 在没有 MultiThreadedExecutor 时会死锁
++        # （主线程用spin_once，rate永远等不到唤醒）——改成单线程安全的time.sleep，
++        # 这是 kotakondo main 分支 trajgen_offboard_node.py 里已经验证过的修复，
++        # dynus 分支这个函数一直没跟着改。
++        period = 1.0 / rate
+         while rclpy.ok():
+             if self.navigation_mode == LOCAL_NAVIGATION:
+                 # During TAKEOFF: use trajectory setpoint (PX4 position controller)
+@@ -120,7 +170,7 @@ class OffboardDynusFollower(BasicMavrosInterface):
+                     self.attitude_pub.publish(self.attitude_setpoint)
+                 elif self.trajectory_setpoint is not None:
+                     self.setpoint_traj_pub.publish(self.trajectory_setpoint)
+-            rate.sleep()
++            _time.sleep(period)
+ 
+     def point_to_traj(self, point: List):
+         """
+@@ -308,7 +358,10 @@ def get_thrust(point):
+     """Compute normalized thrust from differential flatness.
+     thrust = |m * (a + g*z_W)| / (m * g) maps to [0,1] where ~0.5 = hover.
+     PX4 expects thrust in [0,1] for multicopters."""
+-    m = 2.906
++    # 质量/悬停油门不再硬编码，从环境变量读（由 flight-stack-entrypoint.sh
++    # 在启动前从 config/vehicle_profile.yaml 里解析出来 export），
++    # 保证跟 mighty_node 用的是同一个数字，见专项报告里的那处数值不一致问题。
++    m = float(os.environ.get('VEHICLE_MASS_KG', '2.906'))
+     g = 9.81
+     # Desired force = m*(a + g)
+     ax = point.a.x if abs(point.a.x) > 0.1 else 0.0
+@@ -318,12 +371,12 @@ def get_thrust(point):
+     thrust_magnitude = np.linalg.norm(f_des)
+     # Normalize: hover thrust (m*g) maps to ~0.5
+     # This scaling factor depends on the vehicle; 0.5/(m*g) assumes hover at 50% throttle
+-    hover_thrust = 0.50  # Tune this: actual hover throttle fraction
++    hover_thrust = float(os.environ.get('VEHICLE_HOVER_THRUST', '0.50'))
+     normalized = hover_thrust * thrust_magnitude / (m * g)
+     return float(np.clip(normalized, 0.1, 0.95))
+ 
+ def get_angular(point):
+-    m = 2.906
++    m = float(os.environ.get('VEHICLE_MASS_KG', '2.906'))
+     g = 9.81
+     z_W = np.array([[0, 0, 1]]).T
+     x_B, y_B, z_B = get_drone_frame(point)
