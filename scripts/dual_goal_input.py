@@ -18,6 +18,7 @@ ROS2话题同一个DDS domain下跨容器可见）：
 
 import sys
 import time
+import threading
 
 import rclpy
 from rclpy.node import Node
@@ -175,6 +176,54 @@ def draw(node: DualGoalInput, message=''):
     sys.stdout.flush()
 
 
+class SharedMessage:
+    """主线程(处理input())和后台重绘线程之间共享的一行提示文字，用一把
+    锁保护——两个线程都会读/写这个值，不加锁在CPython里大概率也不会真的
+    炸，但用锁写起来才是对的，不想赌"大概率没事"。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._value = ''
+
+    def set(self, value):
+        with self._lock:
+            self._value = value
+
+    def get(self):
+        with self._lock:
+            return self._value
+
+
+def redraw_loop(node, shared_message, draw_lock, stop_event):
+    """后台常驻线程：一直spin+每秒重绘一次，不依赖用户按键触发。
+
+    关键坑（之前只修了启动阶段那一半，这次才是完整修复）：`input('> ')`
+    是阻塞调用，如果重绘只在主线程"draw→input()→拿到输入→draw"这个循环
+    里做，那两次按键之间——不管是刚启动没人碰这个窗口，还是正常使用时
+    用户看别的窗口没有持续敲键盘——画面都会冻结在上一次draw()那一帧，
+    双机世界坐标看起来"不刷新"，本质都是同一个"input()把整个单线程
+    事件循环冻住"的问题，只是触发场景不同（启动瞬间 vs 平时不操作）。
+    彻底的修法是把spin+重绘搬到一个独立线程里常驻跑，跟主线程的
+    input()完全解耦，不管主线程是不是在等键盘输入，这里都按自己的
+    节奏持续刷新。
+
+    跟主线程之间用draw_lock避免两边同时往stdout写导致画面交错——主线程
+    处理完一条命令后会额外触发一次立即重绘（见main()），不用等到这里
+    的下一个整秒，操作反馈不会有明显延迟。
+    """
+    wait_t0 = time.monotonic()
+    while not stop_event.is_set():
+        rclpy.spin_once(node, timeout_sec=0.2)
+        message = shared_message.get()
+        if not message and not all(
+                v is not None for v in node.current_world_positions().values()):
+            elapsed = time.monotonic() - wait_t0
+            message = f'等待双机位置数据到齐...（已等{elapsed:.0f}秒）'
+        with draw_lock:
+            draw(node, message)
+        stop_event.wait(1.0)
+
+
 def main():
     rclpy.init()
     node = DualGoalInput()
@@ -187,45 +236,20 @@ def main():
         if all(c > 0 for c in node.subscriber_counts().values()):
             break
 
-    # 关键坑：下面主循环里的input('> ')是阻塞调用，会把整个单线程事件循环
-    # （包括rclpy.spin_once）一起冻结住——面板只在每次用户敲完一行回车之后
-    # 才会重新spin+重绘一次，两次按键之间哪怕话题一直在正常发布，回调也不
-    # 会被处理。start.sh全新起容器时，goal窗口从tmux建好到MAVROS/PX4真正
-    # 开始发布local_position/pose中间有几十秒空档，这段时间没人会去点这个
-    # 窗口敲回车，于是面板就永远停在刚启动那一帧"还没收到位置数据..."上，
-    # 哪怕之后飞机早就正常起飞了也不会自动恢复（之前误判是DDS跨容器发现慢
-    # 的问题，实测跨容器发现只要一两秒；真正原因是这里）。
-    # 修复：进交互输入前先自己常驻spin，每秒重绘一次进度，直到两架飞机都
-    # 至少收到过一帧位置数据（或者用户按Ctrl-C跳过），避免被后面的
-    # input()阻塞卡在启动瞬间的空状态上。
-    if not all(v is not None for v in node.current_world_positions().values()):
-        wait_t0 = time.monotonic()
-        last_draw = 0.0
-        try:
-            while not all(v is not None for v in node.current_world_positions().values()):
-                rclpy.spin_once(node, timeout_sec=0.1)
-                now = time.monotonic()
-                if now - last_draw > 1.0:
-                    elapsed = now - wait_t0
-                    draw(node, f'等待双机位置数据到齐...（已等{elapsed:.0f}秒，Ctrl-C可跳过直接进入面板）')
-                    last_draw = now
-        except KeyboardInterrupt:
-            pass
+    shared_message = SharedMessage()
+    draw_lock = threading.Lock()
+    stop_event = threading.Event()
+    redraw_thread = threading.Thread(
+        target=redraw_loop, args=(node, shared_message, draw_lock, stop_event),
+        daemon=True)
+    redraw_thread.start()
 
-    message = ''
     try:
         while True:
-            # 每次重绘前抽干积压的位置消息，保证显示的世界坐标是当前的
-            # （不是刚起来时那一帧），最多花0.3秒，不会让人等太久。
-            spin_until = time.monotonic() + 0.3
-            while time.monotonic() < spin_until:
-                rclpy.spin_once(node, timeout_sec=0.05)
-            draw(node, message)
             try:
                 raw = input('> ').strip()
             except EOFError:
                 break
-            message = ''
 
             if raw.lower() in ('q', 'quit', 'exit'):
                 break
@@ -234,13 +258,14 @@ def main():
 
             parts = raw.split()
             if len(parts) not in (3, 6):
-                message = (f'!! 需要3个数"x y z"(同一目标)或6个数'
-                           f'"x1 y1 z1 x2 y2 z2"(两个目标)，收到{len(parts)}个: {raw!r} !!')
+                shared_message.set(
+                    f'!! 需要3个数"x y z"(同一目标)或6个数'
+                    f'"x1 y1 z1 x2 y2 z2"(两个目标)，收到{len(parts)}个: {raw!r} !!')
                 continue
             try:
                 nums = [float(p) for p in parts]
             except ValueError:
-                message = f'!! 不是有效的数字: {raw!r} !!'
+                shared_message.set(f'!! 不是有效的数字: {raw!r} !!')
                 continue
 
             if len(nums) == 3:
@@ -251,16 +276,22 @@ def main():
                     'NX02': tuple(nums[3:6]),
                 }
 
-            rclpy.spin_once(node, timeout_sec=0.0)
             locals_ = node.send_goals(world_targets)
             if len(nums) == 3:
                 wx, wy, wz = nums
-                message = f'已发送同一目标 world=({wx:+.2f},{wy:+.2f},{wz:+.2f}) 给 NX01/NX02'
+                shared_message.set(
+                    f'已发送同一目标 world=({wx:+.2f},{wy:+.2f},{wz:+.2f}) 给 NX01/NX02')
             else:
-                message = '已分别发送两个不同目标给 NX01/NX02'
+                shared_message.set('已分别发送两个不同目标给 NX01/NX02')
+
+            # 立即重绘一次，不用等后台线程的下一个整秒，操作反馈更跟手。
+            with draw_lock:
+                draw(node, shared_message.get())
     except KeyboardInterrupt:
         pass
     finally:
+        stop_event.set()
+        redraw_thread.join(timeout=2.0)
         node.destroy_node()
         rclpy.shutdown()
 

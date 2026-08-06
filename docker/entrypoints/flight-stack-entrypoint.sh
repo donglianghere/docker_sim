@@ -15,13 +15,12 @@
 #                   两种模式二选一，不会同时跑DLIO和gt_odom_bridge——都发布同一个
 #                   最终话题名(<namespace>/dlio/odom_node/odom)，同时跑会有两个
 #                   发布者抢话题，下游收到谁的数据变得不确定。
-#   CONTROL_LAW     默认 attitude（2026-08-06起，用户明确要求切换）。可选
-#                   trajectory——切换track_dynus_traj_py的控制律，见
-#                   dynus_offboard_node.py里OffboardDynusFollower.__init__的
-#                   大段注释。trajectory是之前唯一实际飞过的模式；attitude
-#                   代码完整（mass/hover_thrust已经从vehicle_profile.yaml读，
-#                   不是硬编码）但从没实测飞过，切成默认后第一次起飞要当
-#                   未验证控制律对待，见README.md。
+#   CONTROL_LAW     默认 trajectory（唯一实测飞过、确认安全的模式）。可选
+#                   attitude——2026-08-06一度试过切成默认，第一次真给目标点
+#                   就炸机（get_angular()里`m/u1`没加零值保护，body_rate的yaw
+#                   分量实测钉在-3.49rad/s，远超配置的限制），已改回
+#                   trajectory，attitude在这个bug修好前不要再当默认用，
+#                   见README.md。
 set -eo pipefail
 
 # ROS2/colcon 生成的 setup.bash 内部会引用一堆没给默认值的变量（比如这里第一个
@@ -100,7 +99,7 @@ ros2 launch mavros px4.launch \
 sleep 3
 
 LOCALIZATION_SOURCE="${LOCALIZATION_SOURCE:-dlio}"
-export CONTROL_LAW="${CONTROL_LAW:-attitude}"
+export CONTROL_LAW="${CONTROL_LAW:-trajectory}"
 if [ "${LOCALIZATION_SOURCE}" = "gt" ]; then
     echo "== [flight-stack:${NAMESPACE}] 定位模式=gt：跳过DLIO，改用Gazebo仿真真值 (gt_odom_bridge) =="
     ros2 run gt_odom_bridge gt_odom_bridge_node \

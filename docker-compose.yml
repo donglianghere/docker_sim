@@ -113,20 +113,18 @@ services:
       - NUM_AGENTS=2
       - LOCALIZATION_SOURCE=dlio  # dlio=真实DLIO SLAM(默认，三个模块一起测)；
                                   # gt=跳过SLAM、直接用Gazebo真值(只测规划+控制)
-      - CONTROL_LAW=${CONTROL_LAW:-attitude}  # 2026-08-06起默认切到attitude
-                                  # （微分平坦姿态直控）——用户明确要求。trajectory
-                                  # 是之前唯一实测飞过的模式（位置/速度/加速度
-                                  # setpoint，PX4自己的位置环闭环）；attitude这条
-                                  # 路径（get_thrust/get_angular，mass/hover_thrust
-                                  # 已经通过VEHICLE_MASS_KG/VEHICLE_HOVER_THRUST从
-                                  # config/vehicle_profile.yaml正确读取，不再是硬编码
-                                  # 的m=2.906/hover_thrust=0.50）之前从没实测飞过——
-                                  # 联网查过jrached/kotakondo所有可查版本也没有真正
-                                  # 飞行先例，切成默认之后第一次起飞要按未验证控制律
-                                  # 对待，仔细盯着status/attitude_thrust日志（见
-                                  # README"油门/推力限制"一节的讨论）。想临时切回
-                                  # 验证过的trajectory模式，不改文件、临时跑：
-                                  # `CONTROL_LAW=trajectory docker compose up`。
+      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # trajectory=位置/速度/加速度轨迹，
+                                  # PX4自己的位置环闭环，唯一实测飞过、确认安全的模式。
+                                  # 2026-08-06一度改成默认attitude（微分平坦姿态直控），
+                                  # 实测第一次真给目标点就炸机——现场日志抓到
+                                  # get_angular()里body_rate的yaw分量钉在
+                                  # -3.49rad/s（约-200°/s，远超w_max=0.8/omega_max=0.1
+                                  # 这些配置好的限制），且同一个函数里`m/u1`没有加零值
+                                  # 保护，是跟mighty的C++侧get_drone_frame()同一类曾经
+                                  # 修过3次的数值不稳定bug，只是ros2_px4_stack这边的
+                                  # Python实现从没被审查过——已改回trajectory，attitude
+                                  # 模式在这个bug修好、重新验证之前不要再当默认用，
+                                  # 见README"CONTROL_LAW=attitude模式排查"一节。
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:
@@ -149,10 +147,8 @@ services:
       - AGENT_INDEX=2
       - NUM_AGENTS=2
       - LOCALIZATION_SOURCE=dlio  # 两架飞机要保持一致，别一个dlio一个gt
-      - CONTROL_LAW=${CONTROL_LAW:-attitude}  # 同上，两架飞机必须保持一致
-                                  # （一个trajectory一个attitude会导致双机互相
-                                  # 避障时轨迹语义不一致），见flight-stack-nx01
-                                  # 那边的完整注释
+      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # 同上，两架飞机必须保持一致，
+                                  # 见flight-stack-nx01那边的完整注释
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:
