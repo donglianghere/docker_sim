@@ -4181,3 +4181,78 @@ RuntimeError:!rclpy.ok()`，一度以为是MAVROS真的没连上（花了不少�
 手动清理（比如想直接`rm -rf`某个旧的bag块）需要`sudo`，正常的滚动
 删除（`prune_rosbag.sh`自己在容器内跑，权限足够）不受影响，只是"人
 手动伸进去删"这个操作需要注意。
+
+## 用户提问："本项目的规划和控制中有对油门进行限制吗？需要吗？"——排查发现存在但分布在三层、没有统一调好
+
+现场翻了mighty规划器、PX4固件参数、板外控制律两种模式，油门/推力限制
+分三层，且互相不知道对方存在：
+
+1. **mighty局部规划器**：`lbfgs_solver.cpp`有一个GCOPTER风格的推力环
+   软约束（`J_thr`，微分平坦度算出的总推力`f = m·‖a+g·e₃‖`要落在
+   `[f_min, f_max]`区间），但`hw_mighty.yaml`里`dyn_constr_thrust_weight:
+   0.0`——权重是0，等于没启用。同一批`dyn_constr_*_weight`里只有
+   `vel`/`acc`/`jerk`三个是真正在起作用的（都是1e+3），推力和倾角
+   （`dyn_constr_tilt_weight`同样是0.0）都没参与优化。
+2. **默认飞行模式（当时是`CONTROL_LAW=trajectory`）**：这个项目自己的
+   代码根本不算推力——发位置/速度/加速度setpoint给PX4，推力完全由
+   PX4板载MPC位置控制器闭环算出来，真正卡住上下限的是PX4固件参数
+   `MPC_THR_MAX`/`MPC_THR_MIN`/`MPC_THR_HOVER`（后者已经按真实质量
+   1.935kg校准成0.671，见`px4_iris_mpc_thr_hover.patch`）。
+3. **`CONTROL_LAW=attitude`模式（当时从没飞过）**：`get_thrust()`算完
+   差分平坦度推力后有个硬编码的`np.clip(normalized, 0.1, 0.95)`，是这
+   条路径（绕开PX4位置/速度环，只留最内层姿态环）上唯一的软件层保护。
+
+**需不需要更多限制**：翻了之前"推力打满"坠机的记录（"两架飞机都是推力
+打满+追一个够不着的偏航目标"），根因是姿态跟踪误差（偏航目标失真）
+持续累积，PX4控制器为了纠正误差合理地把推力打到了允许范围的顶——真正
+修复是把`MPC_YAWRAUTO_MAX`调低，不是加一道更低的推力天花板（单纯压低
+上限反而可能在需要纠正姿态时缺推力）。真正有价值的是规划侧的`J_thr`
+——PX4那层是"事后兜底、发现要求太多就砍掉"（被动），`J_thr`是"生成
+轨迹的时候就不去规划一条天生就需要顶格推力的路径"（主动预防），两者
+互补不冲突。
+
+## 用户要求：默认切到`CONTROL_LAW=attitude` + 打开mighty规划侧的推力约束
+
+两个改动一起做的，因为是相关的：attitude模式的推力计算(`get_thrust`)
+正是`f_min`/`f_max`这组校准值的主要消费者，规划侧的`J_thr`约束用的也
+是同一组`f_min`/`f_max`。
+
+**`CONTROL_LAW`默认值切换**：`docker-compose.yml`两个flight-stack服务
++ `flight-stack-entrypoint.sh`内部的兜底默认值，都从`${CONTROL_LAW:-
+trajectory}`改成`${CONTROL_LAW:-attitude}`。**这条从来没有实测飞过**
+——联网查过jrached/kotakondo所有可查版本也没有真正飞行先例，切成默认
+之后第一次起飞要当"验证一条从没飞过的控制律"来对待，不是当成日常操作，
+盯紧status/attitude_thrust日志。想临时切回验证过的trajectory模式、
+不改文件，跑`CONTROL_LAW=trajectory docker compose up`。
+
+**打开`dyn_constr_thrust_weight`**：`patches/mighty_enable_thrust_
+constraint.patch`，`hw_mighty.yaml`里从`0.0`改成`1e+3`（照抄同一批
+`vel`/`acc`/`jerk`约束的权重量级，保持优先级一致）。**没有动`f_min`/
+`f_max`**——这份文件里字面写的`2.0`/`12.0`本身没校准过，但现场用一次
+"干净重放patch链"验证过：`config/vehicle_profile.yaml`会在launch时把
+`f_min=3.0`/`f_max=26.0`（按真实质量1.935kg算）覆盖上去，
+`mighty_onboard_vehicle_profile.patch`保证这个覆盖是最后生效的一层，
+实际跑起来用的是3.0/26.0，不是文件里字面那两个数字，不需要额外改。
+
+打这个patch时踩了一次自己的坑，记一笔：第一次生成patch时直接在
+`config/hw_mighty.yaml`的实时`staging/`副本上改了、再拿它跟pristine
+版本做`git diff`，结果生成的"patch"把前面十几个已有patch的内容全部
+包含了进去（因为`staging/`当时残留着我自己另一次手改的痕迹，没有先
+revert干净）——之前在`ros2_px4_stack`/`global_mapper_ros`上也踩过同一
+类"改动前忘记先确认`staging/`是干净的"的坑，这是第三次。**教训固化
+一下，以后每次要生成新patch，流程必须是**：①确认`staging/`对应包
+`git status`干净（不干净先`git checkout --`）；②在`/tmp`scratch副本
+里按Dockerfile真实顺序把这个包现有的所有patch全部`git apply`一遍；
+③在scratch副本里`git commit`一次，把"应用完现有patch链"这个状态存成
+一个commit；④基于这个commit再做新的改动；⑤`git diff`（这时候只会
+显示第④步这一次改动，不会把前面的patch链也带进去）生成新patch；
+⑥用同一个scratch副本（或者重新clone一份）把"现有patch链+新patch"
+按Dockerfile顺序完整跑一遍`git apply --check`，确认零失败才写回
+`patches/`目录。这次改完之后确实按这个流程走了一遍完整验证，19个
+patch（含新加的这个）全部apply成功、零失败。
+
+**当前状态**：改动都已经`git commit`，但按"以后build都手动操作"的
+要求没有自己跑`docker compose build`——这两个改动一起意味着下次
+重新build之后的第一次起飞，是"从没飞过的控制律" + "第一次真正启用
+的推力约束"叠加在一起首次实测，建议按"未验证变更"对待，不要当成
+日常重启。
