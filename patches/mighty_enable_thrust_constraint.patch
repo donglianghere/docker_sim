@@ -1,0 +1,21 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index e8f1731..f19b2b0 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -101,7 +101,15 @@ mighty_node:
+         dyn_constr_jerk_weight: 1e+3                # [-] Weight of the jerk constraints violation in the optimization
+         dyn_constr_bodyrate_weight: 0.0             # [-] Weight of the body rate constraints violation in the optimization
+         dyn_constr_tilt_weight: 0.0                 # [-] Weight of the tilt constraints violation in the optimization
+-        dyn_constr_thrust_weight: 0.0               # [-] Weight of the thrust constraints violation in the optimization
++        dyn_constr_thrust_weight: 1e+3               # [-] Weight of the thrust constraints violation in the optimization.
++                                                       # 2026-08-06起打开(原来是0.0，等于没启用)，用户明确要求——
++                                                       # 权重量级照抄同一批dyn_constr_*_weight(vel/acc/jerk都是1e+3)，
++                                                       # 跟它们保持一致的优先级。f_min/f_max用的是mighty_node.f_min/
++                                                       # f_max这两个参数（这份文件里下面写的2.0/12.0是没校准过的默认值，
++                                                       # 但config/vehicle_profile.yaml会在launch时把f_min=3.0/f_max=26.0
++                                                       # 覆盖上去——按真实质量1.935kg算，见
++                                                       # mighty_onboard_vehicle_profile.patch），实际生效的是3.0/26.0，
++                                                       # 不是这份文件里字面写的这两个数字。
+         num_dyn_obst_samples: 10                    # [-] Number of samples for the dynamic obstacles in the optimization
+         planner_Co: 0.6                              # [-] Collision clearance thresh for static obstacles in the optimization
+         planner_Cw: 3.0                             # [-] Collision clearance thresh for dynamic obstacles in the optimization

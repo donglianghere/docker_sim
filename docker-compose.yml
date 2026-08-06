@@ -113,14 +113,20 @@ services:
       - NUM_AGENTS=2
       - LOCALIZATION_SOURCE=dlio  # dlio=真实DLIO SLAM(默认，三个模块一起测)；
                                   # gt=跳过SLAM、直接用Gazebo真值(只测规划+控制)
-      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # trajectory=位置/速度/加速度轨迹
-                                  # (默认，唯一实测飞过的模式)；attitude=微分平坦
-                                  # 姿态直控——写完但从没实测飞过，联网查过jrached/
-                                  # kotakondo所有可查版本也都没有真正飞行先例，见
-                                  # README。写死在这里改完要重新docker compose up
-                                  # 才生效；想不改文件临时切，用
-                                  # `CONTROL_LAW=attitude docker compose up`，
-                                  # ${CONTROL_LAW:-trajectory}这个写法两种都支持。
+      - CONTROL_LAW=${CONTROL_LAW:-attitude}  # 2026-08-06起默认切到attitude
+                                  # （微分平坦姿态直控）——用户明确要求。trajectory
+                                  # 是之前唯一实测飞过的模式（位置/速度/加速度
+                                  # setpoint，PX4自己的位置环闭环）；attitude这条
+                                  # 路径（get_thrust/get_angular，mass/hover_thrust
+                                  # 已经通过VEHICLE_MASS_KG/VEHICLE_HOVER_THRUST从
+                                  # config/vehicle_profile.yaml正确读取，不再是硬编码
+                                  # 的m=2.906/hover_thrust=0.50）之前从没实测飞过——
+                                  # 联网查过jrached/kotakondo所有可查版本也没有真正
+                                  # 飞行先例，切成默认之后第一次起飞要按未验证控制律
+                                  # 对待，仔细盯着status/attitude_thrust日志（见
+                                  # README"油门/推力限制"一节的讨论）。想临时切回
+                                  # 验证过的trajectory模式，不改文件、临时跑：
+                                  # `CONTROL_LAW=trajectory docker compose up`。
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:
@@ -143,8 +149,10 @@ services:
       - AGENT_INDEX=2
       - NUM_AGENTS=2
       - LOCALIZATION_SOURCE=dlio  # 两架飞机要保持一致，别一个dlio一个gt
-      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # 同上，两架飞机也要保持一致，
-                                  # 见flight-stack-nx01那边的完整注释
+      - CONTROL_LAW=${CONTROL_LAW:-attitude}  # 同上，两架飞机必须保持一致
+                                  # （一个trajectory一个attitude会导致双机互相
+                                  # 避障时轨迹语义不一致），见flight-stack-nx01
+                                  # 那边的完整注释
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:
