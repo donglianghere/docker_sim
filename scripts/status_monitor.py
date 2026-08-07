@@ -34,6 +34,7 @@
 心算。
 """
 
+import os
 import sys
 import time
 import math
@@ -53,6 +54,34 @@ INIT_X = {
     'NX01': 3.0,
     'NX02': 6.0,
 }
+
+
+def build_config_banner():
+    """规划器/板外控制器/定位方式这几项是"这次跑的是哪套组合"的关键信息，
+    2026-08-07第一次真正对比px4ctrl和ros2_px4_stack稳定性之后用户要求
+    加到status面板里——光看NX01/NX02窗口的滚动日志很难第一时间确认当前
+    到底是拿哪套配置在跑，容易跟前一次的测试结果搞混。
+
+    规划器这个项目里目前只接了mighty一种（没有能切换规划器的环境变量），
+    先写死；CONTROLLER/LOCALIZATION_SOURCE都是flight-stack-entrypoint.sh
+    里读的环境变量，这个脚本本来就跑在某一个flight-stack容器内部（docker
+    exec进来的），直接读同一份环境变量即可，不需要额外传参。"""
+    controller = os.environ.get('CONTROLLER', 'ros2_px4_stack')
+    if controller == 'ros2_px4_stack':
+        control_law = os.environ.get('CONTROL_LAW', 'trajectory')
+        controller_label = f"ros2_px4_stack (control_law={control_law})"
+    elif controller == 'px4ctrl':
+        controller_label = "px4ctrl (ROS2版，实验性)"
+    else:
+        controller_label = controller
+
+    loc_source = os.environ.get('LOCALIZATION_SOURCE', 'dlio')
+    loc_label = {
+        'dlio': 'dlio (真实SLAM)',
+        'gt': 'gt (Gazebo仿真真值)',
+    }.get(loc_source, loc_source)
+
+    return f"规划器: mighty  |  板外控制器: {controller_label}  |  定位方式: {loc_label}"
 
 
 def quat_to_euler_deg(x, y, z, w):
@@ -118,6 +147,9 @@ class StatusMonitor(Node):
         self.namespaces = namespaces
         self.agents = {ns: AgentState() for ns in namespaces}
         self.local_mem_mb = float('nan')  # 只有本容器所在的那个ns能拿到
+        # 只在启动时读一次环境变量——运行期间这几个值不会变，没必要每秒
+        # 重新拼一次字符串。
+        self.config_banner = build_config_banner()
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                           history=HistoryPolicy.KEEP_LAST)
@@ -181,6 +213,7 @@ class StatusMonitor(Node):
         header = "|" + "|".join(f" {pad(name, w)} " for name, w in cols) + "|"
 
         lines = []
+        lines.append(self.config_banner)
         lines.append(sep)
         lines.append(header)
         lines.append(sep)
