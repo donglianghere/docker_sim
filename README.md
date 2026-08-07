@@ -5843,3 +5843,96 @@ checkbox，体验不好，而且mighty自己的NX01/NX02分组默认还是打开
 是两个不同的镜像——重新验证需要**两个镜像都重新build**
 （`docker compose build sim-world` + `docker compose build flight-stack-nx01`），
 不是只build flight-stack那一个就够。
+
+## rviz乱七八糟+撞柱子有避障但不对+IMU频率警告——三个问题一起查，用户提供的关键线索直接命中根因（2026-08-08）
+
+用户三个反馈一起来：①RViz乱七八糟，8架用不上的飞机分组；②这次撞柱子有
+避障动作但明显不对；③容器日志刷`[px4ctrl]: IMU frequency seems lower
+than 100Hz`警告。容器当时还在跑，逐条查了实际数据+日志，而不是纯猜。
+
+### 查到的：mavros/imu、mavros/odom实际速率只有~12-20Hz，远低于正常水平
+
+`ros2 topic hz /NX01/mavros/imu/data`实测~16-21Hz，
+`/NX01/mavros/local_position/odom`实测~12.7Hz——`ros2 topic info --verbose`
+确认发布端/订阅端QoS都是BEST_EFFORT（跟`px4ctrl 首次真实起飞炸机复盘`那次
+修的QoS不兼容问题不是同一个坑，那个已经修好了），纯粹是速率本身低，不是
+消息收不到。
+
+### 用户直接甩出了答案：ego-planner-swarm自己的Readme早就写了这是已知问题
+
+用户贴了ego-planner-swarm官方Readme原文："Using ROS2's default FastDDS
+causes significant lag during program execution. The reason hasn't been
+identified yet. Please follow the steps below to change the DDS to
+cyclonedds."——这份Readme其实一开始核实ROS2/Humble兼容性的时候就完整读过
+（见前面`ego-planner-swarm能否集成`那一节），但当时只关注了"是ROS2还是
+ROS1"这一件事，完全没注意到这段关于FastDDS卡顿的警告，属于读材料时的
+疏漏。跟实测的`mavros/imu/data`/`mavros/local_position/odom`速率异常
+（这两个话题跟ego_planner毫不相关！）症状完全吻合：ego_planner自己密集的
+pub/sub模式（点云+多个Marker+MultiBsplines等）在FastDDS下似乎会拖累
+同一个`ROS_DOMAIN_ID`里其它参与者的DDS吞吐，不是只影响它自己的话题。
+
+**已修复**：`Dockerfile.base`装`ros-humble-rmw-cyclonedds-cpp`，
+`flight-stack-entrypoint.sh`和`sim-world-entrypoint.sh`都在**任何ros2
+节点启动之前**加了判断——`PLANNER=ego_planner`时
+`export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`，mighty这条已验证路径
+继续用默认FastDDS不动。三个容器（sim-world+两个flight-stack）必须联动
+切换，同一个`ROS_DOMAIN_ID`下参与者要用同一个RMW实现才能互相发现——
+这次改动**需要重新build`mighty-base:humble`**（不是只build两个派生
+镜像），因为新装的apt包在`Dockerfile.base`里。
+
+### 查到的：那次撞柱子的完整时间线（读容器日志复盘，不是猜）
+
+从日志里读出的实际序列：
+1. 目标点触发`[TRIG]: from WAIT_TARGET to GEN_NEW_TRAJ`，规划器连续
+   replan 0~8。
+2. 位置从悬停点一路移动：z从0.97m降到0.57m再降到0.21m（贴近地面），
+   同时`world_accel`在最后一帧出现`net_accel_z=2.95`的明显异常尖峰——
+   跟正常飞行的净加速度应该接近0不符，像是撞击/剧烈反弹的特征。
+3. 紧接着`dlio_odom_node`直接崩溃（`exit code -11`，SIGSEGV）——崩溃前
+   最后一条日志显示一次"新keyframe"被`theta=163.94deg`（几乎180°翻转）
+   触发，姿态估计在崩溃前已经明显发散。
+4. `dlio_odom_node`崩溃之后很长一段时间，`ego_planner_node`还在继续
+   （靠最后一次收到的、已经过期的odom数据机械式replan），最终自己也
+   崩溃（`exit code -6`，SIGABRT）。
+
+**没有完全查清的部分（老实说）**：日志里的位置打印是限流过的（不是每帧都
+打印），采样太稀，没能精确定位到"飞机具体撞在哪根柱子/哪个位置"这个几何
+细节——最后两个采样点换算到世界坐标分别在(0.73,-0.64)和(-0.96,-1.10)
+附近，跟房间正中心那根柱子（世界坐标(0,0)）都还有1米以上的名义距离，
+不能排除这次是别的原因（比如低速率导致的控制/姿态估计不稳定本身）造成
+的坠落，不是单纯"离柱子太近直接撞上"这么简单的几何解释。`obstacles_
+inflation`改成0.35之后有没有真正解决"贴着飞"的问题，这次的证据不够
+干净，需要下次修好DDS问题、拿到正常速率的数据后再测一次才能真正确认。
+
+### rviz乱七八糟的真正原因：新配置是从错误的基线复制的
+
+查证：`multi_mighty.rviz`本身其实**早就是干净的**（只有15个顶层Display，
+`NX01`/`NX02`两个分组，没有`NX03-NX10`/`Benchmarking`/`Temporal SFC
+Debug`）——这是`mighty_rviz_final_config.patch`（早于这次ego_planner
+集成就存在的patch）已经做过的裁剪。问题出在我当时新建
+`multi_ego_planner.rviz`时，是从一个**只打了`mighty_rviz_ego_planner_
+displays.patch`、没打`mighty_rviz_final_config.patch`**的staging副本
+复制出来的——顺序反了，复制源头本身就是没裁剪过的10机模板，所以
+`multi_ego_planner.rviz`一直带着这堆用不上的分组，而`multi_mighty.rviz`
+从来没有这个问题。
+
+**已修复**：重新按真实的完整patch序列（从pristine开始，顺序应用全部
+patch）生成`multi_mighty.rviz`，再从这份正确的15条目版本复制出
+`multi_ego_planner.rviz`，重新翻转同样两处默认值。翻转脚本第一版还
+踩了一个坑：用"block内最后一个Name:"这个启发式定位`NX02`分组时，
+把RViz配置里`Tools:`列表（工具面板，同样用`    - Class: ...`这个格式
+起始，缩进跟顶层Display一样）误认成`NX02`分组的延伸内容，导致
+`NX02`那次翻转静默失败（没报错，只是没生效）——加了一个基于
+`Global Options:`行号的硬边界之后才修对，两份文件都用`yaml.safe_load`
+重新解析确认过（15个顶层条目，`Tools`/`Global Options`内容完整）。
+
+**还没做的**：这次改的两份rviz文件（连同上一轮）都还没有真正在RViz2里
+打开看过渲染效果；DLIO崩溃（SIGSEGV）本身是不是这次没查出根因的另一个
+独立bug（跟README很早之前记录的"dlio_odom_node偶发SIGABRT崩溃"是不是
+同一个问题，这次是SIGSEGV不是SIGABRT，退出码不一样，不确定是不是同一个
+坑），完全没有深挖；ego_planner_node最终SIGABRT崩溃的具体原因也没有查
+（可能只是"喂了太久的过期odom数据"这种下游连锁反应，也可能是独立问题）。
+下一步建议：重新build（这次连base镜像都要重建），先只验证CycloneDDS
+切换之后`mavros/imu/data`速率是否恢复正常，确认这个基础问题解决了，
+再重新测一次避障，这样才能干净地判断`obstacles_inflation=0.35`到底
+够不够。
