@@ -4745,3 +4745,885 @@ bbox-aware的（`msg.bbox/2 + drone_bbox/2`闵可夫斯基和喂给地图膨胀�
 "数学上可证明安全"的形式化方法——多机避让/动力学限制/静态避障
 理论上该是硬约束的地方，实现上全部退化成带权重的软惩罚项，安全
 边际本质靠调参数撑，不是算法结构本身保证的。
+
+## mighty vs ego-planner-swarm 规划器对比 + px4ctrl vs ros2_px4_stack 控制器对比 + px4ctrl移植ROS2评估（2026-08-07）
+
+项目根目录下另有 `px4ctrl`（在 `Fast-Drone-250/src/realflight_modules/px4ctrl`）和
+`ego-planner-swarm`（浙大FAST-Lab集群规划器）两套代码，本次调研对比它们与本项目
+实际使用的 mighty / ros2_px4_stack，供后续技术选型/真机适配参考。
+
+### mighty vs ego-planner-swarm
+
+两者都是**去中心化广播式**集群规划器（各机独立规划，把收到的僚机轨迹当动态障碍
+避让，没有中心协调节点），后端都走**自研无约束L-BFGS软惩罚**优化（都不依赖
+OSQP/NLopt/MINCO），核心差异：
+
+- **前端**：mighty有栅格A*/JPS全局搜索（`global_planner=astar_heat`时叠加热力图
+  软代价）；ego-planner-swarm**无独立前端**，直接用起止点连一段min-snap多项式做
+  优化初值（论文标志性"search-free"设计），A*只在优化中"控制点脱困"时局部调用。
+- **走廊**：mighty有显式`decomp_util`椭球凸分解安全走廊（甚至有时间分层版）；
+  ego-planner-swarm无显式走廊，直接用膨胀占据栅格梯度做避障（论文自称ESDF-free）。
+- **轨迹表示**：mighty用分段Hermite样条（3次/5次可切换）；ego-planner-swarm用
+  均匀B-spline。
+- **建图**：mighty依赖外部包`acl-mapping/global_mapper_ros`（raycast三态占据栅格）；
+  ego-planner-swarm内置`plan_env`（log-odds概率栅格+膨胀层）。
+- **额外能力**：mighty多了编队保持代价项、前沿探索（地面机器人专用）；
+  ego-planner-swarm专注核心点到点集群飞行+`drone_detect`（深度图里"擦除"队友
+  机体防误建图）+`rosmsg_tcp_bridge`（真机跨机通信绕开ROS2 DDS组播问题）。
+- **下游接口**：mighty发`dynus_interfaces/msg/Goal`（p/v/a/j/yaw/dyaw）；
+  ego-planner-swarm发`quadrotor_msgs/msg/PositionCommand`——**两种消息类型不兼容，
+  不能直接互换下游控制器**。
+
+`/home/robots/ai_uav/ego-planner-swarm` checkout的是官方`ros2_version`分支，
+确认是纯ROS2实现（`ego_planner_node.cpp`里能看到ROS1旧代码被注释保留的迁移痕迹）。
+
+**重要结论：ROS2版ego-planner-swarm官方不带任何板外飞控接口。** 仓库自带的
+`so3_control`+`so3_quadrotor_simulator`是纯仿真用几何控制器+刚体动力学积分，
+不对接MAVROS/PX4。`px4ctrl`（Fast-Drone-250姊妹仓库，设计上天然配对，同样消费
+`PositionCommand`）至今仍是ROS1，官方和已知社区fork都没有ROS2版本——这是该
+生态目前实机部署的一个真实缺口。
+
+### px4ctrl（ROS1）vs ros2_px4_stack（本项目实用版，kotakondo/dynus分支）
+
+两者通信介质同构（都是MAVROS+MAVLink，不直连px4_msgs/uORB），但控制律层级不同：
+
+- **px4ctrl**：本地算好attitude+thrust直接下发`/mavros/setpoint_raw/attitude`，
+  完整五态FSM（RC挡位驱动），有failsafe（RC非hover挡或odom超时0.5s强制退出
+  OFFBOARD），有在线RLS推力标定。是"完全接管闭环、PX4只当执行器"的架构。
+- **ros2_px4_stack（本项目`control_law=trajectory`默认模式，唯一验证过安全的
+  配置）**：只发位置/速度/加速度给PX4，**姿态环留给PX4内部MPC做**，层级比
+  px4ctrl浅一层。代码里也写了对标px4ctrl的`attitude`模式（标准Mellinger-Kumar
+  微分平坦几何控制器），但2026-08-06实测除零bug导致炸机，目前该模式明确标注
+  "不能用"（对应`docker_sim/patches/ros2_px4_stack_zb_norm_guard.patch`、
+  `ros2_px4_stack_yb_cross_norm_guard.patch`两个修复奇异点的补丁）。极简三态
+  FSM（无独立状态机类），**无任何failsafe/超时检测**，完全依赖PX4自身OFFBOARD
+  保护——整体成熟度是研究代码水准，不如px4ctrl工程化。
+
+### px4ctrl移植ROS2难度评估
+
+**中等工作量、低算法风险，是体力活移植不是重新设计。** 控制算法本体
+（`controller.cpp`纯Eigen数学，不含ROS API）几乎可逐行照搬。改造集中在胶水层：
+
+1. 构建系统：catkin→ament_cmake
+2. 节点/收发：`ros::NodeHandle`+`boost::bind`→`rclcpp::Node`+`std::bind`/lambda
+3. **最大的坑**：`toggle_offboard_mode`/`toggle_arm_disarm`原来是同步阻塞服务
+   调用，ROS2服务天生异步，需要用`spin_until_future_complete`重写
+4. 参数：`nh.getParam`一次性读取→ROS2要求先`declare_parameter`再`get_parameter`
+5. launch文件：XML→Python launch
+6. 消息包：`quadrotor_msgs`需要按`rosidl_generate_interfaces`重新生成，间接依赖
+   `uav_utils`（签名用ROS1智能指针类型）也要跟着移植
+7. `mavros`→`mavros2`（官方已维护，兼容性问题不大）
+
+未用`dynamic_reconfigure`/`nodelet`/旧版`tf`，省掉几类常见移植大坑。单人预计
+**2~4天**能完成可编译可跑的移植（不含真机调试/标定），主要耗时在服务调用异步化
+改造和两个依赖包同步移植。
+
+**与mighty的适配情况（关键注意点）**：px4ctrl原生只认`quadrotor_msgs::
+PositionCommand`，mighty发布的是`dynus_interfaces::msg::Goal`——**字段语义相近
+（都是p/v/a/j+yaw）但消息类型不同，不能直接对接**，移植后还需在px4ctrl侧新增
+订阅`Goal`的输入通路，或写一个`Goal→PositionCommand`转换节点。好消息是：
+**px4ctrl久经考验的attitude+thrust直控+RLS推力标定，理论上可以直接替代
+ros2_px4_stack里那条不成熟、有除零bug的`attitude`模式**——这是比"自己修复
+ros2_px4_stack的除零bug"更稳妥的真机适配候选方案，值得列入后续Jetson Orin NX
+移植计划。
+
+### 涉及关键文件
+
+- mighty核心：`src/mighty/include/{hgp/graph_search.hpp,hgp/hgp_manager.hpp,
+  mighty/mighty.hpp,mighty/lbfgs_solver.hpp}`、`src/mighty/config/{mighty,
+  multi_mighty}.yaml`
+- ego-planner-swarm核心：`ego-planner-swarm/src/planner/{plan_manage/src/
+  {ego_replan_fsm,planner_manager,traj_server}.cpp,bspline_opt/include/
+  bspline_opt/bspline_optimizer.h,plan_env/include/plan_env/grid_map.h}`
+- px4ctrl核心：`Fast-Drone-250/src/realflight_modules/px4ctrl/src/
+  {px4ctrl_node.cpp,PX4CtrlFSM.{h,cpp},controller.{h,cpp}}`
+- ros2_px4_stack核心：`docker_sim/staging/ros2_px4_stack/ros2_px4_stack/src/
+  {dynus_offboard_node.py,base_mavros_interface.py}`
+
+### 补充：px4ctrl代码量与"移植后替换ros2_px4_stack attitude模式"可行性量化（2026-08-07）
+
+**代码量**（`wc -l`实测）：px4ctrl核心`src/*.{cpp,h}` 9个文件共**1758行**（状态机
+`PX4CtrlFSM.{h,cpp}`最大757行，输入解析454行，控制律`controller.{h,cpp}`最短
+只有240行纯数学代码），加config/launch/build脚手架共**1927行**——是本项目涉及
+的几套系统里代码量最小的一个（比mighty规划器核心、ego-planner-swarm都小一个
+量级）。依赖`uav_utils`实际只用到3个头文件共402行，`quadrotor_msgs`实际只用到
+`PositionCommand.msg`/`TakeoffLand.msg`/`Px4ctrlDebug.msg`三个消息（其余23个
+跟px4ctrl无关）。
+
+**用移植后的px4ctrl替换ros2_px4_stack里未验证/有除零bug的`attitude`模式，结论：
+合适，是比自修bug更稳妥的路线**：
+
+1. px4ctrl控制律是小角度近似反解姿态（不做叉乘归一化），结构上不会复现
+   `zb_norm_guard`/`yb_cross_norm_guard`两个补丁修的那类除零故障模式。
+2. px4ctrl有完整failsafe、在线RLS推力标定，工程成熟度明显高于当前
+   `attitude`模式。
+3. **关键可行性确认**：px4ctrl支持`no_RC`模式（需`auto_takeoff_land.enable`+
+   `enable_auto_arm`都为真），此时完全不订阅`/mavros/rc/in`
+   （`px4ctrl_node.cpp:58`），状态机默认视为"始终在hover/command挡"
+   （`input.cpp:11-13`），正好匹配docker_sim当前无真遥控器、靠脚本自动解锁的
+   场景，不需要额外写假RC发布器。
+4. **字段对齐修正**：`quadrotor_msgs/PositionCommand.msg`其实也有`jerk`字段
+   （此前记录有误），跟mighty的`dynus_interfaces/msg/Goal`（p/v/a/j/yaw/dyaw）
+   近乎逐字段对应，桥接节点会很薄（约50~100行）。
+
+**性质上应是局部替换控制律输出环节，不是整体换掉ros2_px4_stack**——DLIO里程计
+转发到`mavros/vision_pose`、PX4失控保护参数自动放宽这些编排职责应保留。
+
+**改动量分解**：ROS1→ROS2语法迁移触及约1200~1400行（服务调用异步化是唯一需要
+重新设计的地方，其余机械替换）+ uav_utils迁移<50行改动 + quadrotor_msgs ROS2
+接口包脚手架约50~80行 + 新增Goal→PositionCommand桥接节点约50~100行 + 新增/改
+ROS2 launch（双机namespace/remap）约100~150行，**合计约2000行改动/新增代码**。
+另需整合`_kick_offboard()`/`takeoff_gate.patch`现有自动解锁逻辑跟px4ctrl自带
+`auto_takeoff_land`的分工，避免两套自动化打架；顺带把mass/hover_percentage
+统一到`config/vehicle_profile.yaml`单一源（此前已知的不一致点）。
+
+**工期预算**：核心ROS1→ROS2迁移2~4天可编译跑通，接入本项目联调（消息桥接、
+双机namespace、编排整合、极端指令边界测试）再加2~3天，单人总计约**1周**
+（不含真机标定/试飞）。
+
+### 补充：px4ctrl移植落地的架构决策——镜像归属/开发流程/与仿真器解耦确认（2026-08-07）
+
+**镜像归属**：px4ctrl(ROS2移植)应合并进现有`flight-stack`镜像，不新建独立镜像/
+service。它跟`ros2_px4_stack`是"控制层二选一/互替"关系（同一时刻只有一个真正
+往mavros发setpoint），拆成独立容器只会多一层跨容器DDS话题转发，没有隔离收益。
+在`Dockerfile.flight-stack`里作为第4个组件段落（紧跟`# 3. ros2_px4_stack`之后）
+COPY+build，跟DLIO/mighty/ros2_px4_stack并列。
+
+**开发流程**：遵循项目既有`staging/`+`patches/`两段式约定，不进运行中的容器里
+改源码（那样下次`docker compose build`重建就丢了，违反"一切从Dockerfile可
+复现构建"的模型）。但ROS1→ROS2移植约2000行改动量太大，不适合写成增量patch，
+应当作"新vendor一份源码"处理（类比DLIO/mighty的待遇）：先在`docker_sim`之外
+独立环境把移植做完、跑通`colcon build`，稳定后整份放进
+`docker_sim/staging/px4ctrl_ros2/`，后续本项目定制（双机namespace、mass/
+hover_thrust对齐`vehicle_profile.yaml`、`no_RC`参数、`Goal→PositionCommand`
+桥接节点接线）再用`patches/px4ctrl_ros2_*.patch`管理，跟ros2_px4_stack现有
+11个补丁同一套打法。
+
+**与仿真器解耦确认**：`ros2_px4_stack`全部代码grep "gazebo" 零命中，只跟mighty
+(ROS2 topic)和mavros/PX4打交道。`Dockerfile.flight-stack:284-285`编译mighty时
+特意不加`-DBUILD_SIMULATION=ON`，注释明确写"避免机载侧误依赖Gazebo"——这是
+项目从一开始就维护的架构边界：flight-stack镜像跟Gazebo/sim-world完全解耦，
+只通过`network_mode:host`下MAVROS↔PX4-SITL的UDP端口通信，PX4 SITL对flight-
+stack这层完全透明（跟真机PX4无区别）。px4ctrl移植/接入同理完全不需要碰
+`sim-world`镜像，只改`flight-stack`一侧即可，这也是"仿真和真机复用同一个
+flight-stack镜像"这个项目目标的架构根基。
+
+## px4ctrl ROS2(Humble)移植完成，编译+冒烟测试通过（2026-08-07）
+
+按此前约定的架构决策（合并进flight-stack镜像、先在docker_sim之外独立完成移植），
+在 `/home/robots/ai_uav/px4ctrl_ros2/` 下完成了px4ctrl从ROS1(catkin)到
+ROS2(Humble/ament_cmake)的逐文件移植，三个包共约2318行代码：
+
+- `quadrotor_msgs/`：只含px4ctrl实际用到的3个消息（PositionCommand/TakeoffLand/
+  Px4ctrlDebug）。注意`PositionCommand.msg`必须带`jerk`字段（Fast-Drone-250原版
+  有，但ego-planner-swarm自带的ROS2版quadrotor_msgs缺这个字段，不能直接复用）。
+- `uav_utils/`：纯数学工具头文件（converters/geometry_utils/utils），改成
+  INTERFACE库，去掉了原来从未启用的gtest测试可执行文件。
+- `px4ctrl/`：核心节点，`PX4CtrlParam`/`input`/`controller`/`PX4CtrlFSM`/
+  `px4ctrl_node`全部逐文件移植。
+
+**已用flight-stack:latest镜像里真实的Humble+mavros_msgs 2.14.0工具链验证**
+（`docker run`挂载源码进临时容器跑`colcon build`+`ros2 run`冒烟测试，不是
+`docker build`，没有动镜像本身）：
+
+1. 三个包`colcon build`全部编译通过，仅两条与移植无关的预置警告（`controller.cpp`
+   里`yaw`/`yaw_imu`两个未使用变量，ROS1原版就有，照原样保留未清理）。
+2. 冒烟测试确认`no_RC`模式和"等待PX4连接"分支都能正常跑到，不崩溃。
+3. **实测踩坑并已修复**：ROS2下`declare_parameter<T>(name)`（不带默认值的
+   必需参数写法）在参数缺失时实际抛的异常类型是
+   `rclcpp::exceptions::UninitializedStaticallyTypedParameterException`，
+   不是文档直觉上更容易想到的`ParameterUninitializedException`（两者是
+   `exceptions.hpp`里完全独立的同级类，都直接继承`std::runtime_error`，不是
+   父子关系）。一开始catch错类型导致`RCLCPP_FATAL`日志完全没打印就直接
+   `std::terminate`，实测确认后已改成捕获正确的异常类型
+   （`PX4CtrlParam.h`的`read_essential_param`）。
+
+**关键移植设计决策**：
+- 服务调用异步化（这是移植前评估的"最大的坑"）：`toggle_offboard_mode`/
+  `toggle_arm_disarm`/`reboot_FCU`改用`async_send_request()`+
+  `rclcpp::spin_until_future_complete(node_->get_node_base_interface(), future, timeout)`。
+  之所以能安全同步等待而不递归死锁：主循环沿用了ROS1原版"手写sleep+spin_some+
+  process()"的轮询结构（不是纯callback/timer驱动），`process()`调用发生在
+  主线程、不在任何活跃的`spin()`调用栈内部，`spin_until_future_complete`内部
+  自己新起一个`SingleThreadedExecutor`临时spin，不会跟外层冲突——rclcpp官方
+  在`executors.hpp`注释里也明确写了"does not work recursively; can't call
+  ...inside a callback executed by an executor"，保留原有轮询架构正好绕开了
+  这个坑。
+- 时钟统一：所有`rclcpp::Time`/`rclcpp::Clock`一律显式用`RCL_ROS_TIME`（不用
+  默认的`RCL_SYSTEM_TIME`），因为rclcpp里两个不同`clock_type`的`Time`相减会
+  在运行时直接抛异常——这是移植中最容易踩、最隐蔽的坑，任何一处默认构造的
+  `rclcpp::Time`成员漏了显式指定都会在运行时炸，本次全文排查了所有
+  `rclcpp::Time`成员（含`AutoTakeoffLand_t`/`RC_Data_t`等结构体里的默认
+  初始化）逐一显式标注。
+- `rclcpp::Rate`走系统墙钟（`GenericRate<std::chrono::system_clock>`），不
+  跟随`use_sim_time`——这点跟ROS1的`ros::Rate`行为不同，是记录下来但本次
+  未处理的已知行为差异，Gazebo仿真RTF明显偏离1时需要注意。
+
+**已知待办（集成阶段，不在本次移植范围）**：
+1. mavros话题目前保留原版绝对路径写法（如`/mavros/state`），接入docker_sim
+   双机(NX01/NX02)namespace隔离时需要去掉开头`/`改成相对名。
+2. mighty发布`dynus_interfaces/msg/Goal`，px4ctrl吃`quadrotor_msgs/msg/
+   PositionCommand`，两者字段近乎一一对应（含jerk）但类型不同，需要写一个
+   转换桥接节点（此前评估约50~100行）。
+3. 服务调用（切OFFBOARD/解锁/reboot）目前只验证了"mavros服务不可用时能
+   优雅降级不崩溃"，还没有接真实mavros测试拿到正常响应后的完整成功路径。
+4. `thrust_calibrate_scrips/`推力标定脚本未移植（跟核心控制器代码无耦合，
+   之后需要时可以直接照搬）。
+5. mass/hover_percentage对齐`config/vehicle_profile.yaml`单一源，双机
+   namespace，`_kick_offboard()`跟px4ctrl自带`auto_takeoff_land`自动化的
+   分工整合——都还是之前评估过的编排层工作。
+
+源码位置：`/home/robots/ai_uav/px4ctrl_ros2/`。按计划，下一步是移植稳定后整份
+放进`docker_sim/staging/px4ctrl_ros2/`，再用`patches/px4ctrl_ros2_*.patch`
+管理上面这些集成阶段的定制。
+
+## px4ctrl 接入 docker_sim：CONTROLLER 开关 + 完整集成链路（2026-08-07）
+
+在已完成的px4ctrl ROS2移植基础上，本次把它正式接入了双机仿真系统，新增
+CONTROLLER环境变量在两个板外控制器之间切换（默认`ros2_px4_stack`，现状
+完全不变；`px4ctrl`是新增的实验性选项）。**全部改动只写了文件，没有跑过
+`docker build`/`docker compose build`，需要你自己手动构建验证**（按标准
+流程：`docker compose build flight-stack-nx01`）。
+
+### 新增/改动文件
+
+- `docker_sim/staging/px4ctrl_ros2/`：把此前独立完成、已用真实Humble+
+  mavros_msgs 2.14.0验证过编译的通用px4ctrl ROS2移植（quadrotor_msgs/
+  uav_utils/px4ctrl三个包）复制进来，`git init`成一个独立小仓库，作为
+  "pristine基线"供patch机制使用（跟DLIO/ros2_px4_stack的既有做法一致）。
+- `docker_sim/patches/px4ctrl_ros2_namespace.patch`：把`px4ctrl_node.cpp`
+  里`/mavros/xxx`这批绝对话题名改成相对名`mavros/xxx`——因为px4ctrl_node
+  会以`namespace=${NAMESPACE}`启动（跟mighty/DLIO/ros2_px4_stack一致），
+  MAVROS自己是以`namespace=${NAMESPACE}/mavros`启动的（见entrypoint里
+  `ros2 launch mavros px4.launch namespace:="${NAMESPACE}/mavros" ...`），
+  改成相对名之后两边namespace能自动对上——这个写法直接照抄了
+  `ros2_px4_stack`自己的`base_mavros_interface.py`（同样用`"mavros/state"`
+  相对名），是这个项目里两个板外控制器统一遵守的既有规范。
+  `staging/px4ctrl_ros2`本身保持"通用、单机、绝对路径"的形态不动，方便
+  脱离这个多机项目单独复用。
+- `docker_sim/staging/px4ctrl_bridge/`：新写的docker_sim专属胶水包（不是
+  移植来的），三个节点：
+  - `goal_to_poscmd`：把mighty发布的`dynus_interfaces/msg/Goal`转成
+    px4ctrl吃的`quadrotor_msgs/msg/PositionCommand`，字段近乎一一对应
+    （含jerk）直通搬运，不做插值/限幅。
+  - `px4_param_relax`：放宽PX4失控保护参数（COM_DISARM_PRFLT等），从
+    `ros2_px4_stack_dynus.patch`里`OffboardDynusFollower._set_px4_param()`/
+    `_kick_offboard()`抽出来独立成一次性节点，两个板外控制器都能复用，
+    不跟哪个offboard follower类绑死。
+  - `takeoff_gate`：等`/tmp/takeoff_go`口令文件触发起飞，跟
+    `ros2_px4_stack_takeoff_gate.patch`是同一个操作习惯，配合
+    `docker_sim/scripts/launch_control.sh`使用。
+  - `launch/px4ctrl_docker_sim.launch.py`：把px4ctrl_node+上面三个节点
+    一起用`namespace=${NAMESPACE}`启动，`mass`/`hover_percentage`从
+    `VEHICLE_MASS_KG`/`VEHICLE_HOVER_THRUST`环境变量覆盖（跟
+    ros2_px4_stack读的是同一份数字，不会不同步），`odom`话题remap到
+    `dlio/odom_node/odom`（DLIO实际发布的话题名），`no_RC`/
+    `auto_takeoff_land`相关参数强制覆盖成docker_sim无真遥控器场景需要
+    的值。
+- `docker_sim/patches/ros2_px4_stack_offboard_follower_toggle.patch`：给
+  `dynus_mavros.launch.py`加`RUN_OFFBOARD_FOLLOWER`开关（默认true，现状
+  不变），`=false`时跳过`track_dynus_traj`节点（发setpoint给PX4那个，
+  避免CONTROLLER=px4ctrl时两边同时抢着控制PX4），但`repub_odom`/
+  `mocap_to_livox_frame`/静态TF这些和"发setpoint"无关的职责继续跑——
+  这几个职责跟走哪个控制器无关，不应该重复实现。
+- `Dockerfile.flight-stack`：新增第4步（COPY+patch+colcon build
+  `px4ctrl_ros2`+`px4ctrl_bridge`），原第4步"统一飞机物理参数配置"改成
+  第5步；`ros2_px4_stack`的补丁列表末尾追加了
+  `ros2_px4_stack_offboard_follower_toggle.patch`。
+- `flight-stack-entrypoint.sh`：新增`CONTROLLER`环境变量（默认
+  `ros2_px4_stack`），`=px4ctrl`时设置`RUN_OFFBOARD_FOLLOWER=false`并
+  额外`ros2 launch px4ctrl_bridge px4ctrl_docker_sim.launch.py`；
+  `ros2_px4_stack`的`dynus_mavros.launch.py`两种模式下都会启动（提供
+  repub_odom等支撑职责），只是`RUN_OFFBOARD_FOLLOWER`决定`track_dynus_traj`
+  是否跟着起。
+- `docker-compose.yml`：两架飞机都加了`CONTROLLER=${CONTROLLER:-ros2_px4_stack}`
+  环境变量透传，默认值保证不设置时行为完全不变。
+
+### 已做的验证（不是"写完就交", 全部实测过)
+
+用`flight-stack:latest`镜像里真实的Humble+mavros_msgs 2.14.0工具链，
+`docker run`挂载源码进临时容器（没有碰镜像本身，没有跑`docker build`）：
+
+1. `px4ctrl_ros2_namespace.patch`/`ros2_px4_stack_offboard_follower_toggle.patch`
+   都在**真实的staging目录+完整patch序列**下`git apply --check`通过。
+2. `px4ctrl_ros2`(打完namespace patch) + `px4ctrl_bridge`一起`colcon build`
+   通过（复用`mighty_ws`里已经编译好的`dynus_interfaces`）。
+3. `ros2_px4_stack`打完全部12个补丁（含新的toggle）`colcon build`通过。
+4. **端到端联合冒烟测试**：`RUN_OFFBOARD_FOLLOWER=false`时
+   `ros2 launch ros2_px4_stack dynus_mavros.launch.py`日志确认
+   `track_dynus_traj_py`正确不再启动，`repub_odom`/`mocap_to_livox_frame`/
+   两个静态TF正常起来；同时`ros2 launch px4ctrl_bridge
+   px4ctrl_docker_sim.launch.py`四个节点全部正常启动，`no_RC`分支正确
+   触发，`takeoff_gate`正确进入等待`/tmp/takeoff_go`的状态，全程无崩溃/
+   无Python或C++异常。
+5. `ros2 param get`确认`mass`/`thrust_model.hover_percentage`/
+   `auto_takeoff_land.no_RC`三个环境变量覆盖参数全部按预期生效
+   （实测`VEHICLE_MASS_KG=1.935`→`mass=1.935`，`VEHICLE_HOVER_THRUST=0.42`
+   →`thrust_model.hover_percentage=0.42`）。
+
+### 明确没有验证过的部分（下一步真机/仿真联调要重点看）
+
+1. **没有接过真实MAVROS+PX4 SITL跑完整起飞-跟踪-降落流程**——上面的
+   冒烟测试全程没有mavros/PX4在跑，`toggle_offboard_mode`/
+   `toggle_arm_disarm`这些服务调用只验证了"服务不可用时能优雅降级不
+   崩溃"，没有验证拿到真实响应后的完整成功路径。
+2. `goal_to_poscmd`桥接的字段映射只做过阅读级别的核对，没有接真实mighty
+   规划器实测过端到端的轨迹跟踪效果。
+3. `px4ctrl`默认走的是原版attitude+thrust直控这条路径（不是
+   `ros2_px4_stack`当前默认的`CONTROL_LAW=trajectory`透传模式），数学结构
+   上不会复现`zb_norm_guard`那类除零bug，但也从未在这套仿真里真正飞过，
+   第一次试飞建议单机、低高度、原地悬停开始验证，不要一上来就多机编队。
+4. `rclcpp::Rate`按系统墙钟计时、不跟随仿真RTF这个已知行为差异（见
+   之前记录），在真实仿真联调时如果RTF明显偏离1需要留意。
+
+按计划，这次改动已经是"移植+集成"两个阶段都完成到可编译、可启动冒烟测试
+通过的程度，`docker compose build flight-stack-nx01`之后建议先用
+`CONTROLLER=px4ctrl LOCALIZATION_SOURCE=gt NUM_AGENTS=1`（跳过DLIO/单机）
+这种最小配置验证一次完整起飞，确认没问题再逐步加回DLIO和第二架飞机。
+
+## ego-planner-swarm能否集成、跟px4ctrl配不配、防撞/限速限加速是不是硬约束（读源码结论，未实测）
+
+**订正**：一开始误判成ROS1 catkin包，后来核实用户下载的是`ros2_version`
+分支（`git branch --show-current`确认），不是默认的`master`（ROS1）分支——
+所有`package.xml`都是`format="3"`+`ament_cmake`，仓库自带的`Readme.md`
+还明确写了`sudo apt install ros-humble-rmw-cyclonedds-cpp`，直接点名
+Humble。所以ROS版本上是直接兼容的，不需要移植。
+
+**真正的坑是包名冲突+消息字段不一致**：`ego-planner-swarm`自带一份
+`quadrotor_msgs`包（`src/uav_simulator/Utils/quadrotor_msgs/`），跟
+`px4ctrl_ros2/quadrotor_msgs`**包名完全相同**，两个都放进同一个ROS2
+workspace编译会冲突。而且两者的`PositionCommand.msg`定义不完全一样：
+`px4ctrl_ros2`那份比`ego-planner-swarm`那份多一个
+`geometry_msgs/Vector3 jerk`字段（跟docker_sim给mighty写
+`goal_to_poscmd`时特意保留jerk字段是同一个原因——px4ctrl底层用得到）。
+真要接建议让`ego-planner-swarm`直接依赖`px4ctrl_ros2`那份
+`quadrotor_msgs`（删掉自带的，`traj_server.cpp`发布`PositionCommand`时
+补上jerk字段，B样条本身能解析出jerk，补起来不难），跟docker_sim现有
+"复用同一份消息定义"的做法保持一致，而不是保留自己的那份再转发。
+
+**集群防撞逻辑可能跟mighty重复/冲突**：`bspline_opt/src/bspline_optimizer.cpp`
+里的`calcSwarmCost`是靠订阅其他飞机广播的轨迹做机间防撞，这跟当前
+docker_sim里mighty自己的集群协同规划是同一层职责，两边不能同时开着
+抢控制权，真要集成需要先决定"只留一个规划器"还是"井字换用、对比测试"，
+不是简单叠加。
+
+**结论：防撞、限速、限加速度都不是硬约束，是惩罚项**。证据在
+`bspline_opt/src/bspline_optimizer.cpp`：
+- `calcFeasibilityCost()`（限速/限加速度）：对超过`max_vel_`/`max_acc_`
+  的控制点用一段三次多项式惩罚函数计权，不是可行域裁剪。
+- `calcDistanceCostRebound()`（静态障碍物防撞）+ `calcSwarmCost()`
+  （机间防撞）：同样是距离越界就加惩罚，越界越多惩罚越大。
+- 这些惩罚项在`combineCostRebound()`里按`lambda1_~lambda3_`/
+  `new_lambda2_`加权求和成单一标量`f_combine`（1826行附近），整体丢给
+  NLopt做**无约束**L-BFGS梯度下降，不是QP/SOCP那种能给出数学可行性
+  保证的硬约束求解器。
+
+也就是说优化器只是"尽量"满足限速/防撞，权重调不好或者场景太极端
+（狭窄通道、多机高速交会）时是可能被违反的，没有强保证——这是
+ego-planner系列用来换取极快重规划速度（相比Fast-Planner等硬约束方法）
+的设计取舍，真要在硬件上兜底，还是得靠PX4自己的限速参数、更保守的
+膨胀半径/安全余量、或者规划器外面再加一层限幅去防止极端情况。
+
+### ego-planner-swarm跟mighty的依赖冲突排查（读源码核实，未实测build）
+
+`mighty_ws_src`里已经内嵌了一整套跟`ego-planner-swarm`同源的
+`uav_simulator`辅助包，**包名完全重复的有13个**：
+- 顶层6个：`poscmd_2_odom`、`map_generator`、`local_sensing`、
+  `mockamap`、`so3_quadrotor_simulator`、`so3_control`
+  （`ego-planner-swarm/src/uav_simulator/` vs
+  `mighty_ws_src/uav_simulator/`）
+- `Utils`下7个：`cmake_utils`、`waypoint_generator`、`pose_utils`、
+  `quadrotor_msgs`、`multi_map_server`、`uav_utils`、
+  `odom_visualization`
+
+`diff -rq`实测：`so3_quadrotor_simulator`/`so3_control`两边package.xml
++源码逐字节相同（同一份代码vendor了两次）；`local_sensing`/
+`map_generator`/`mockamap`/`poscmd_2_odom`/`quadrotor_msgs`是
+package.xml相同但`.cpp`实现有差异——**同名不同版**，不是简单删一份
+就行。
+
+跟`px4ctrl_ros2`那份`quadrotor_msgs`/`uav_utils`是同一类问题：现在
+靠Dockerfile.flight-stack里"分层workspace"（`/opt/px4ctrl_ws`
+`source /opt/mighty_ws/install/setup.bash`后再单独`colcon build`，
+第583~593行）躲开了同一次colcon build扫到两个同名包直接报错的情况。
+如果把`ego-planner-swarm/src`整个丢进`mighty_ws/src`一起build，13个
+同名包会让colcon直接拒绝（这个错误看得见、好查）；但如果学px4ctrl的
+做法单独分层建第三个overlay workspace，`quadrotor_msgs`这种消息包
+三份定义不完全一样（有没有jerk字段），谁link到谁纯粹看source顺序，
+编译不报错，运行时字段对不上——这种坑比编译报错难查得多。
+
+另外两个非命名冲突的依赖问题：`odom_visualization`依赖ROS1遗留的
+`tf`包（不是`tf2`），`local_sensing`依赖ROS1专属的`dynamic_reconfigure`，
+ROS2 Humble下都没有对应rosdep key，真要build这两个包会直接rosdep
+resolve失败——不过这两个包本来也用不上（已有DLIO+mighty的定位建图，
+不需要ego-planner自带的深度相机仿真/另一套里程计可视化）。
+
+规划核心链路本身**没有**冲突：`path_searching`/`bspline_opt`/
+`plan_env`/`traj_utils`/`drone_detect`/`ego_planner`(plan_manage)这6个
+真正跑B样条优化的包，在`mighty_ws_src`里一个都不存在，冲突完全集中在
+`uav_simulator`那13个辅助/仿真工具包上。
+
+**建议**：真要集成只留`src/planner/`这6个核心包，`src/uav_simulator/`
+（含Utils）整个跳过不编译，核心包改CMakeLists直接依赖mighty_ws里已经
+编译好的同名包（`quadrotor_msgs`按前面说的改用px4ctrl_ros2那份、补上
+jerk字段），一次性避开13个包名冲突和2个ROS1遗留依赖问题。
+
+### `/home/robots/ai_uav`根目录文件必须性审查 + 发现两份代码没有版本控制
+
+审查根目录下哪些文件是项目必须的，顺带查出一个实际风险。
+
+**真正必须**：`docker_sim/`整个目录（项目本体，自己是独立git仓库，
+`staging/`被`.gitignore`排除，能靠`fetch_sources.sh`+patch步骤重新
+生成）+ `CLAUDE.md`（系统需求/项目规范）。
+
+**发现风险：`px4ctrl_ros2`和`px4ctrl_bridge`这两份手工写/手工移植的
+源码，当前完全没有版本控制**：
+- 根目录`px4ctrl_ros2/`（逐文件从`Fast-Drone-250`移植成ROS2的
+  px4ctrl）没有`.git`，`fetch_sources.sh`里也没有它的克隆条目——不是
+  能从任何URL重新拉回来的东西。`docker_sim/staging/px4ctrl_ros2`那份
+  有`.git`，但只是为了让Dockerfile.flight-stack里`git apply`那一步
+  能跑（没有remote，不是真实版本历史）。两份内容目前完全一致（
+  `diff -rq`确认，唯一差异就是那个`.git`目录），root那份`px4ctrl_ros2`
+  的mtime（11:48）早于staging那份（14:54），说明是手工从root复制进
+  staging的。
+- `px4ctrl_bridge`（`goal_to_poscmd`/`px4_param_relax`/`takeoff_gate`）
+  更脆弱：唯一副本在`docker_sim/staging/px4ctrl_bridge`，整个
+  `staging/`都被`.gitignore`排除在docker_sim自己的git仓库之外——
+  一旦清理`staging/`会直接丢失、无法恢复。
+- 唯一现存的"备份"是今天（当前会话时间）新生成的
+  `/home/robots/ai_uav/flight-stack-src/`（连同`.zip`），比对确认这是
+  `staging/`打patch**之前**的快照（`mighty_ws_src/mighty`里的文件跟
+  Dockerfile.flight-stack第300行那20多条patch要改的文件一一对应，说明
+  快照生成时patch还没打），但这也只是普通文件目录，不是git仓库。
+
+建议把`px4ctrl_ros2`和`px4ctrl_bridge`挪进`docker_sim`自己的git仓库
+跟踪（Dockerfile相应改COPY路径），别再靠根目录裸文件+偶尔打zip这种
+方式保存。
+
+**非必须、可清理的冗余**：`src/`+`src.zip`（847M，`staging/`早期手工
+预取残留，`fetch_sources.sh`现在能直接重新拉全部源码）、
+`flight-stack-src/`+`flight-stack-src.zip`（2G，打patch前快照，build
+流程完全不引用）、`Fast-Drone-250/`（px4ctrl移植参考源，已移植完成）、
+`ego-planner-swarm/`（还没集成，只是评估阶段）、4份`.docx`对话总结+
+`专项报告...docx`+`ToDoList`（历史记录/待办，不参与build）。
+
+顺带发现：审查时`docker_sim`自己有5个文件未提交
+（README.md/docker-compose.yml/Dockerfile.flight-stack/
+flight-stack-entrypoint.sh/status_monitor.py）+ 2个新patch文件未
+track，建议找个时间点commit掉。
+
+### 风险修复：px4ctrl_ros2/px4ctrl_bridge迁移进docker_sim自己的git仓库
+
+`px4ctrl_ros2`（根目录裸文件，无`.git`）迁移到`docker_sim/vendor/px4ctrl_ros2`；
+`px4ctrl_bridge`（原在`staging/`下，被`.gitignore`排除）迁移到
+`docker_sim/src/px4ctrl_bridge`（跟`gt_odom_bridge`/`uwb_sim`同一个
+"docker_sim自己写的包放`src/`"约定）。`Dockerfile.flight-stack`第4步的
+`COPY staging/px4ctrl_ros2`/`COPY staging/px4ctrl_bridge`改成
+`COPY vendor/px4ctrl_ros2`/`COPY src/px4ctrl_bridge`。删掉了
+`staging/px4ctrl_ros2`里那份只为了让`git apply`能跑而存在的假`.git`——
+**实测确认`git apply --check`/`git apply`在完全没有`.git`的普通目录里
+一样能正常工作**（`cd`到一个纯文件目录直接`git apply`一份真实patch，
+`exit=0`），所以vendor/里不需要内嵌git仓库，直接用docker_sim自己的
+git跟踪普通文件即可。这两个包之前完全没有版本控制，一旦`staging/`被
+清理就永久丢失且无法从任何URL恢复，现在改动还没commit（跟其余5个
+之前就在改的文件混在一起，等用户确认后统一处理）。
+
+同时清理了两份纯冗余备份：`src.zip`（847M，`staging/`早期手工预取
+残留）、`flight-stack-src.zip`（打patch前的快照），两者内容都能用
+`fetch_sources.sh`重新生成。`Fast-Drone-250/`、`ego-planner-swarm/`、
+根目录`src/`、`flight-stack-src/`这几个目录在本次操作前已被用户自行
+清理掉。4份对话总结`.docx`+`专项报告...docx`+`ToDoList`用户明确要求
+保留，未删除。
+
+### ego-planner-swarm集成方案（设计稿，尚未实现）
+
+只取`src/planner/`下6个核心包（`path_searching`/`bspline_opt`/
+`plan_env`/`traj_utils`/`drone_detect`/`ego_planner`），**重新拉取
+`ros2_version`分支核实后发现这6个包完全不依赖`uav_utils`/
+`cmake_utils`/`pose_utils`**（之前担心的13个包名冲突是`src/uav_simulator/`
+那批辅助包才有的问题，核心规划器不受影响，只要不拷贝`uav_simulator/`
+进镜像，冲突自动消失）。唯一的项目内依赖是`ego_planner`(plan_manage)
+对`quadrotor_msgs`的依赖，且只用到`PositionCommand`一种消息类型。
+
+**硬性要求**：不能带ego-planner自己vendor的`quadrotor_msgs`（没有jerk
+字段），必须让这个新workspace的underlay`source px4ctrl_ws/install`，
+使`find_package(quadrotor_msgs)`解析到px4ctrl_ros2那份（有jerk字段）
+——traj_server发布、px4ctrl_node订阅的必须是编译时同一份`.msg`定义，
+否则字段布局不一致会导致DDS序列化对不上，这一步没有捷径。顺带patch
+`traj_server.cpp`补上`cmd.jerk`赋值（B样条能算三阶导，现在的代码没填）。
+
+**前端**（DLIO/Gazebo接入）：`plan_env/grid_map.cpp`订阅的
+`grid_map/odom`/`grid_map/cloud`都是相对话题名，纯launch remap即可：
+分别指向`dlio/odom_node/odom`（`LOCALIZATION_SOURCE=gt`时
+`gt_odom_bridge`也发到同一个话题名，不用分支处理）和
+`mid360_PointCloud2`（跟mighty的`global_mapper_ros`同一个点云源）。
+`ego_planner_node`自己另一路`odom_world`同样remap过去。
+
+**后端**（px4ctrl_ros2接入）：发现`traj_server.cpp`的`pos_cmd_pub`
+发布话题是硬编码绝对路径`"/position_cmd"`（不是相对名）——跟当初
+`px4ctrl_ros2_namespace.patch`要解决的问题一样，双机场景会互相打架，
+需要新增patch改成相对名`"position_cmd"`。改完后`px4ctrl_bridge`只需
+加一条`('cmd', 'position_cmd')`remap，不需要`goal_to_poscmd`那种消息
+转换桥（ego_planner原生发的就是`PositionCommand`）。
+
+**跟mighty共存**：新增`PLANNER`环境变量（默认`mighty`，新选项
+`ego_planner`），参考现有`CONTROLLER`开关的模式，在
+flight-stack-entrypoint.sh里做成互斥——`PLANNER=ego_planner`时不起
+`mighty_node`/`global_mapper_ros`，改起`ego_planner_node`+`traj_server`，
+两者从不同时抢占同一话题或同一px4ctrl实例。`drone_detect`的机间广播
+（`/broadcast_bspline`全局话题）在docker-compose双容器共享网络下能
+直接工作，不需要额外网桥，**但前提是两架飞机都选`PLANNER=ego_planner`**
+——一台mighty一台ego_planner的话集群防撞会失效，这是方案目前没解决
+的限制。
+
+**构建**：`fetch_sources.sh`新增
+`clone_pin egoplanner ...ego-planner-swarm.git staging/ego-planner-swarm ros2_version`
+（有上游URL，走`staging/`常规流程，不用像px4ctrl_ros2那样搬进
+`vendor/`）；`Dockerfile.flight-stack`新增一步，只
+`COPY staging/ego-planner-swarm/src/planner`（精确到`src/planner`，
+不带`src/uav_simulator`）到新workspace，underlay
+`source mighty_ws/install`（可选，规划器核心不依赖mighty任何东西，
+纯粹保持环境一致）+`source px4ctrl_ws/install`（必须），colcon build。
+
+验证顺序建议：单机`PLANNER=ego_planner CONTROLLER=px4ctrl
+LOCALIZATION_SOURCE=gt`跑通colcon build+起飞跟踪 → 切
+`LOCALIZATION_SOURCE=dlio`验证真实SLAM链路 → 最后双机验证
+`/broadcast_bspline`跨容器广播和机间防撞。
+
+### ego-planner-swarm集成：已按上述方案落地到文件层面（未跑docker build/实测）
+
+重新拉取`ros2_version`分支pin到commit`23a8d5a191711dd65633df689bd00f55d4dea8f9`
+（`fetch_sources.sh`新增`egoplanner`组），核实到几个方案阶段没确认的细节，
+连同全部改动一并记录：
+
+**src/planner下其实是7个包，不是6个**：多了一个`rosmsg_tcp_bridge`——
+读了源码，是给没有共享ROS网络的真实多机部署用的裸TCP/UDP转发桥（跟
+`traj_utils::msg::MultiBsplines`打交道），docker-compose这两个容器天然
+在同一个网络里、DDS广播直接能用（`/broadcast_bspline`已经是这个道理），
+用不上，`colcon build --packages-skip rosmsg_tcp_bridge`跳过不编译，
+COPY阶段图省事整个`src/planner`一起拷过去（含这个包的源码，只是不编译）。
+
+**点云路径实测确认跟深度相机路径完全独立、不会互相干扰**：读了
+`plan_env/grid_map.cpp`——`depth_sub_`(深度图)和`indep_cloud_sub_`(独立点云)
+两条订阅永远同时建立，不是"二选一"的模式开关；`updateOccupancyCallback`
+定时器只服务深度相机路径（靠`occ_need_update_`标志位驱动，只有
+`depthOdomCallback`/`depthPoseCallback`会置位），点云路径的`cloudCallback`
+自己独立完成整个occupancy更新，不经过这个定时器；`md_.flag_use_depth_fusion`
+初始为false、只在深度回调里才置true——三点加起来确认：只喂点云、不喂
+`grid_map/depth`，不会触发"odom or depth lost"报错，也不会跟深度相机
+那条逻辑抢资源，纯点云模式是完全独立、干净的路径。
+
+**patch实际路径要用`-p3`**：COPY只挑`src/planner`会把这一层拍平（
+`/opt/ego_planner_ws/src/plan_manage/...`，不是`.../src/planner/plan_manage/...`），
+patch文件是从仓库根生成的（`a/src/planner/plan_manage/...`），要多剥
+`a/`+`src/`+`planner/`三层才对得上——`git apply -p3 --check`在真实拍平后的
+目录结构上实测验证过，能对上。
+
+**traj_server.cpp补jerk的具体写法**：`bsplineCallback`里`traj_`数组本来
+只存到2阶导（pos/vel/acc），加一行`traj_.push_back(traj_[2].getDerivative())`
+凑出3阶导（jerk），`cmdCallback`里正常跟"轨迹结束hover"两个分支分别取值/
+清零，最后填进`cmd.jerk.x/y/z`。发布话题从硬编码绝对路径`"/position_cmd"`
+改成相对名`"position_cmd"`。patch存在
+`docker_sim/patches/ego_planner_traj_server_relative_poscmd.patch`。
+
+**新增`docker_sim/src/ego_planner_bridge`包**（纯launch文件，没有自己的
+节点代码，跟`px4ctrl_bridge`定位类似）：
+
+- 没有沿用`advanced_param.launch.py`自己的`drone_<id>_`字符串前缀多机
+  方案（那是给单进程内跑多个drone_id设计的），改用ROS2
+  `namespace=${NAMESPACE}`（跟mighty/DLIO/px4ctrl同一套约定）——
+  `drone_id`参数保留但意义不同：它只喂给`manager/drone_id`，是
+  `calcSwarmCost`用来在共享的全局话题`/broadcast_bspline`上区分"自己"
+  和"别人"轨迹的ID，跟namespace是两件独立的事，必须两机不同。
+  `flight-stack-entrypoint.sh`里新增`export DRONE_ID="${DRONE_ID:-$((AGENT_INDEX - 1))}"`
+  自动从已有的`AGENT_INDEX`(1-based)推导，不需要docker-compose.yml
+  再单独传一个新环境变量、也不会跟AGENT_INDEX不同步。
+- `grid_map/cloud`→`mid360_PointCloud2`、`grid_map/odom`和`odom_world`→
+  `dlio/odom_node/odom`，`grid_map/use_depth_filter`显式设成`False`
+  （纯文档意义，不影响实际行为，见上面"点云路径独立"的结论）、
+  `grid_map/frame_id`设成`"${NAMESPACE}/map"`（跟项目里
+  `global_mapper_ros`/mighty已经在用的frame命名习惯对齐，用
+  `PythonExpression`拼字符串——`parameters=[]`的字典值不能像`name=[...]`
+  那样直接传substitution列表做拼接，会被误当成数组类型参数）。
+- `fsm/flight_type`选了`MANUAL_TARGET`(=1)而不是原文件默认的
+  `PRESET_TARGET`(=2)：`PRESET_TARGET`要求提前在参数里写死目标点列表，
+  `MANUAL_TARGET`运行时订阅一个`PoseStamped`话题触发目标点，更适合手动
+  测试。原本硬编码的绝对话题名`"/move_base_simple/goal"`remap成相对名
+  `"goal_pose"`，避免两架飞机同时抢同一个全局话题的目标点——验证过
+  ROS2的remap机制允许拿一个绝对路径字面值当"from"重映射到相对"to"。
+- 没有起`map_generator`/`mockamap`（demo用来生成虚拟障碍物地图的节点，
+  这里用真实Gazebo世界不需要）、没有起`drone_detect`（视觉互检测，需要
+  相机，这套集成明确只用规划器核心+激光雷达点云，不用相机路径）。
+- 地图尺寸/动力学限制/优化权重等调参参数原样照抄自
+  `advanced_param.launch.py`，**未经mid-360实际点云质量和飞行空间验证**，
+  上线前应该结合实测重新过一遍（`max_ray_length`=4.5米、
+  `local_update_range`=5.5x5.5x4.5米这些值明显是给原demo那种较小室内
+  场景调的，跟simple_room场景是否合适没有验证过）。
+
+**`px4ctrl_bridge`的launch文件改成条件分支**：ROS2 launch的
+`generate_launch_description()`在真正launch之前就要构建完整的
+LaunchDescription，这时`LaunchConfiguration`还没被解析成具体字符串，
+没法用一段python `if`直接摆一份`remappings=[...]`——改成两份
+`px4ctrl_node`定义（`px4ctrl_node_mighty`/`px4ctrl_node_ego_planner`，
+共享除`remappings`外的所有参数），各自用`UnlessCondition`/`IfCondition`
+包一个`PythonExpression`（比较`planner`launch参数是否等于`'ego_planner'`）
+互斥，同一时刻只有一份真正启动，不会两边都抢`px4ctrl`这个节点名。
+`goal_to_poscmd_node`同样加`UnlessCondition`，`PLANNER=ego_planner`时
+不起（起了也没有mighty发Goal消息喂给它）。新增的`planner`launch参数
+默认读`PLANNER`环境变量。实测过在`get_package_share_directory('px4ctrl')`
+mock掉之后本地能正确构建出7个entity、conditon类型分别符合预期。
+
+**entrypoint改动**：`mighty`+`global_mapper_ros`+雷达TF别名那一整段包进
+`if [ "${PLANNER}" = "mighty" ]; then ... elif [ "${PLANNER}" = "ego_planner" ]; then ...  fi`，
+两者不会同时起；新增对`PLANNER=ego_planner`但`CONTROLLER≠px4ctrl`组合的
+警告（不阻止，只提示"ego_planner发的position_cmd没人订阅，飞机不会动"）；
+`ego_planner_ws/install/setup.bash`加进最前面统一source的那一批。
+
+**已完成的文件级校验**（没有跑docker build，按既定习惯交给用户）：
+patch用`git apply -p3 --check`在真实拍平后的目录结构上验证通过；两个
+launch文件都用`python3 -m py_compile`过语法，并且mock掉
+`get_package_share_directory`之后实际执行`generate_launch_description()`
+确认能正确构建出预期数量、预期condition类型的entity；`docker-compose.yml`
+用`yaml.safe_load`确认改动后仍是合法YAML且两架飞机的`PLANNER`环境变量都
+存在；`flight-stack-entrypoint.sh`用`bash -n`确认改完的if/elif/fi语法平衡。
+
+**明确没有验证过的部分**：没有实际`docker compose build`过（这份镜像会
+新增colcon build ego_planner_ws这一步，编译期错误——比如px4ctrl_ros2的
+quadrotor_msgs是否真的完全兼容ego_planner这几个包的其余代码——完全没有
+被实测捕获过）；没有真正起过容器测试`ego_planner_node`能不能收到点云/
+odom、算出轨迹、`traj_server`发出的`position_cmd`能不能真的把飞机移动
+起来；`fsm/flight_type=MANUAL_TARGET`模式下拿`ros2 topic pub .../goal_pose`
+手动发目标点这条操作路径完全没有实测过；双机`/broadcast_bspline`跨容器
+广播和机间防撞也没有实测过。下一步建议照方案里写的顺序（单机gt定位→
+单机dlio定位→双机）逐步验证。
+
+## px4ctrl 首次真实起飞炸机复盘：mavros2 IMU话题QoS不兼容（2026-08-07）
+
+### 现象
+`CONTROLLER=px4ctrl LOCALIZATION_SOURCE=gt` 第一次真实起飞测试：无人机生成后
+桨叶静止，按起飞口令后立刻解锁起飞，但起飞瞬间径直朝前方（墙的方向）猛冲，
+最终姿态接近翻转（yaw≈142°）后摔落在地。**跟mighty规划器完全无关**（用户
+明确反馈"起飞应该和mighty无关"，事后确认mighty侧`term_goal`从未被设置，
+"goal"话题从头到尾没有任何消息，已用代码逐行核实排除）。
+
+### 根因（已用真实运行中的容器实测确认，不是猜测）
+
+`ros2 topic info /NX01/mavros/imu/data --verbose` 实测结果：
+
+- MAVROS的`imu`节点发布`/NX01/mavros/imu/data`用的QoS是 **`Reliability: BEST_EFFORT`**
+- px4ctrl的订阅（移植时沿用ROS1版本"裸整数当queue depth"的写法）解析成
+  **`Reliability: RELIABLE`**
+
+DDS的QoS兼容性规则下，Reliable订阅收不到Best Effort发布者的任何数据——这不
+是错误，只有一行很容易被忽略的WARN日志：
+`New publisher discovered on topic '.../mavros/imu/data', offering incompatible
+QoS. No messages will be sent to it.`
+
+后果：`Imu_Data_t::feed()`从节点启动到炸机全程**没有被调用过一次**（容器日志
+里能看到反复出现的`ODOM frequency seems lower than 100Hz`警告，但从未出现过
+对应的`IMU frequency...`警告，两个警告出自`input.cpp`里完全同构的代码，这个
+不对称直接证明IMU话题订阅没进过一次回调）。`imu_data.q`因此从头到尾都是
+`Eigen::Quaterniond`默认构造的**未初始化内存**（不是零、不是单位四元数，是
+垃圾值）。`controller.cpp`里的姿态修正公式`u.q = imu.q * odom.q.inverse() * q`
+把这坨垃圾值乘进了每一帧实际发给PX4的姿态指令，产生一个基本随机、且大概率
+严重错误的姿态目标——`runtime_logs/NX01/attitude_thrust_debug.log`里能看到
+`target_tilt_from_level=180.0deg`（完全倒扣的目标姿态）持续出现，飞机实际
+姿态被打到`yaw≈142°`接近翻转，配合PX4姿态控制器的强纠正动作，表现为"起飞
+就朝一个方向猛冲后摔机"。
+
+### 已修复（三处，都在源码层面，需要你重新`docker compose build flight-stack-nx01`）
+
+1. **根因修复**：`px4ctrl_ros2/px4ctrl/src/px4ctrl_node.cpp`——`mavros/imu/data`
+   和`mavros/battery`（同一份日志里也报了同样的QoS不兼容警告）两个订阅改成
+   `rclcpp::SensorDataQoS()`，跟mavros2发布端的QoS对齐（已用`ros2 topic info
+   --verbose`实测核实，不是照抄别处代码猜的）。顺带确认`mavros/rc/in`/
+   `mavros/state`都是Reliable发布，原来的写法本来就兼容，不用改。
+2. **防御性修复**：`Imu_Data_t`构造函数补上`q.setIdentity(); w.setZero();
+   a.setZero();`——ROS1原版没有这一段（TCPROS不存在"QoS不兼容导致静默收不到
+   数据"这种失败模式，这个初始化在ROS1里是无用功），但ROS2引入了这个新的
+   静默失败模式，属于必要的兜底：即便以后又有别的话题因为别的原因收不到，
+   至少送出去的是"安全默认值"而不是"未定义内存"。
+3. **顺带修复**：`px4ctrl_bridge/px4_param_relax.py`——`mavros/param/set`
+   服务等待超时原来只给15秒，但实测这套仿真里mavros/PX4完整建链要40秒以上
+   （`px4ctrl_node`自己那边"Unable to connnect to PX4"刷了近40秒），同一次
+   事故日志里这个节点"process has died, exit code 1"，说明PX4失控保护参数
+   放宽大概率一次都没成功过。参照`ros2_px4_stack_kick_offboard_timeout.patch`
+   当年"仿真real-time-factor远低于1、原来10秒真实时间预算不够用"的同款教训，
+   把等待预算放宽到120秒真实时间，并且改成失败会重试（每个参数最多重试20次）
+   而不是试一次就放弃。
+
+### 验证情况
+
+用`flight-stack:latest`镜像真实工具链`colcon build`通过；`px4ctrl_ros2_namespace.patch`
+已针对修复后的新基线重新生成并验证`git apply --check`干净通过，同时确认patch
+后的文件里QoS修复和namespace相对路径改动能正确共存（`grep`确认11处相对
+`mavros/`话题名 + 3处`SensorDataQoS`都在）。**没有再次实测真实起飞**——需要
+你重新`docker compose build flight-stack-nx01`之后再测一次。
+
+### 给下一次测试的建议
+
+1. 当前容器（如果还在跑）已经是撞墙后的状态，建议先`docker compose down`
+   干净重启，不要在旧状态上直接叠加新镜像。
+2. 重新起飞时**盯紧`NX01`/`NX02`窗口**，重点看还有没有其它
+   "offering incompatible QoS"警告——这次只確認了imu/battery两个话题，如果
+   还有别的话题也存在类似问题（比如odom/cmd，虽然这次实测没报警告），能在
+   日志里第一时间看到。
+3. `attitude_thrust_debug.log`里如果再出现`target_tilt_from_level`长时间
+   偏离0度、或者`body_rate`出现`nan`，都是可以立刻用`Ctrl-C`/`docker compose
+   down`止损的信号，不用等它自己稳定。
+
+## 新增：镜像+配置一键导出/恢复脚本（2026-08-07）
+
+`docker_sim/scripts/bundle.sh`，两个子命令：
+
+```bash
+./bundle.sh export [输出目录]                        # 在当前机器跑
+./bundle.sh restore <bundle目录> [--dest 目标目录]     # 在目标机器跑
+```
+
+**原理**：`docker save`把镜像完整层栈序列化成标准tar，`docker load`能在
+任何装了Docker的机器上原样重建，不依赖原本怎么build的——跳过在新机器上
+重新`fetch_sources.sh`（要网络/代理）+ 重新`colcon build`（要时间）这两步，
+恢复速度只取决于传文件和`docker load`解包。三个镜像（mighty-base/
+sim-world/flight-stack）一次性`docker save`（不是分开三次）能让公共层
+（mighty-base是另外两个的FROM父镜像，`docker system df -v`确认公共层
+5.588GB）在tar里只写一份，省下大约11GB。`docker save`不加`-o`直接流式
+接压缩器（优先zstd，没有就pigz/gzip），不在磁盘上落几十GB的未压缩中间
+文件。项目配置（compose/Dockerfile/entrypoint/patches/scripts）另外单独
+打包，明确排除`staging/`（第三方源码，镜像里已经编译进去，恢复用不上）
+和`runtime_logs/`（运行时日志/rosbag，跟"能不能跑起来"无关）。
+
+已用小体积替身镜像（`python:3.12-slim`+`ubuntu:22.04`，通过
+`AI_UAV_BUNDLE_IMAGES`环境变量覆盖默认镜像列表，脚本本身支持这个测试
+入口）做过完整的export→restore端到端验证：校验和、docker
+save/load往返、config tar排除规则、恢复后镜像存在性检查，全部通过。
+真实的三个镜像（约27GB去重后，zstd压缩预计10~15GB）还没有实际导出
+过一次——体积大、耗时以及产出的大文件是否需要人工决定何时执行，交给
+用户自己触发。
+
+新机器上恢复后**不需要**重新跑`fetch_sources.sh`（除非要在新机器上改
+代码重新build镜像）。GPU（nvidia-container-toolkit）和X server是脚本
+恢复不了的宿主机环境依赖，需要人工确认。
+
+## 用户提问："mighty/ego-planner-swarm都是局部规划器，顶层全局规划器还有哪些类型？探索式规划器算不算"（2026-08-07）
+
+顶层规划器与局部规划器（mighty/ego-planner-swarm）的分工边界：顶层规划器决定
+"目标点从哪来、什么时候换"，局部规划器解决"怎么绕开障碍物飞到这个点"。梳理的
+分类：
+
+- **信息驱动类**：探索式规划器（Frontier-based/FUEL/TARE/FAEP，未知环境最大化
+  信息增益——**算顶层规划器**）、覆盖式规划器（CPP，遍历已知区域）、视点规划/
+  Next-Best-View（已知目标多角度精细观测，跟探索式相近但目标已知）。
+- **已知地图类**：全局路径规划器（A*/PRM/RRT*，已知地图求粗路径喂给局部规划器）、
+  拓扑规划器（大尺度环境用拓扑图代替稠密栅格）。
+- **任务/调度类**：任务/行为规划器（FSM/行为树，调度该用哪个下层规划器）、多机
+  任务分配MRTA（双机场景下把目标点分给两架机，跟规划路径是独立问题）、编队规划器
+  （维持双机相对队形，给僚机算相对目标点）。
+
+判断标准：模块输出如果是"该往哪个点飞"而非"怎么绕开障碍物飞过去"，就属于顶层
+规划器范畴。补充信息：`mighty`已内置前沿探索模块（此前
+[mighty vs ego-planner-swarm对比](#mighty-vs-ego-planner-swarm-规划器对比--px4ctrl-vs-ros2_px4_stack-控制器对比--px4ctrl移植ros2评估2026-08-07)
+调研记录标注为"地面机器人专用"，飞行场景能否直接复用未验证）；
+`gazebo_models_external`里有subt地下隧道模型（如果项目会用到），若最终用途偏
+未知环境探索，探索式规划器是最贴近需求的顶层规划器选型；若偏双机协同巡检/
+测绘固定区域，覆盖式+任务分配组合更合适。本次为纯概念/架构讨论，未涉及代码
+改动。
+
+## 用户提问："比赛场景约20米见方室内（桁架+网子搭建），任务未定（可能物流或应急），应该先预置些什么规划器"（2026-08-07）
+
+结合[上一条顶层规划器分类讨论](#用户提问mightyego-planner-swarm都是局部规划器顶层全局规划器还有哪些类型探索式规划器算不算2026-08-07)，
+给出的优先级建议（场景无关的先做，场景相关的做成可插拔，不押注单一任务类型）：
+
+- **优先级A（场景无关，现在就该做）**：①任务/行为调度器FSM（管阶段切换/失败
+  重试/返航条件）；②双机任务分配（先做静态分区/手动编号即可，不用一步到位
+  拍卖式最优）；③全局路径规划器（复用mighty已有的`astar_heat`，场地大小结构
+  大概率能提前拿到，可预先加载粗地图当热力代价）。
+- **优先级B（按最可能场景押注，做成可插拔）**：④探索式规划器（frontier）——
+  应急场景"找目标/搜索"的硬需求，**关键行动项：验证mighty内置的前沿探索模块
+  （此前标注"地面机器人专用"）能否直接用于飞行场景，这是决定要不要额外接入
+  FUEL/TARE之类专用空中探索包的分支点**；⑤覆盖式规划器——物流若是"巡检/
+  清点固定区域"会用上，但物流更常见是点到点运输，此时用不上，优先级低于探索式。
+- **优先级C（可选）**：⑥编队规划器——除非规则明确要求编队展示，否则双机独立
+  执行+避碰即可，优先级最低。
+
+**架构建议**：探索式和覆盖式规划器接口本质相同（"生成一批候选目标点+排序"，
+区别只是frontier信息增益排序 vs 扫描顺序排序），设计成同一个"候选目标点生成器"
+插件接口，现场看规则再切换模式，不用现在两套代码都焊死。另外20米见方室内空间
+对mid-360+DLIO来说范围偏小，全局地图分辨率、frontier聚类半径等参数到时候大概率
+要单独调，不能照搬仿真默认值。本次为纯架构/优先级讨论，未涉及代码改动。
+
+## 用户追问："粗地图当热力代价什么意思，有什么用"（2026-08-07）
+
+对上一条比赛场景规划器建议里"预先加载粗地图当热力代价"的展开说明，读mighty源码
+（`include/hgp/map_util.hpp:573`附近`static_heat`实现）核实：
+
+- **热力代价机制**：`astar_heat`模式下A*用的不是二值占据/空闲代价，而是每个占据
+  体素向周围辐射一圈radial falloff的软代价halo（`static_heat_alpha_`控峰值、
+  `static_heat_p_`控衰减幂次、`static_heat_rmax_m_`控halo半径）。是软代价——A*
+  倾向绕开高代价区但没有更好路时仍能穿过，除非开`heat_cutoff_ratio`强制转成硬
+  不可通行。跟传统膨胀半径硬阻挡的区别在于不会把"离障碍很近但是唯一通路"的窄缝
+  完全堵死。
+- **"粗地图当热力代价"的含义**：比赛场地固定结构（20米边界、桁架立柱、网子轮廓）
+  赛前大概率能提前拿到图纸/测量，起飞前先把这些已知静态结构写入static heat层，
+  不用等激光雷达实时扫描逐步建图才知道哪里有障碍。
+- **用处**：①首次规划就有全局引导，不用等建图覆盖全场才避障，避免早期"建图未完成
+  时乱撞"；②软代价机制容错先验地图误差——现场实际搭建跟预先测绘有出入也不会
+  完全走不通，最终通行性仍以实时占据栅格为准，热力层只是提前给偏好；③把已知
+  大结构提前编码进热力层后，实时感知资源可以集中检测比赛当天才摆的小件障碍物和
+  队友无人机，不用把两类障碍混在一起处理。本次为概念澄清，未涉及代码改动。
+
+## 用户追问："三个优先级的模块有开源方案推荐吗"（2026-08-07）
+
+对[比赛场景规划器优先级建议](#用户提问比赛场景约20米见方室内桁架网子搭建任务未定可能物流或应急应该先预置些什么规划器2026-08-07)
+的开源方案调研（基于已知信息推荐，未实测/未逐一验证当前维护状态，落地前建议
+先确认活跃度）：
+
+- **优先级A**：①任务/行为调度器——状态少，优先自己写轻量FSM；要工程化可选
+  BehaviorTree.CPP（ROS2标准，Nav2`bt_navigator`同款，有Groot2可视化）或SMACC2
+  （ROS2原生事件驱动状态机）。②双机任务分配——只有两架机不建议上重框架，规则式
+  静态分配或`scipy.optimize.linear_sum_assignment`（匈牙利算法）够用；CBBA是
+  学术标准算法但无官方维护包需自行实现；Open-RMF功能对口但面向几十上百机车队
+  调度，明显偏重，不建议。③全局路径规划器——已有mighty的`astar_heat`，不需要
+  外部方案，以后想对比可看Nav2官方`nav2_smac_planner`。
+- **优先级B**：④探索式规划器——第一步仍是验证mighty自带前沿探索模块能否用于
+  飞行场景（沿用上次结论）；不够用的话HKUST-Aerial-Robotics（跟已checkout的
+  ego-planner-swarm同团队）的FUEL（单机）/RACER（多机协同探索，跟双机场景直接
+  对口）值得看，但都是ROS1需要走一遍类似ego-planner-swarm的ROS2移植；TARE
+  Planner偏地面机器人，适配性弱于FUEL/RACER。⑤覆盖式规划器——Fields2Cover
+  （配Nav2插件`opennav_coverage`）是最成熟的开源库，但20米见方小场地若任务
+  简单，自己写弓字形（boustrophedon）扫描比接重型农田/割草向工具更划算。
+- **优先级C**：编队规划器——mighty已内置编队保持代价项，无特殊需求不需要额外
+  开源方案。
+
+**总体建议**：A档三项优先自己写（都是小工作量），只有全局路径规划已现成；B档
+探索式规划器是唯一值得认真评估外部移植的一项，且应先验证内置模块可用性再决定
+要不要移植FUEL/RACER；覆盖式规划器先用简单扫描顶上。本次为纯调研/推荐，未涉及
+代码改动。
+
+## 用户追问："FSM是什么？匈牙利算法什么原理？FUEL能用激光雷达吗？Fields2Cover的原理和输入输出是什么"（2026-08-07）
+
+对上一条开源方案推荐里提到的四个概念做展开科普：
+
+- **FSM**：状态集合+转移条件+（可选）每状态行为，任意时刻只处于一个状态，事件/
+  条件满足时跳转。状态少时手写FSM够用；状态多、转移条件组合复杂时行为树（树形+
+  优先级/回退语义）比FSM（图结构，转移边随状态数指数增长）更好维护，这也是Nav2
+  选BT而非纯FSM的原因。
+- **匈牙利算法（指派问题）**：给定n×n代价矩阵，标准O(n³)步骤——①每行每列各减
+  去该行/列最小值；②用最少横纵线覆盖所有0元素；③覆盖线数=n则用0元素构造完美
+  匹配结束，否则取未覆盖部分最小值调整矩阵后回②。对双机任务分配的意义：保证
+  全局总代价最小的分配，比"每架机贪心选最近点"更优（贪心容易两机抢同一目标导致
+  另一架绕远）。`scipy.optimize.linear_sum_assignment`是现成实现。
+- **FUEL能否用激光雷达**：*据已知资料判断，未拉代码核实，落地前需先看仓库确认*。
+  FUEL默认demo配深度相机，但跟同系Fast-Planner/EGO-Planner共享的`plan_env/
+  sdf_map`建图后端通常设计上同时支持depth image和点云（PointCloud2）输入，切
+  参数即可换数据源——架构上不排斥激光雷达但非开箱即用，需要做点云降采样/量程
+  FOV参数适配。这是决定要不要移植FUEL/RACER之外的又一个前置核实项。
+- **Fields2Cover**：输入是作业区域边界多边形（可带障碍物多边形）+车辆参数
+  （作业幅宽/转弯半径）。原理分五步：地块分解（非凸/有障碍先切凸子区域）→
+  地头生成（边界留转弯缓冲带）→扫描线生成（凸子区域内按工作宽度生成平行线）→
+  扫描线排序（常见蛇形）→转弯轨迹生成（Dubins/回旋曲线拼接）。输出一条覆盖
+  整个地块的连续航点序列，ROS2集成（`opennav_coverage`）包成Nav2 coverage
+  server返回`nav_msgs/Path`。提示：本质面向地面车辆设计（转弯半径是地面车辆
+  运动学概念），用在无人机上是借用其"2D覆盖行生成"这一段，不是整体照搬，若
+  任务不需要非凸分解/障碍规避这类复杂度，简单弓字形扫描更划算。本次为概念
+  科普，未涉及代码改动。
