@@ -53,13 +53,23 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gazebo gazebo-common gazebo-plugin-base libgazebo-dev \
         ros-humble-gazebo-ros-pkgs ros-humble-gazebo-ros
 
+# ros-humble-rmw-cyclonedds-cpp：ego-planner-swarm自己的Readme.md明确写着
+# "Using ROS2's default FastDDS causes significant lag during program
+# execution...change the DDS to cyclonedds"——2026-08-08实测复现类似症状
+# （mavros/imu/data、mavros/local_position/odom两个跟ego_planner毫不相关的
+# 话题，实测速率只有~12-20Hz，远低于PX4/mavros正常应该有的水平，跟这个上游
+# 已知问题的描述吻合：ego_planner自己密集的pub/sub模式在FastDDS下拖累了
+# 同一个ROS_DOMAIN_ID里其它节点的DDS吞吐），装在这里给flight-stack/sim-world
+# 两个派生镜像共用，具体切换逻辑（只在PLANNER=ego_planner时切换，mighty这条
+# 已验证的路径不动）在两份entrypoint.sh里。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
         -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
         ros-humble-mavros ros-humble-mavros-extras \
         ros-humble-pcl-ros ros-humble-pcl-conversions libpcl-dev \
         ros-humble-tf2-ros ros-humble-tf2-eigen ros-humble-robot-state-publisher \
-        ros-humble-xacro ros-humble-rviz2
+        ros-humble-xacro ros-humble-rviz2 \
+        ros-humble-rmw-cyclonedds-cpp
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \

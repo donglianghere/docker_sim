@@ -70,6 +70,13 @@ USE_RVIZ="${USE_RVIZ:-true}"
 PLANNER="${PLANNER:-mighty}"
 if [ "${PLANNER}" = "ego_planner" ]; then
     RVIZ_CONFIG="multi_ego_planner.rviz"
+    # ego-planner-swarm自己的Readme.md写明FastDDS(ROS2默认)会导致明显卡顿、
+    # 建议换cyclonedds——跟flight-stack-entrypoint.sh联动切换（那边有更完整
+    # 的实测依据说明），同一个ROS_DOMAIN_ID下所有参与者必须用同一个RMW实现
+    # 才能互相发现，这里必须在下面`ros2 launch`（起Gazebo+PX4 SITL）之前
+    # 设置，不能只改flight-stack那两个容器。
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    echo "== [sim-world] PLANNER=ego_planner，切换RMW_IMPLEMENTATION=rmw_cyclonedds_cpp =="
 else
     RVIZ_CONFIG="multi_mighty.rviz"
 fi

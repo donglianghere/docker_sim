@@ -66,6 +66,21 @@ source /opt/px4ctrl_ws/install/setup.bash
 source /opt/ego_planner_ws/install/setup.bash
 set -u
 
+# ego-planner-swarm自己的Readme.md写明"FastDDS(ROS2默认)会导致明显卡顿，
+# 原因未知，建议换cyclonedds"——2026-08-08实测复现类似症状（mavros/imu/data、
+# mavros/local_position/odom这两个跟ego_planner毫不相关的话题，实测速率只有
+# ~12-20Hz，远低于正常水平），跟这条上游已知问题吻合。只在
+# PLANNER=ego_planner时切换，mighty这条已经实测验证过的路径继续用默认
+# FastDDS不动。必须在这个容器里**任何**ros2节点（包括下面马上要起的MAVROS）
+# 启动之前设置——同一个ROS_DOMAIN_ID(=20)下所有参与者（sim-world/
+# flight-stack-nx01/flight-stack-nx02）必须用同一个RMW实现才能互相发现，
+# 三处（这里+sim-world-entrypoint.sh）都要跟着PLANNER联动切换，不能只改
+# 一处。
+if [ "${PLANNER:-mighty}" = "ego_planner" ]; then
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    echo "== [flight-stack:${NAMESPACE:-?}] PLANNER=ego_planner，切换RMW_IMPLEMENTATION=rmw_cyclonedds_cpp（缓解上游文档记录的FastDDS卡顿问题）=="
+fi
+
 : "${NAMESPACE:?必须设置 NAMESPACE，如 NX01}"
 : "${AGENT_INDEX:?必须设置 AGENT_INDEX，如 1}"
 export VEH_NAME="${NAMESPACE}"
