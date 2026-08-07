@@ -20,7 +20,20 @@
 #                   就炸机（get_angular()里`m/u1`没加零值保护，body_rate的yaw
 #                   分量实测钉在-3.49rad/s，远超配置的限制），已改回
 #                   trajectory，attitude在这个bug修好前不要再当默认用，
-#                   见README.md。
+#                   见README.md。仅在 CONTROLLER=ros2_px4_stack 时生效。
+#   CONTROLLER      默认 ros2_px4_stack（现状不变，唯一经过仿真验证的板外
+#                   控制器）。可选 px4ctrl——2026-08-07刚完成的ROS2(Humble)
+#                   移植版，只做过编译+启动冒烟测试，还没有接真实
+#                   MAVROS/PX4跑完整起飞-跟踪-降落流程，先当作实验性选项，
+#                   见README.md"px4ctrl ROS2(Humble)移植完成"相关章节。
+#                   两者是"二选一"的关系：ros2_px4_stack模式下正常跑
+#                   track_dynus_traj(发setpoint)+repub_odom+mocap_to_livox_frame
+#                   等全部职责；px4ctrl模式下用RUN_OFFBOARD_FOLLOWER=false
+#                   让dynus_mavros.launch.py跳过track_dynus_traj（避免两边
+#                   同时抢着给PX4发setpoint/解锁指令），改起px4ctrl_node+
+#                   goal_to_poscmd+px4_param_relax+takeoff_gate，但
+#                   repub_odom/mocap_to_livox_frame/静态TF这些和"发setpoint"
+#                   无关的职责继续由dynus_mavros.launch.py提供，不重复实现。
 set -eo pipefail
 
 # ROS2/colcon 生成的 setup.bash 内部会引用一堆没给默认值的变量（比如这里第一个
@@ -33,6 +46,7 @@ source /opt/decomp_ws/install/setup.bash 2>/dev/null || true
 source /opt/mighty_ws/install/setup.bash
 source /opt/dlio_ws/install/setup.bash
 source /opt/ros2_px4_stack_ws/install/setup.bash
+source /opt/px4ctrl_ws/install/setup.bash
 set -u
 
 : "${NAMESPACE:?必须设置 NAMESPACE，如 NX01}"
@@ -147,6 +161,13 @@ sleep 3
 
 LOCALIZATION_SOURCE="${LOCALIZATION_SOURCE:-dlio}"
 export CONTROL_LAW="${CONTROL_LAW:-trajectory}"
+export CONTROLLER="${CONTROLLER:-ros2_px4_stack}"
+if [ "${CONTROLLER}" = "px4ctrl" ]; then
+    export RUN_OFFBOARD_FOLLOWER="false"
+else
+    export RUN_OFFBOARD_FOLLOWER="true"
+fi
+echo "== [flight-stack:${NAMESPACE}] CONTROLLER=${CONTROLLER} (RUN_OFFBOARD_FOLLOWER=${RUN_OFFBOARD_FOLLOWER}) =="
 if [ "${LOCALIZATION_SOURCE}" = "gt" ]; then
     echo "== [flight-stack:${NAMESPACE}] 定位模式=gt：跳过DLIO，改用Gazebo仿真真值 (gt_odom_bridge) =="
     ros2 run gt_odom_bridge gt_odom_bridge_node \
@@ -256,8 +277,13 @@ ros2 launch global_mapper_ros global_mapper_node.launch.py \
     depth_pointcloud_topic:=mid360_PointCloud2 pose_topic:=state &
 sleep 2
 
-echo "== [flight-stack:${NAMESPACE}] 启动 ros2_px4_stack (dynus分支 offboard follower) =="
+echo "== [flight-stack:${NAMESPACE}] 启动 ros2_px4_stack 支撑节点 (repub_odom/mocap_to_livox_frame/静态TF；RUN_OFFBOARD_FOLLOWER=${RUN_OFFBOARD_FOLLOWER}时一并起track_dynus_traj) =="
 ros2 launch ros2_px4_stack dynus_mavros.launch.py \
     namespace:="${NAMESPACE}" fcu_url:="${MAVROS_FCU_URL}" &
+
+if [ "${CONTROLLER}" = "px4ctrl" ]; then
+    echo "== [flight-stack:${NAMESPACE}] 启动 px4ctrl (ROS2版，实验性——见README已知待办) =="
+    ros2 launch px4ctrl_bridge px4ctrl_docker_sim.launch.py &
+fi
 
 wait -n

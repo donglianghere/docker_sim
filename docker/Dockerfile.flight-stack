@@ -476,7 +476,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 #    自己核对一遍再应用，我没有在真实环境里跑过这个patch，只是把结论落成待办）。
 # ============================================================
 COPY staging/ros2_px4_stack /opt/ros2_px4_stack_ws/src/ros2_px4_stack
-COPY patches/ros2_px4_stack_dynus.patch patches/ros2_px4_stack_vision_pose_staleness.patch patches/ros2_px4_stack_takeoff_altitude.patch patches/ros2_px4_stack_kick_offboard_fix.patch patches/ros2_px4_stack_kick_offboard_timeout.patch patches/ros2_px4_stack_control_law.patch patches/ros2_px4_stack_control_law_launch.patch patches/ros2_px4_stack_takeoff_gate.patch patches/ros2_px4_stack_zb_norm_guard.patch patches/ros2_px4_stack_yb_cross_norm_guard.patch patches/ros2_px4_stack_base_link_tf_conflict.patch /tmp/
+COPY patches/ros2_px4_stack_dynus.patch patches/ros2_px4_stack_vision_pose_staleness.patch patches/ros2_px4_stack_takeoff_altitude.patch patches/ros2_px4_stack_kick_offboard_fix.patch patches/ros2_px4_stack_kick_offboard_timeout.patch patches/ros2_px4_stack_control_law.patch patches/ros2_px4_stack_control_law_launch.patch patches/ros2_px4_stack_takeoff_gate.patch patches/ros2_px4_stack_zb_norm_guard.patch patches/ros2_px4_stack_yb_cross_norm_guard.patch patches/ros2_px4_stack_base_link_tf_conflict.patch patches/ros2_px4_stack_offboard_follower_toggle.patch /tmp/
 RUN cd /opt/ros2_px4_stack_ws/src/ros2_px4_stack \
     && (git apply --check /tmp/ros2_px4_stack_dynus.patch && git apply /tmp/ros2_px4_stack_dynus.patch \
         || echo "!! patch 未能自动应用，需要人工核对后手动改，见 docker/README的已知问题章节 !!") \
@@ -499,7 +499,9 @@ RUN cd /opt/ros2_px4_stack_ws/src/ros2_px4_stack \
     && (git apply --check /tmp/ros2_px4_stack_yb_cross_norm_guard.patch && git apply /tmp/ros2_px4_stack_yb_cross_norm_guard.patch \
         || echo "!! ros2_px4_stack_yb_cross_norm_guard.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
     && (git apply --check /tmp/ros2_px4_stack_base_link_tf_conflict.patch && git apply /tmp/ros2_px4_stack_base_link_tf_conflict.patch \
-        || echo "!! ros2_px4_stack_base_link_tf_conflict.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py !!")
+        || echo "!! ros2_px4_stack_base_link_tf_conflict.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_offboard_follower_toggle.patch && git apply /tmp/ros2_px4_stack_offboard_follower_toggle.patch \
+        || echo "!! ros2_px4_stack_offboard_follower_toggle.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py（加RUN_OFFBOARD_FOLLOWER开关，供CONTROLLER=px4ctrl时跳过track_dynus_traj节点） !!")
 # 上面这个patch让_kick_offboard()真的跑起来之后，用户反馈"二号机没起来"——
 # 实测mavros/state：NX01最终armed:true、mode:OFFBOARD，NX02停在
 # armed:false、mode:OFFBOARD，5分钟后重新查依然没变。两架飞机日志里
@@ -543,7 +545,63 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ============================================================
-# 4. 统一飞机物理参数配置（对应《专项报告：飞机物理参数配置问题》里的建议——
+# 4. px4ctrl（ROS2/Humble移植版）+ px4ctrl_bridge（mighty<->px4ctrl集成胶水）
+#    px4ctrl是ZJU-FAST-Lab的板外控制器（原版ROS1/catkin，来自
+#    Fast-Drone-250/src/realflight_modules/px4ctrl），本项目把它逐文件移植
+#    成了ROS2(Humble)版，源码在 vendor/px4ctrl_ros2（quadrotor_msgs/
+#    uav_utils/px4ctrl三个子包），已用这个镜像里真实的Humble+mavros_msgs
+#    2.14.0工具链做过colcon build+运行时冒烟测试（详见docker_sim/README.md
+#    "px4ctrl ROS2(Humble)移植完成"一节）。
+#    这两个包（px4ctrl_ros2/px4ctrl_bridge）都不是从任何上游URL能重新拉
+#    回来的（fetch_sources.sh里没有它们），之前一直以裸文件形式放在
+#    staging/（被.gitignore排除）或项目根目录（完全没进版本控制），
+#    清理干净后没地方能恢复——现已挪进docker_sim自己的git仓库跟踪：
+#    px4ctrl_ros2放vendor/（移植的第三方代码），px4ctrl_bridge放src/
+#    （跟gt_odom_bridge/uwb_sim一样，是docker_sim自己写的胶水包）。
+#
+#    定位：跟ros2_px4_stack是"二选一"的板外控制器，不是必须同时跑——
+#    通过CONTROLLER环境变量在flight-stack-entrypoint.sh里切换，默认仍是
+#    CONTROLLER=ros2_px4_stack（现状不变，px4ctrl这条链路是新增的可选项，
+#    还没有接真实PX4/mavros长时间验证过，见README已知待办）。
+#
+#    patches/px4ctrl_ros2_namespace.patch：把px4ctrl_node.cpp里"/mavros/xxx"
+#    这批绝对话题名改成相对名"mavros/xxx"，配合下面用namespace=${NAMESPACE}
+#    启动，跟本项目其余节点（mighty/DLIO/ros2_px4_stack）的命名空间约定
+#    对齐——vendor/px4ctrl_ros2本身保持"通用、单机、绝对路径"的形态不动，
+#    方便脱离这个多机docker_sim项目单独复用，所有docker_sim专属修改都走
+#    这个patch，不直接改vendor里的源码。git apply不需要目标目录本身是个
+#    git仓库（实测过），所以vendor/px4ctrl_ros2不需要内嵌一份没有remote的
+#    假.git——直接用docker_sim自己的git仓库跟踪普通文件即可。
+#
+#    px4ctrl_bridge是这次集成新写的docker_sim专属胶水包（不是从任何上游
+#    移植来的），含三个一次性/长驻节点：
+#      - goal_to_poscmd：把mighty的Goal转成px4ctrl吃的PositionCommand
+#      - px4_param_relax：放宽PX4失控保护参数，从ros2_px4_stack_dynus.patch
+#        里的_set_px4_param()/_kick_offboard()抽出来独立成一次性节点，
+#        两个板外控制器都能复用，不跟哪个offboard follower类绑死
+#      - takeoff_gate：等/tmp/takeoff_go口令文件触发起飞，跟
+#        ros2_px4_stack_takeoff_gate.patch是同一个操作习惯
+#    集成launch文件 px4ctrl_bridge/launch/px4ctrl_docker_sim.launch.py 把
+#    上面三个节点+px4ctrl_node一起用namespace=${NAMESPACE} launch，mass/
+#    悬停油门通过VEHICLE_MASS_KG/VEHICLE_HOVER_THRUST环境变量覆盖（跟
+#    ros2_px4_stack读的是同一份，不会出现两个控制器数字不同步）。
+#    需要 dynus_interfaces（goal_to_poscmd依赖），已经是mighty_ws的一部分，
+#    这里 source mighty_ws/install/setup.bash 复用，不用重新拉取/编译。
+# ============================================================
+COPY vendor/px4ctrl_ros2 /opt/px4ctrl_ws/src/px4ctrl_ros2
+COPY patches/px4ctrl_ros2_namespace.patch /tmp/
+RUN cd /opt/px4ctrl_ws/src/px4ctrl_ros2 \
+    && (git apply --check /tmp/px4ctrl_ros2_namespace.patch && git apply /tmp/px4ctrl_ros2_namespace.patch \
+        || echo "!! px4ctrl_ros2_namespace.patch 未能自动应用，需人工核对后手动改 px4ctrl/src/px4ctrl_node.cpp !!")
+COPY src/px4ctrl_bridge /opt/px4ctrl_ws/src/px4ctrl_bridge
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && source /opt/mighty_ws/install/setup.bash \
+    && cd /opt/px4ctrl_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 5. 统一飞机物理参数配置（对应《专项报告：飞机物理参数配置问题》里的建议——
 #    mass/f_min/f_max/drone_bbox 等不再分散硬编码，容器启动时用同一份yaml覆盖）
 # ============================================================
 COPY config/vehicle_profile.yaml /opt/config/vehicle_profile.yaml

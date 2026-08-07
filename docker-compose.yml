@@ -124,7 +124,14 @@ services:
                                   # 修过3次的数值不稳定bug，只是ros2_px4_stack这边的
                                   # Python实现从没被审查过——已改回trajectory，attitude
                                   # 模式在这个bug修好、重新验证之前不要再当默认用，
-                                  # 见README"CONTROL_LAW=attitude模式排查"一节。
+                                  # 见README"CONTROL_LAW=attitude模式排查"一节。仅在
+                                  # CONTROLLER=ros2_px4_stack时生效。
+      - CONTROLLER=${CONTROLLER:-ros2_px4_stack}  # ros2_px4_stack=现状不变，唯一
+                                  # 经过仿真验证的板外控制器。px4ctrl=2026-08-07刚
+                                  # 完成的ROS2(Humble)移植版，只做过编译+启动冒烟
+                                  # 测试，还没接真实MAVROS/PX4跑完整流程，先当实验性
+                                  # 选项，见README"px4ctrl ROS2(Humble)移植完成"一节。
+                                  # 两架飞机必须给一样的值。
       # ------ 规划/避障/控制重要参数（flight-stack-entrypoint.sh 现算一份
       # vehicle_profile覆盖yaml传给mighty，改这里数字不用重新build镜像，改完
       # 重新up容器就生效）。默认值等于当前hw_mighty.yaml里实际生效的数字，不设
@@ -167,6 +174,8 @@ services:
       - NUM_AGENTS=2
       - LOCALIZATION_SOURCE=dlio  # 两架飞机要保持一致，别一个dlio一个gt
       - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # 同上，两架飞机必须保持一致，
+                                  # 见flight-stack-nx01那边的完整注释
+      - CONTROLLER=${CONTROLLER:-ros2_px4_stack}  # 同上，两架飞机必须保持一致，
                                   # 见flight-stack-nx01那边的完整注释
       # 规划/避障/控制参数——必须跟flight-stack-nx01那边给一样的值，见那边的完整注释
       - V_MAX=${V_MAX:-1.0}

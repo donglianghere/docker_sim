@@ -1,0 +1,56 @@
+diff --git a/launch/dynus_mavros.launch.py b/launch/dynus_mavros.launch.py
+index febcde8..1844975 100644
+--- a/launch/dynus_mavros.launch.py
++++ b/launch/dynus_mavros.launch.py
+@@ -14,19 +14,20 @@ def generate_launch_description():
+     # trajectory（默认）走位置/速度/加速度轨迹，attitude走微分平坦度姿态直控。
+     # entrypoint 脚本里 export CONTROL_LAW（默认trajectory），这里读出来传给节点参数。
+     control_law = os.environ.get("CONTROL_LAW", "trajectory")
++    # CONTROLLER=px4ctrl时，flight-stack-entrypoint.sh会额外export
++    # RUN_OFFBOARD_FOLLOWER=false——这个launch文件本来把"发setpoint给PX4的
++    # track_dynus_traj节点"和"repub_odom/mocap_to_livox_frame/静态TF"这些
++    # 跟具体走哪个板外控制器无关的职责捆在同一个LaunchDescription里，两者
++    # 现在要能分开：px4ctrl接管发setpoint这部分职责时，track_dynus_traj必须
++    # 停摆（不然两边同时喊mavros/setpoint_raw/attitude、mavros/cmd/arming，
++    # 谁的指令生效完全看竞态），但repub_odom这些跟controller无关的部分要
++    # 继续跑（px4ctrl自己不做DLIO里程计到mavros/vision_pose_cov的转发）。
++    run_offboard_follower = os.environ.get("RUN_OFFBOARD_FOLLOWER", "true").lower() != "false"
+ 
+-    return LaunchDescription([
+-        # Declare launch arguments
+-        DeclareLaunchArgument('argname', default_value='val'),
+-        DeclareLaunchArgument('hostname', default_value='nuc6'),
+-        DeclareLaunchArgument('tgt_system', default_value='1.1'),
+-        DeclareLaunchArgument('ns', default_value=EnvironmentVariable("VEH_NAME")),
+-        DeclareLaunchArgument('fcu_url', default_value='/dev/ttyACM0:921600'),
+-        DeclareLaunchArgument('respawn_mavros', default_value='false'),
+-        DeclareLaunchArgument('odom_type', default_value='livox'),
+-
++    nodes = []
++    if run_offboard_follower:
+         # Run dynus node
+-        Node(
++        nodes.append(Node(
+             package='ros2_px4_stack',
+             executable='track_dynus_traj',
+             name='track_dynus_traj_py',
+@@ -35,8 +36,18 @@ def generate_launch_description():
+             parameters=[{
+                 'control_law': control_law,
+             }],
+-        ),
++        ))
+ 
++    return LaunchDescription([
++        # Declare launch arguments
++        DeclareLaunchArgument('argname', default_value='val'),
++        DeclareLaunchArgument('hostname', default_value='nuc6'),
++        DeclareLaunchArgument('tgt_system', default_value='1.1'),
++        DeclareLaunchArgument('ns', default_value=EnvironmentVariable("VEH_NAME")),
++        DeclareLaunchArgument('fcu_url', default_value='/dev/ttyACM0:921600'),
++        DeclareLaunchArgument('respawn_mavros', default_value='false'),
++        DeclareLaunchArgument('odom_type', default_value='livox'),
++    ] + nodes + [
+         # Static transforms
+         # 只保留 world_mocap -> {veh}/init_pose 这一条——mocap_to_livox_frame.py
+         # 的 get_gf_to_af_tf() 真的用 tf2 查了 "{veh}/init_pose" <-> "world_mocap"，

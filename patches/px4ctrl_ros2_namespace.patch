@@ -1,0 +1,89 @@
+diff --git a/px4ctrl/src/px4ctrl_node.cpp b/px4ctrl/src/px4ctrl_node.cpp
+index 36dd6f4..c918d68 100644
+--- a/px4ctrl/src/px4ctrl_node.cpp
++++ b/px4ctrl/src/px4ctrl_node.cpp
+@@ -24,22 +24,25 @@ public:
+ 		fsm_ = std::make_unique<PX4CtrlFSM>(param_, *controller_, this);
+ 
+ 		// ---- 订阅 ----
+-		// 原ROS1版本"odom"/"cmd"是挂在私有命名空间nh("~")下的相对话题名，
+-		// 靠launch文件里的<remap from="~odom" to="..."/>决定实际话题；
+-		// ROS2里普通相对名(不带~/前缀)是相对"节点所在namespace"解析，效果
+-		// 上跟launch里用remappings=[('odom','...')]是等价的，配套的ROS2
+-		// launch文件(run_ctrl.launch.py)里就是这么remap的。
+-		// "/mavros/xxx"这些保留原版的绝对路径写法，这是跟上游行为保持
+-		// 一致的忠实移植；等后续要接入docker_sim双机(NX01/NX02)namespace
+-		// 隔离时，这批话题需要去掉开头的"/"改成相对名，那是集成阶段的
+-		// 工作，不在这次移植范围内（README里已经记录了这个待办）。
++		// docker_sim双机(NX01/NX02)集成：这个节点会以 namespace=${NAMESPACE}
++		// launch（跟mighty/ros2_px4_stack/DLIO同样的方式），MAVROS自己是以
++		// namespace=${NAMESPACE}/mavros launch的（见flight-stack-entrypoint.sh），
++		// 所以这里全部改成相对话题名"mavros/xxx"（不带开头"/"），在节点
++		// namespace=NX01下会自动解析成"/NX01/mavros/xxx"，正好跟MAVROS的
++		// 实际namespace对上——这个写法照抄了ros2_px4_stack自己的
++		// base_mavros_interface.py（"mavros/state"等同样是相对名）,是这个
++		// 项目里两个板外控制器统一遵守的既有规范，不是我自己拍脑袋定的。
++		// "odom"/"cmd"/"takeoff_land"本来就是相对名，继续在launch文件里
++		// remap到具体话题。"/traj_start_trigger"/"/debugPx4ctrl"这两个
++		// 纯调试/衔接话题也一并去掉开头"/"，避免多机场景下两架飞机互相
++		// 覆盖对方发布的调试话题。
+ 		state_sub_ = create_subscription<mavros_msgs::msg::State>(
+-			"/mavros/state", 10,
++			"mavros/state", 10,
+ 			[this](const mavros_msgs::msg::State::ConstSharedPtr msg)
+ 			{ fsm_->state_data.feed(msg); });
+ 
+ 		extended_state_sub_ = create_subscription<mavros_msgs::msg::ExtendedState>(
+-			"/mavros/extended_state", 10,
++			"mavros/extended_state", 10,
+ 			[this](const mavros_msgs::msg::ExtendedState::ConstSharedPtr msg)
+ 			{ fsm_->extended_state_data.feed(msg); });
+ 
+@@ -72,7 +75,7 @@ public:
+ 		// `ros2 topic info --verbose`实测确认mavros2的imu/data发布端
+ 		// QoS，这里是照配的，不是猜的。
+ 		imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+-			"/mavros/imu/data", // Note: do NOT change it to /mavros/imu/data_raw !!!
++			"mavros/imu/data", // Note: do NOT change it to mavros/imu/data_raw !!!
+ 			rclcpp::SensorDataQoS(),
+ 			[this](const sensor_msgs::msg::Imu::ConstSharedPtr msg)
+ 			{ fsm_->imu_data.feed(msg); });
+@@ -85,7 +88,7 @@ public:
+ 		if (!param_.takeoff_land.no_RC) // mavros will still publish wrong rc messages although no RC is connected
+ 		{
+ 			rc_sub_ = create_subscription<mavros_msgs::msg::RCIn>(
+-				"/mavros/rc/in", 10,
++				"mavros/rc/in", 10,
+ 				[this](const mavros_msgs::msg::RCIn::ConstSharedPtr msg)
+ 				{ fsm_->rc_data.feed(msg); });
+ 		}
+@@ -94,7 +97,7 @@ public:
+ 		// 能看到跟imu/data一模一样的"offering incompatible QoS"警告），
+ 		// 一并改掉，即使battery本身不直接参与控制律、不是这次事故的主因。
+ 		bat_sub_ = create_subscription<sensor_msgs::msg::BatteryState>(
+-			"/mavros/battery", rclcpp::SensorDataQoS(),
++			"mavros/battery", rclcpp::SensorDataQoS(),
+ 			[this](const sensor_msgs::msg::BatteryState::ConstSharedPtr msg)
+ 			{ fsm_->bat_data.feed(msg); });
+ 
+@@ -104,14 +107,14 @@ public:
+ 			{ fsm_->takeoff_land_data.feed(msg); });
+ 
+ 		// ---- 发布 ----
+-		fsm_->ctrl_FCU_pub = create_publisher<mavros_msgs::msg::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
+-		fsm_->traj_start_trigger_pub = create_publisher<geometry_msgs::msg::PoseStamped>("/traj_start_trigger", 10);
+-		fsm_->debug_pub = create_publisher<quadrotor_msgs::msg::Px4ctrlDebug>("/debugPx4ctrl", 10); // debug
++		fsm_->ctrl_FCU_pub = create_publisher<mavros_msgs::msg::AttitudeTarget>("mavros/setpoint_raw/attitude", 10);
++		fsm_->traj_start_trigger_pub = create_publisher<geometry_msgs::msg::PoseStamped>("traj_start_trigger", 10);
++		fsm_->debug_pub = create_publisher<quadrotor_msgs::msg::Px4ctrlDebug>("debugPx4ctrl", 10); // debug
+ 
+ 		// ---- 服务客户端 ----
+-		fsm_->set_FCU_mode_srv = create_client<mavros_msgs::srv::SetMode>("/mavros/set_mode");
+-		fsm_->arming_client_srv = create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
+-		fsm_->reboot_FCU_srv = create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
++		fsm_->set_FCU_mode_srv = create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
++		fsm_->arming_client_srv = create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
++		fsm_->reboot_FCU_srv = create_client<mavros_msgs::srv::CommandLong>("mavros/cmd/command");
+ 	}
+ 
+ 	PX4CtrlFSM &fsm() { return *fsm_; }

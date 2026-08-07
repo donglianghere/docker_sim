@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>px4ctrl_bridge</name>
+  <version>0.0.0</version>
+  <description>
+    docker_sim项目专用：把mighty规划器接到px4ctrl(ROS2版)所需的三个辅助节点
+    （Goal-&gt;PositionCommand消息桥接、PX4失控保护参数放宽、起飞口令闸门）。
+    这几个节点跟px4ctrl核心控制算法无关，是本项目集成层的胶水代码，不属于
+    px4ctrl_ros2那份通用移植的范围，因此单独成包放在docker_sim/staging下。
+  </description>
+  <maintainer email="robots@todo.todo">robots</maintainer>
+  <license>GPLv3</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <exec_depend>dynus_interfaces</exec_depend>
+  <exec_depend>quadrotor_msgs</exec_depend>
+  <exec_depend>mavros_msgs</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
