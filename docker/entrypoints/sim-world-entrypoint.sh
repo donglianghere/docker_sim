@@ -6,6 +6,19 @@
 #   USE_GAZEBO_GUI  默认 false（容器里没有桌面就别开GUI，除非你转发了X11）
 #   USE_RVIZ        默认 true，起RViz2看点云/建图（NX01/NX02双机命名空间的
 #                   multi_mighty.rviz配置），跟gzclient一样靠DISPLAY/X11转发
+#   PLANNER         默认 mighty，决定用哪份rviz配置——sim-world容器本身跟
+#                   规划器选择无关（PX4 SITL/Gazebo两个规划器都要用），
+#                   这个变量纯粹是为了跟flight-stack那边选的PLANNER保持
+#                   一致，选对应的rviz视图。=mighty用multi_mighty.rviz
+#                   （NX01/NX02两个分组默认展开，看mighty自己的建图/轨迹）；
+#                   =ego_planner用multi_ego_planner.rviz（跟multi_mighty.rviz
+#                   基本是同一份，只是默认打开的Display不一样：ego_planner
+#                   相关的occupancy_inflate/goal_point/global_list/
+#                   init_list/optimal_list/a_star_list默认展开，mighty的
+#                   NX01/NX02分组默认收起——两边topic不冲突，只是"默认展开
+#                   哪些"不一样，两份文件都能看到全部内容，只是初始勾选
+#                   状态不同，方便对应场景一打开就是有意义的画面，不用
+#                   每次手动勾选）。
 set -eo pipefail
 
 # ROS2/colcon 生成的 setup.bash 内部会引用一堆没给默认值的变量（比如这里第一个
@@ -54,11 +67,17 @@ USE_GAZEBO_GUI="${USE_GAZEBO_GUI:-false}"
 # 正好能用。跟gzclient共用同一套DISPLAY/X11转发（见docker-compose.yml里
 # sim-world服务的DISPLAY环境变量+/tmp/.X11-unix挂载），不需要额外配置。
 USE_RVIZ="${USE_RVIZ:-true}"
+PLANNER="${PLANNER:-mighty}"
+if [ "${PLANNER}" = "ego_planner" ]; then
+    RVIZ_CONFIG="multi_ego_planner.rviz"
+else
+    RVIZ_CONFIG="multi_mighty.rviz"
+fi
 
-echo "== [sim-world] 启动Gazebo世界 env=${WORLD_ENV} =="
+echo "== [sim-world] 启动Gazebo世界 env=${WORLD_ENV} rviz_config=${RVIZ_CONFIG} =="
 ros2 launch mighty base_mighty.launch.py \
     env:="${WORLD_ENV}" use_gazebo_gui:="${USE_GAZEBO_GUI}" \
-    use_rviz:="${USE_RVIZ}" rviz_config:=multi_mighty.rviz &
+    use_rviz:="${USE_RVIZ}" rviz_config:="${RVIZ_CONFIG}" &
 GAZEBO_PID=$!
 
 # 等Gazebo服务起来再spawn飞机，避免spawn_entity在服务未就绪时报错

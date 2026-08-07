@@ -48,6 +48,11 @@ services:
                                     # 简单得多，先用它把MAVROS/DLIO/规划全流程跑通，
                                     # 森林场景的gzserver崩溃(exit -6)暂不深挖
       - NUM_AGENTS=2
+      - PLANNER=${PLANNER:-mighty}  # 跟flight-stack两边选的PLANNER保持一致，
+                                  # 纯粹用来给sim-world-entrypoint.sh选对应的
+                                  # rviz配置（multi_mighty.rviz/
+                                  # multi_ego_planner.rviz），sim-world本身
+                                  # 不跑规划器、不受这个值影响别的行为。
       - USE_GAZEBO_GUI=true
       - DISPLAY=${DISPLAY}
       - NVIDIA_VISIBLE_DEVICES=all
