@@ -78,7 +78,16 @@ echo "############################################"
 clone_pin ros2px4 https://github.com/kotakondo/ros2_px4_stack.git ros2_px4_stack dynus
 
 echo "############################################"
-echo "# 5. hospital/office/tunnel 三个world依赖的  #"
+echo "# 5. ego-planner-swarm（ZJU-FAST-Lab, ROS2分支）#"
+echo "#    只用其中src/planner的规划器核心，Dockerfile #"
+echo "#    COPY时只挑src/planner，不带src/uav_simulator#"
+echo "#    （跟mighty_ws_src/uav_simulator同源，13个   #"
+echo "#    包名重复，规划器核心本身不依赖它）           #"
+echo "############################################"
+clone_pin egoplanner https://github.com/ZJU-FAST-Lab/ego-planner-swarm.git ego-planner-swarm 23a8d5a191711dd65633df689bd00f55d4dea8f9
+
+echo "############################################"
+echo "# 6. hospital/office/tunnel 三个world依赖的  #"
 echo "#    外部Gazebo模型资产（体积较大，选做）     #"
 echo "############################################"
 clone_pin gz_assets https://github.com/aws-robotics/aws-robomaker-hospital-world.git gazebo_models_external/aws-robomaker-hospital-world ros1

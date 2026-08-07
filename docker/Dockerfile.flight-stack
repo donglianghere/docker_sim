@@ -601,7 +601,68 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ============================================================
-# 5. 统一飞机物理参数配置（对应《专项报告：飞机物理参数配置问题》里的建议——
+# 5. ego-planner-swarm（ZJU-FAST-Lab, ros2_version分支）规划器核心
+#    + ego_planner_bridge（docker_sim专属launch文件）
+#    跟mighty是"二选一"的规划器，通过PLANNER环境变量在
+#    flight-stack-entrypoint.sh里切换（默认仍是PLANNER=mighty，现状
+#    不变）。只用src/planner下6个规划器核心包（path_searching/
+#    bspline_opt/plan_env/traj_utils/drone_detect/ego_planner），不带
+#    src/uav_simulator——那批辅助包（quadrotor_msgs/uav_utils/
+#    pose_utils等13个）跟mighty_ws_src/uav_simulator同源，包名完全
+#    重复，规划器核心本身经查证完全不依赖它们，不COPY进来冲突自动
+#    消失（详见docker_sim/README.md"ego-planner-swarm跟mighty的依赖
+#    冲突排查"一节）。src/planner下还带一个rosmsg_tcp_bridge（给没有
+#    共享ROS网络的真实多机部署用的TCP/UDP转发桥），docker-compose这
+#    两个容器天然在同一个网络里、DDS广播直接就能用（跟mighty自己的
+#    集群协同、/broadcast_bspline全局话题是同一个道理），这个包用不上，
+#    --packages-skip跳过不编译。
+#
+#    quadrotor_msgs硬性要求：不能用ego-planner自己vendor的那份（没有
+#    jerk字段），underlay必须先source px4ctrl_ws/install，让plan_manage
+#    (ego_planner包)的find_package(quadrotor_msgs)解析到px4ctrl_ros2
+#    那份（有jerk字段）——traj_server发布、px4ctrl_node订阅的必须是
+#    编译时同一份.msg定义，否则字段布局不一致DDS序列化会对不上。
+#
+#    patches/ego_planner_traj_server_relative_poscmd.patch：traj_server.cpp
+#    原本硬编码发布到绝对话题"/position_cmd"（不是相对名），双机场景
+#    两架飞机会发到同一个全局话题互相打架——跟当初
+#    px4ctrl_ros2_namespace.patch解决的是同一类问题，改成相对名
+#    "position_cmd"配合下面launch文件的namespace=${NAMESPACE}自动按机
+#    分开；顺带给cmd.jerk补上赋值（B样条本身能算三阶导，原代码没有
+#    填这个字段）。COPY后目录结构是/opt/ego_planner_ws/src/plan_manage/...
+#    （src/planner这一层被COPY语义拍平了），patch文件里的路径还是原始仓库
+#    的src/planner/plan_manage/...，所以要用-p3多剥3层（a/、src/、
+#    planner/）才能对上，实测确认过路径对得上。
+#
+#    ego_planner_bridge是这次集成新写的docker_sim专属胶水包（纯launch
+#    文件，没有自己的节点代码），把ego_planner_node+traj_server用
+#    namespace=${NAMESPACE}一起启动，remap grid_map/cloud→
+#    mid360_PointCloud2、grid_map/odom和odom_world→dlio/odom_node/odom，
+#    /move_base_simple/goal→相对名goal_pose（fsm/flight_type用
+#    MANUAL_TARGET，运行时对每架飞机各自的.../goal_pose发PoseStamped
+#    触发飞行，而不是原launch文件默认的PRESET_TARGET硬编码航点列表）。
+#    drone_id参数（区分/broadcast_bspline全局话题上"自己"和"别人"的
+#    轨迹，跟namespace是两件独立的事）从DRONE_ID环境变量读，manager/
+#    drone_id、地图尺寸、动力学限制等参数原样照抄自ego-planner-swarm
+#    自己的advanced_param.launch.py，未经实机/仿真实测调参。
+# ============================================================
+COPY staging/ego-planner-swarm/src/planner /opt/ego_planner_ws/src
+COPY patches/ego_planner_traj_server_relative_poscmd.patch /tmp/
+RUN cd /opt/ego_planner_ws/src \
+    && (git apply -p3 --check /tmp/ego_planner_traj_server_relative_poscmd.patch \
+        && git apply -p3 /tmp/ego_planner_traj_server_relative_poscmd.patch \
+        || echo "!! ego_planner_traj_server_relative_poscmd.patch 未能自动应用，需人工核对后手动改 plan_manage/src/traj_server.cpp !!")
+COPY src/ego_planner_bridge /opt/ego_planner_ws/src/ego_planner_bridge
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && source /opt/mighty_ws/install/setup.bash \
+    && source /opt/px4ctrl_ws/install/setup.bash \
+    && cd /opt/ego_planner_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --packages-skip rosmsg_tcp_bridge \
+       --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 6. 统一飞机物理参数配置（对应《专项报告：飞机物理参数配置问题》里的建议——
 #    mass/f_min/f_max/drone_bbox 等不再分散硬编码，容器启动时用同一份yaml覆盖）
 # ============================================================
 COPY config/vehicle_profile.yaml /opt/config/vehicle_profile.yaml

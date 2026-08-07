@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ego_planner_bridge</name>
+  <version>0.0.0</version>
+  <description>
+    docker_sim项目专用：把ego-planner-swarm的规划器核心（ego_planner_node+
+    traj_server）接到DLIO/Gazebo点云里程计和px4ctrl(ROS2版)所需的launch文件。
+    不含任何自己的节点代码，纯粹是参数/remap的集成层，跟px4ctrl_bridge的
+    定位类似——ego_planner_node/traj_server本身来自staging/ego-planner-swarm，
+    不属于这个包。
+  </description>
+  <maintainer email="robots@todo.todo">robots</maintainer>
+  <license>GPLv3</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ego_planner</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

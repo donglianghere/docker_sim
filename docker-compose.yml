@@ -132,6 +132,13 @@ services:
                                   # 测试，还没接真实MAVROS/PX4跑完整流程，先当实验性
                                   # 选项，见README"px4ctrl ROS2(Humble)移植完成"一节。
                                   # 两架飞机必须给一样的值。
+      - PLANNER=${PLANNER:-mighty}  # mighty=现状不变。ego_planner=集成
+                                  # ego-planner-swarm的规划器核心，只设计成配合
+                                  # CONTROLLER=px4ctrl（没有对接ros2_px4_stack的
+                                  # 桥接逻辑），还没实测飞过，见README"ego-planner-swarm
+                                  # 集成方案"一节。两架飞机必须给一样的值，不然
+                                  # 一台mighty一台ego_planner会导致/broadcast_bspline
+                                  # 那套机间防撞互相看不到对方轨迹。
       # ------ 规划/避障/控制重要参数（flight-stack-entrypoint.sh 现算一份
       # vehicle_profile覆盖yaml传给mighty，改这里数字不用重新build镜像，改完
       # 重新up容器就生效）。默认值等于当前hw_mighty.yaml里实际生效的数字，不设
@@ -177,6 +184,8 @@ services:
                                   # 见flight-stack-nx01那边的完整注释
       - CONTROLLER=${CONTROLLER:-ros2_px4_stack}  # 同上，两架飞机必须保持一致，
                                   # 见flight-stack-nx01那边的完整注释
+      - PLANNER=${PLANNER:-mighty}  # 同上，两架飞机必须保持一致，见flight-stack-nx01
+                                  # 那边的完整注释
       # 规划/避障/控制参数——必须跟flight-stack-nx01那边给一样的值，见那边的完整注释
       - V_MAX=${V_MAX:-1.0}
       - A_MAX=${A_MAX:-3.0}

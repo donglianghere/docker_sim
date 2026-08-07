@@ -34,6 +34,22 @@
 #                   goal_to_poscmd+px4_param_relax+takeoff_gate，但
 #                   repub_odom/mocap_to_livox_frame/静态TF这些和"发setpoint"
 #                   无关的职责继续由dynus_mavros.launch.py提供，不重复实现。
+#   PLANNER         默认 mighty（现状不变）。可选 ego_planner——
+#                   ego-planner-swarm的规划器核心（ego_planner_node+
+#                   traj_server），只用其自身建图+B样条优化，前端接
+#                   DLIO/Gazebo（跟mighty吃的是同一个dlio/odom_node/odom
+#                   和mid360_PointCloud2），后端直接发px4ctrl_ros2吃的
+#                   PositionCommand（相对话题名position_cmd），不经过
+#                   px4ctrl_bridge的goal_to_poscmd转换桥（那是给mighty的
+#                   Goal消息转的，ego_planner原生发的就是PositionCommand）。
+#                   两者是"二选一"的规划器：mighty模式下正常起
+#                   mighty_node+global_mapper_ros(+雷达TF别名)；ego_planner
+#                   模式下改起ego_planner_bridge这个launch文件，不重复
+#                   订阅点云/odom也不重复给px4ctrl发指令。ego_planner这条
+#                   链路目前只设计成跟CONTROLLER=px4ctrl配合（没有对接
+#                   ros2_px4_stack的桥接逻辑），两者不匹配时只打个警告，
+#                   不强制阻止（万一以后要单独调试ego_planner本身，不接
+#                   真实控制器也能起）。
 set -eo pipefail
 
 # ROS2/colcon 生成的 setup.bash 内部会引用一堆没给默认值的变量（比如这里第一个
@@ -47,6 +63,7 @@ source /opt/mighty_ws/install/setup.bash
 source /opt/dlio_ws/install/setup.bash
 source /opt/ros2_px4_stack_ws/install/setup.bash
 source /opt/px4ctrl_ws/install/setup.bash
+source /opt/ego_planner_ws/install/setup.bash
 set -u
 
 : "${NAMESPACE:?必须设置 NAMESPACE，如 NX01}"
@@ -168,6 +185,18 @@ else
     export RUN_OFFBOARD_FOLLOWER="true"
 fi
 echo "== [flight-stack:${NAMESPACE}] CONTROLLER=${CONTROLLER} (RUN_OFFBOARD_FOLLOWER=${RUN_OFFBOARD_FOLLOWER}) =="
+
+export PLANNER="${PLANNER:-mighty}"
+# calcSwarmCost用来在共享的/broadcast_bspline全局话题上区分"自己"和"别人"
+# 轨迹的ID，两架飞机必须不同——直接从已经存在的AGENT_INDEX(1-based)推导成
+# 0-based，不用再额外要求docker-compose.yml传一个新的环境变量、也不会跟
+# AGENT_INDEX不同步。仍然留了覆盖口子，万一以后需要手动指定。
+export DRONE_ID="${DRONE_ID:-$((AGENT_INDEX - 1))}"
+echo "== [flight-stack:${NAMESPACE}] PLANNER=${PLANNER} (drone_id=${DRONE_ID}) =="
+if [ "${PLANNER}" = "ego_planner" ] && [ "${CONTROLLER}" != "px4ctrl" ]; then
+    echo "!! [flight-stack:${NAMESPACE}] 警告：PLANNER=ego_planner目前只设计成配合CONTROLLER=px4ctrl，"
+    echo "!! 当前CONTROLLER=${CONTROLLER}，ego_planner发的position_cmd没有任何节点会订阅，飞机不会动 !!"
+fi
 if [ "${LOCALIZATION_SOURCE}" = "gt" ]; then
     echo "== [flight-stack:${NAMESPACE}] 定位模式=gt：跳过DLIO，改用Gazebo仿真真值 (gt_odom_bridge) =="
     ros2 run gt_odom_bridge gt_odom_bridge_node \
@@ -195,6 +224,7 @@ echo "== [flight-stack:${NAMESPACE}] 启动 name_label_node（RViz里头顶跟�
 ros2 run gt_odom_bridge name_label_node \
     --ros-args -r __ns:="/${NAMESPACE}" &
 
+if [ "${PLANNER}" = "mighty" ]; then
 echo "== [flight-stack:${NAMESPACE}] 启动 mighty（含 use_frame_alignment/num_agents）=="
 # `ros2 launch` 不支持裸的 --params-file（那是 `ros2 run` 的语法）；改用
 # vehicle_profile:= 这个 launch 参数——patches/mighty_onboard_vehicle_profile.patch
@@ -276,6 +306,21 @@ ros2 launch global_mapper_ros global_mapper_node.launch.py \
     global_frame:="${NAMESPACE}/map" drone_frame:="${NAMESPACE}/lidar" \
     depth_pointcloud_topic:=mid360_PointCloud2 pose_topic:=state &
 sleep 2
+
+elif [ "${PLANNER}" = "ego_planner" ]; then
+echo "== [flight-stack:${NAMESPACE}] 启动 ego_planner（ego-planner-swarm规划器核心，drone_id=${DRONE_ID}）=="
+# 前端直接吃dlio/odom_node/odom + mid360_PointCloud2（跟mighty同一份数据源，
+# 不需要global_mapper_ros把点云先转成occupancy_grid——ego_planner自己的
+# plan_env/grid_map.cpp内部维护一份occupancy grid，直接消费原始点云），
+# 也不需要NX01/lidar->NX01/NX01_livox那条TF别名（global_mapper_ros才用得到，
+# ego_planner的grid_map.cpp不做任何TF lookup，纯粹靠odom位姿+点云）。
+# 后端发相对话题名position_cmd（ego_planner_traj_server_relative_poscmd.patch
+# 打过），px4ctrl_bridge那边用cmd->position_cmd的remap接住（见下面）。
+ros2 launch ego_planner_bridge ego_planner_docker_sim.launch.py \
+    namespace:="${NAMESPACE}" drone_id:="${DRONE_ID}" &
+sleep 2
+
+fi
 
 echo "== [flight-stack:${NAMESPACE}] 启动 ros2_px4_stack 支撑节点 (repub_odom/mocap_to_livox_frame/静态TF；RUN_OFFBOARD_FOLLOWER=${RUN_OFFBOARD_FOLLOWER}时一并起track_dynus_traj) =="
 ros2 launch ros2_px4_stack dynus_mavros.launch.py \

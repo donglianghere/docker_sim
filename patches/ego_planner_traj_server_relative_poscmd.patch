@@ -1,0 +1,61 @@
+diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
+index a32026d..66057fa 100755
+--- a/src/planner/plan_manage/src/traj_server.cpp
++++ b/src/planner/plan_manage/src/traj_server.cpp
+@@ -62,6 +62,7 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
+   traj_.push_back(pos_traj);
+   traj_.push_back(traj_[0].getDerivative());
+   traj_.push_back(traj_[1].getDerivative());
++  traj_.push_back(traj_[2].getDerivative()); // jerk，喂给px4ctrl_ros2的PositionCommand.jerk字段
+ 
+   traj_duration_ = traj_[0].getTimeSum();
+ 
+@@ -171,7 +172,7 @@ void cmdCallback()
+   rclcpp::Time time_now = clock.now();
+   double t_cur = (time_now - start_time_).seconds();
+ 
+-  Eigen::Vector3d pos(Eigen::Vector3d::Zero()), vel(Eigen::Vector3d::Zero()), acc(Eigen::Vector3d::Zero()), pos_f;
++  Eigen::Vector3d pos(Eigen::Vector3d::Zero()), vel(Eigen::Vector3d::Zero()), acc(Eigen::Vector3d::Zero()), jerk(Eigen::Vector3d::Zero()), pos_f;
+   std::pair<double, double> yaw_yawdot(0, 0);
+ 
+   static rclcpp::Time time_last = clock.now();
+@@ -180,6 +181,7 @@ void cmdCallback()
+     pos = traj_[0].evaluateDeBoorT(t_cur);
+     vel = traj_[1].evaluateDeBoorT(t_cur);
+     acc = traj_[2].evaluateDeBoorT(t_cur);
++    jerk = traj_[3].evaluateDeBoorT(t_cur);
+ 
+     /*** calculate yaw ***/
+     yaw_yawdot = calculate_yaw(t_cur, pos, time_now, time_last);
+@@ -194,6 +196,7 @@ void cmdCallback()
+     pos = traj_[0].evaluateDeBoorT(traj_duration_);
+     vel.setZero();
+     acc.setZero();
++    jerk.setZero();
+ 
+     yaw_yawdot.first = last_yaw_;
+     yaw_yawdot.second = 0;
+@@ -223,6 +226,10 @@ void cmdCallback()
+   cmd.acceleration.y = acc(1);
+   cmd.acceleration.z = acc(2);
+ 
++  cmd.jerk.x = jerk(0);
++  cmd.jerk.y = jerk(1);
++  cmd.jerk.z = jerk(2);
++
+   cmd.yaw = yaw_yawdot.first;
+   cmd.yaw_dot = yaw_yawdot.second;
+ 
+@@ -241,8 +248,11 @@ int main(int argc, char **argv)
+       10,
+       bsplineCallback);
+ 
++  // docker_sim: 改成相对话题名，配合namespace=${NAMESPACE}按机分开，
++  // 避免双机场景下两架飞机的traj_server都发到同一个全局/position_cmd
++  // （跟px4ctrl_ros2_namespace.patch解决的是同一类问题）
+   pos_cmd_pub = node->create_publisher<quadrotor_msgs::msg::PositionCommand>(
+-      "/position_cmd",
++      "position_cmd",
+       50);
+ 
+   auto cmd_timer = node->create_wall_timer(
