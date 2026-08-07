@@ -5800,3 +5800,46 @@ flight-stack-nx02`（不是`up -d`——`up -d`会重新创建容器、把`docke
 inflation改大之后还是不够（比如窄通道场景下软约束还是会被优化器"讨价
 还价"掉），下一个可以调的旋钮是`optimization/lambda_collision`（当前
 0.5，跟`lambda_smooth`同权重，可以调大让避障在代价函数里的话语权更重）。
+
+## 补上专门的ego_planner rviz配置，不再是共享文件里手动勾选（2026-08-08）
+
+用户指出：ego-planner-swarm没有自己的rviz，选它的时候应该换一份rviz文件、
+或者改mighty的rviz文件——之前那次修复（`mighty_rviz_ego_planner_displays.patch`）
+只是往`multi_mighty.rviz`里加了12个默认`Enabled: false`的Display，没有真正
+做到"选规划器自动换视图"，每次切换还要手动在RViz左侧面板勾掉/勾上一堆
+checkbox，体验不好，而且mighty自己的NX01/NX02分组默认还是打开的（没数据、
+空转，占地方）。
+
+新增`patches/mighty_rviz_ego_planner_config.patch`，新增
+`rviz/multi_ego_planner.rviz`——`multi_mighty.rviz`的完整复制版，只翻转
+两处默认值：12个EGO Display默认`Enabled: true`，`NX01`/`NX02`两个mighty
+自己的顶层Group默认`Enabled: false`（用python yaml解析确认过，不是肉眼
+数缩进——之前手动改的时候踩过一次坑：想改`NX01`分组的Enabled，结果
+`old_string`匹配到的是文件最前面那个不相关的Grid/TF工具分组，而且因为
+同一个YAML映射里插入了第二个`Enabled`键，PyYAML解析时后面出现的原始
+`Enabled: true`会覆盖掉我插入的`Enabled: false`，表面上看`git apply`能
+应用成功，实际内容是错的——这次改用`ros2 topic list`那种"live验证"的
+同一个思路，用`python3 -c "import yaml..."`把整个文件解析成dict，逐条
+打印每个顶层Display的`Name`+`Enabled`核对，才发现并改对了真正的
+`NX01`/`NX02`分组，改完再解析一次确认结果）。两份rviz文件内容上完全没有
+冲突（同样的话题，只是默认展开的不一样），谁都能在RViz里重新勾选看到
+全部内容，只是"打开就是有意义的画面"这一点两份文件不一样。
+
+`sim-world`容器本身不跑规划器（Gazebo+PX4 SITL两个规划器都要用，跟
+`PLANNER`没关系），但`sim-world-entrypoint.sh`现在也读`PLANNER`环境变量
+（`docker-compose.yml`给sim-world服务也加了`PLANNER=${PLANNER:-mighty}`
+透传），纯粹用来决定传给`base_mighty.launch.py`现成的`rviz_config:=`
+参数（`mighty_rviz_config_arg.patch`早就加好的override入口）该用哪份
+文件名，不影响其他任何行为。
+
+**验证过的**：模拟完整sim-world补丁序列（20个patch按declare顺序全部跑一遍）
+确认这次新patch能正常应用，两份rviz文件都能被`yaml.safe_load`正常解析，
+`NX01`/`NX02`分组`Enabled=False`、12个EGO Display`Enabled=True`。
+
+**还没验证的**：两份rviz文件都没有真正在RViz2里打开看过渲染效果
+（`Class`字符串、`Topic`的QoS字段格式是照抄现有条目，语法层面能解析不
+代表UI一定正常显示）。这次改动涉及`Dockerfile.sim-world`（新patch）和
+`docker-compose.yml`（sim-world的环境变量），跟`Dockerfile.flight-stack`
+是两个不同的镜像——重新验证需要**两个镜像都重新build**
+（`docker compose build sim-world` + `docker compose build flight-stack-nx01`），
+不是只build flight-stack那一个就够。
