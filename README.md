@@ -5713,3 +5713,53 @@ rviz配置、`/term_goal`话题要统一、`status_monitor.py`里规划器名字
 重新build，`LOCALIZATION_SOURCE=dlio`（不是gt），先单机验证`deskewed`
 话题有数据、grid_map能建出跟柱子位置吻合的occupancy grid，再重新试一次
 NX01发目标点，确认这次会绕开柱子。
+
+## 上一条修复没生效，实测复现还是直接撞墙——真正原因是话题名字打错了（2026-08-07）
+
+重新build、重新起飞、重新发目标点，**还是直接撞墙**，跟第一次症状一样。
+系统当时还在跑（`docker exec`能进），直接查活的数据而不是继续纯读代码猜：
+
+```
+ros2 node info /NX01/ego_planner_node
+```
+`Subscribers`里`grid_map/cloud`实际remap到的`/NX01/dlio/odom_node/deskewed`
+——`ros2 topic list`里根本没有这个话题！真实存在的是
+`/NX01/dlio/odom_node/pointcloud/deskewed`（多一层`pointcloud/`）。上一次
+修复时看DLIO源码`this->deskewed_pub = this->create_publisher<...>("deskewed", 1)`，
+想当然地以为"deskewed"就是直接挂在`odom_node`这个节点命名空间下，没有验证
+实际发布出来的完整话题路径——`create_publisher`的相对名是相对"当前
+publisher所在的sub-namespace"解析的，DLIO内部显然把这个publisher开在了
+"pointcloud"这个子命名空间里，代码读得再仔细也不代表猜的话题路径是对的，
+这次直接`ros2 topic list`核实。
+
+`ros2 topic hz /NX01/dlio/odom_node/pointcloud/deskewed`实测~11.4Hz，
+`frame_id`跟`/NX01/dlio/odom_node/odom`一样都是`NX01/odom`——跟上次的
+根因分析（需要一份已经变换到odom坐标系的点云）完全对得上，只是字符串
+写错了，导致`grid_map/cloud`订阅的是一个从来没人发布的死话题，
+grid_map从头到尾就是空的，规划器等于全程盲飞。改成正确的
+`dlio/odom_node/pointcloud/deskewed`。
+
+**过程中的一个操作事故**：为了不重新build就能立刻验证，往两个容器里
+`docker cp`了修好的launch文件，然后`pkill`掉`ego_planner_bridge`那个
+`ros2 launch`子进程准备重启——结果两个flight-stack容器直接整个退出了。
+根因是`flight-stack-entrypoint.sh`最后一行是`wait -n`（等一堆后台进程
+里任意一个退出），杀掉其中任意一个被这个`wait -n`盯着的子进程，
+`wait -n`就返回、entrypoint脚本自然运行到结尾退出，脚本是容器的PID1，
+脚本退出=容器退出——这套entrypoint的进程监管模型不支持"单独重启某个
+组件"，只能整个容器一起重启（`docker compose up -d`补救，已恢复）。
+以后要验证launch文件改动只能重新build镜像+重启容器，不要指望
+`docker cp`+杀子进程这种热替换方式，会把整个容器带走。
+
+**用户提的架构建议还没做**：ego-planner-swarm的`plan_env/grid_map.cpp`
+的`cloudCallback()`可以学mighty的`global_mapper_ros`，自己订阅原始点云+
+odom，做近距离自身回波过滤+转换到全局坐标，而不是依赖"找DLIO现成发布的
+某个已经变换好的话题"这种做法——后者这次就实际踩了一次"话题路径猜错"的
+坑，前者更健壮、也能补上`LOCALIZATION_SOURCE=gt`模式下没有可用点云源的
+缺口（gt模式下DLIO不跑，没有deskewed这个数据源，但raw点云+gt odom两者都
+在）。这是一次相对大的改动（新写一个小节点，或者改grid_map.cpp本身），
+跟当前这次纯粹"改remap目标"的修复不是同一个量级，先记录用户的建议，
+待讨论要不要做、怎么做。
+
+**还没做的**：这次的topic name修复同样还没有重新build+实测验证过
+（容器事故之后已经用旧镜像重新起来，还没重新build），下一步应该是
+`docker compose build flight-stack-nx01`然后重新起飞验证。
