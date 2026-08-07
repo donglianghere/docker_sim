@@ -5763,3 +5763,40 @@ odom，做近距离自身回波过滤+转换到全局坐标，而不是依赖"�
 **还没做的**：这次的topic name修复同样还没有重新build+实测验证过
 （容器事故之后已经用旧镜像重新起来，还没重新build），下一步应该是
 `docker compose build flight-stack-nx01`然后重新起飞验证。
+
+## 点云话题修好之后确认有数据，还是基本不避障——是obstacles_inflation没算飞机自身尺寸（2026-08-07）
+
+上一条修复之后重新验证：`/NX01/dlio/odom_node/pointcloud/deskewed`确认有
+数据，`ros2 topic echo /NX01/grid_map/occupancy_inflate`也确认有数据——
+点云链路是通的，但飞机还是基本贴着/撞上障碍物飞，没有明显绕开的趋势。
+用户提问"是不是避障参数太小，比如没算飞机尺寸"——查证属实：
+
+- `simple_room`世界里的柱子是半径0.25m的圆柱（
+  `patches/mighty_simple_room_world.patch`：
+  `<cylinder><radius>0.25</radius>`）。
+- 飞机（iris+mid360）的碰撞箱是0.47x0.47x0.11米（半宽0.235米，见
+  `flight-stack-entrypoint.sh`的INIT_Z注释）。
+- `grid_map.cpp`把飞机当成一个点来规划——`obstacles_inflation`是唯一
+  一个负责把"点规划"变回"考虑飞机自身体积"的参数，`ego_planner_docker_sim.launch.py`
+  里原样照抄demo默认值`0.099`，完全没把飞机半宽0.235米算进去：飞机中心
+  刚好贴着膨胀后的占据边界飞（半径0.25+0.099=0.349米）时，机身依然会
+  伸进真实柱子表面0.25-(0.349-0.235)=0.136米——也就是说就算规划器
+  100%遵守膨胀边界这个软约束，飞机本体依然会撞进柱子，跟实测现象完全
+  对得上。
+
+改成`0.35`（0.235半宽+0.115余量）。`optimization/dist0`(=0.5)是在这层
+膨胀之上另加的软代价缓冲，数值本身没问题，不用动。
+
+**这次直接在活的容器上验证过，不是纯改源码就交差**：`docker cp`把改好
+的launch文件塞进两个容器，用`docker compose restart flight-stack-nx01
+flight-stack-nx02`（不是`up -d`——`up -d`会重新创建容器、把`docker cp`
+塞进去的文件冲掉，`restart`是清爽地重启同一个容器、保留容器可写层的内容，
+这是上一次容器事故之后学到的正确做法）。重启后`ros2 param get
+/NX01/ego_planner_node grid_map/obstacles_inflation`确认读到的是`0.35`，
+`ps aux`确认`ego_planner_node`/`traj_server`/`mavros_node`都正常起来了。
+
+**还没做的**：容器只是刚重启完，还没有重新触发起飞、重新发目标点看这次
+是否真的绕开了柱子——下一步需要用户自己起飞+发目标点验证。如果这次
+inflation改大之后还是不够（比如窄通道场景下软约束还是会被优化器"讨价
+还价"掉），下一个可以调的旋钮是`optimization/lambda_collision`（当前
+0.5，跟`lambda_smooth`同权重，可以调大让避障在代价函数里的话语权更重）。
