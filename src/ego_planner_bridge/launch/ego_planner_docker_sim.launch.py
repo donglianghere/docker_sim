@@ -81,6 +81,21 @@ mid-360实际点云质量和飞行空间重新验证），只改了以下几处�
     假设），不会再出现坐标解读不一致的问题。
   - 没有起map_generator/mockamap（那是ego-planner自带demo用来生成
     虚拟障碍物地图的节点，这里用真实Gazebo世界，不需要）。
+  - grid_map/obstacles_inflation从原demo默认的0.099改成0.35。
+    2026-08-07点云话题修好之后（occupancy_inflate确认有数据）实测
+    还是基本不避障，交叉核对发现：simple_room世界里的柱子是半径0.25m
+    的圆柱（见patches/mighty_simple_room_world.patch的
+    `<cylinder><radius>0.25</radius>`），飞机（iris+mid360）的碰撞箱
+    是0.47x0.47x0.11米（半宽0.235米，见flight-stack-entrypoint.sh的
+    INIT_Z注释）——grid_map.cpp把飞机当成一个点来规划，obstacles_inflation
+    是唯一一个负责把"点规划"变回"考虑飞机自身体积"的参数，0.099米
+    完全没把飞机半宽0.235米算进去：飞机中心刚好贴着膨胀后的占据边界
+    飞（半径0.25+0.099=0.349米）时，机身还会伸进真实柱子表面
+    0.25-(0.349-0.235)=0.136米——也就是说就算规划器完全遵守膨胀边界，
+    飞机本体依然会撞进柱子，跟"避障参数太小、没考虑飞机尺寸"这个猜测
+    完全对得上。改成0.35（0.235半宽+0.115余量），
+    optimization/dist0(=0.5)是在这层膨胀之上另加的软惯性代价缓冲，
+    数值本身不用动。
 """
 import os
 
@@ -177,7 +192,7 @@ def generate_launch_description():
             {'grid_map/local_update_range_x': 5.5},
             {'grid_map/local_update_range_y': 5.5},
             {'grid_map/local_update_range_z': 4.5},
-            {'grid_map/obstacles_inflation': 0.099},
+            {'grid_map/obstacles_inflation': 0.35},  # 飞机半宽0.235m+0.115m余量，见文件头说明
             {'grid_map/local_map_margin': 10},
             {'grid_map/ground_height': -0.01},
             # 深度相机路径完全不用（见文件头说明），这几个相机内参/深度
