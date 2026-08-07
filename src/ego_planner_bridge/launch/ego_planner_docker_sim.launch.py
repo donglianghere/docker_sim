@@ -39,12 +39,23 @@ mid-360实际点云质量和飞行空间重新验证），只改了以下几处�
     构建出来的占据栅格是错的，规划器等于在盲飞。mighty不会踩这个坑是
     因为它从不直接消费原始点云，是靠global_mapper_ros做过TF变换之后
     的occupancy_grid/unknown_grid。
-    改成接DLIO自己发布的dlio/odom_node/deskewed——DLIO的odom.cc里
-    publishCloud()对这份点云做了`pcl::transformPointCloud(...)`并把
-    header.frame_id设成跟odom消息同一个this->odom_frame，是已经变换到
-    odom坐标系、跟里程计天然一致的点云，grid_map.cpp那套"点云和odom同
-    坐标系"的假设在这份数据上才成立。
-    代价：LOCALIZATION_SOURCE=gt时DLIO根本不跑，没有deskewed这个话题
+    改成接DLIO自己发布的dlio/odom_node/pointcloud/deskewed——DLIO的
+    odom.cc里publishCloud()对这份点云做了
+    `pcl::transformPointCloud(...)`并把header.frame_id设成跟odom消息
+    同一个this->odom_frame，是已经变换到odom坐标系、跟里程计天然一致
+    的点云，grid_map.cpp那套"点云和odom同坐标系"的假设在这份数据上
+    才成立。
+    ⚠️ 2026-08-07第一次修复时把话题名错写成`dlio/odom_node/deskewed`
+    （少了中间的`pointcloud/`），实测确认这个话题从来不存在——
+    `create_publisher<...>("deskewed", 1)`里的"deskewed"是相对当前
+    node的话题名，但DLIO的odom_node实际把它建在"pointcloud"这个子
+    命名空间下（`ros2 node info /NX01/ego_planner_node`能看到
+    Subscribers列着这个订不到任何东西的死话题），等于第一次"修复"完全
+    没生效，grid_map一直是空的——真机测试直接撞墙复现，`ros2 topic hz
+    /NX01/dlio/odom_node/pointcloud/deskewed`实测确认真实话题在
+    ~11.4Hz发布、frame_id跟odom一致（NX01/odom），这次改成这个真实
+    路径。
+    代价：LOCALIZATION_SOURCE=gt时DLIO根本不跑，没有这个话题
     ——ego_planner+gt目前没有可用的点云源，是明确的已知限制，还没做
     （需要一个订阅原始点云+TF、发布变换后点云的小节点，仿照
     global_mapper_ros的做法），验证ego_planner目前只能用
@@ -132,7 +143,7 @@ def generate_launch_description():
             # 不是同一坐标系，grid_map.cpp不做TF变换）——用DLIO已经变换到
             # odom_frame的deskewed点云。只在LOCALIZATION_SOURCE=dlio时存在，
             # =gt时DLIO不跑，见文件头部说明。
-            ('grid_map/cloud', 'dlio/odom_node/deskewed'),
+            ('grid_map/cloud', 'dlio/odom_node/pointcloud/deskewed'),
             ('planning/broadcast_bspline_from_planner', '/broadcast_bspline'),
             ('planning/broadcast_bspline_to_planner', '/broadcast_bspline'),
             # 跟mighty统一用term_goal（namespace=${NAMESPACE}下解析成
