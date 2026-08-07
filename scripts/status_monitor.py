@@ -62,10 +62,18 @@ def build_config_banner():
     加到status面板里——光看NX01/NX02窗口的滚动日志很难第一时间确认当前
     到底是拿哪套配置在跑，容易跟前一次的测试结果搞混。
 
-    规划器这个项目里目前只接了mighty一种（没有能切换规划器的环境变量），
-    先写死；CONTROLLER/LOCALIZATION_SOURCE都是flight-stack-entrypoint.sh
-    里读的环境变量，这个脚本本来就跑在某一个flight-stack容器内部（docker
-    exec进来的），直接读同一份环境变量即可，不需要额外传参。"""
+    2026-08-07新增PLANNER环境变量（mighty/ego_planner）之后这里也要跟着读，
+    不能再写死"mighty"——之前写死是因为那会儿项目里确实只有mighty一种规划器，
+    不是疏漏，只是现状变了。PLANNER/CONTROLLER/LOCALIZATION_SOURCE都是
+    flight-stack-entrypoint.sh里读的环境变量，这个脚本本来就跑在某一个
+    flight-stack容器内部（docker exec进来的），直接读同一份环境变量即可，
+    不需要额外传参。"""
+    planner = os.environ.get('PLANNER', 'mighty')
+    if planner == 'ego_planner':
+        planner_label = "ego_planner (ego-planner-swarm，未经验证)"
+    else:
+        planner_label = planner
+
     controller = os.environ.get('CONTROLLER', 'ros2_px4_stack')
     if controller == 'ros2_px4_stack':
         control_law = os.environ.get('CONTROL_LAW', 'trajectory')
@@ -81,7 +89,7 @@ def build_config_banner():
         'gt': 'gt (Gazebo仿真真值)',
     }.get(loc_source, loc_source)
 
-    return f"规划器: mighty  |  板外控制器: {controller_label}  |  定位方式: {loc_label}"
+    return f"规划器: {planner_label}  |  板外控制器: {controller_label}  |  定位方式: {loc_label}"
 
 
 def quat_to_euler_deg(x, y, z, w):

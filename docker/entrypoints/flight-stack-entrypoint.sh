@@ -197,6 +197,11 @@ if [ "${PLANNER}" = "ego_planner" ] && [ "${CONTROLLER}" != "px4ctrl" ]; then
     echo "!! [flight-stack:${NAMESPACE}] 警告：PLANNER=ego_planner目前只设计成配合CONTROLLER=px4ctrl，"
     echo "!! 当前CONTROLLER=${CONTROLLER}，ego_planner发的position_cmd没有任何节点会订阅，飞机不会动 !!"
 fi
+if [ "${PLANNER}" = "ego_planner" ] && [ "${LOCALIZATION_SOURCE}" = "gt" ]; then
+    echo "!! [flight-stack:${NAMESPACE}] 警告：PLANNER=ego_planner目前只支持LOCALIZATION_SOURCE=dlio，"
+    echo "!! grid_map/cloud接的是dlio/odom_node/deskewed，=gt时DLIO不跑，没有这个话题，"
+    echo "!! ego_planner会收不到任何点云、完全没有避障能力（不是崩溃，是静默地对障碍物一无所知） !!"
+fi
 if [ "${LOCALIZATION_SOURCE}" = "gt" ]; then
     echo "== [flight-stack:${NAMESPACE}] 定位模式=gt：跳过DLIO，改用Gazebo仿真真值 (gt_odom_bridge) =="
     ros2 run gt_odom_bridge gt_odom_bridge_node \

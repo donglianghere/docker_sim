@@ -638,13 +638,20 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #    文件，没有自己的节点代码），把ego_planner_node+traj_server用
 #    namespace=${NAMESPACE}一起启动，remap grid_map/cloud→
 #    mid360_PointCloud2、grid_map/odom和odom_world→dlio/odom_node/odom，
-#    /move_base_simple/goal→相对名goal_pose（fsm/flight_type用
-#    MANUAL_TARGET，运行时对每架飞机各自的.../goal_pose发PoseStamped
-#    触发飞行，而不是原launch文件默认的PRESET_TARGET硬编码航点列表）。
+#    /move_base_simple/goal→term_goal（fsm/flight_type用MANUAL_TARGET，
+#    运行时对每架飞机各自的/${NAMESPACE}/term_goal发PoseStamped触发
+#    飞行，而不是原launch文件默认的PRESET_TARGET硬编码航点列表——跟
+#    mighty统一用term_goal，dual_goal_input.py/RViz现成工具不用改）。
 #    drone_id参数（区分/broadcast_bspline全局话题上"自己"和"别人"的
 #    轨迹，跟namespace是两件独立的事）从DRONE_ID环境变量读，manager/
 #    drone_id、地图尺寸、动力学限制等参数原样照抄自ego-planner-swarm
 #    自己的advanced_param.launch.py，未经实机/仿真实测调参。
+#    grid_map/cloud接的是DLIO的dlio/odom_node/deskewed（已变换到
+#    odom_frame的点云），不是原始mid360_PointCloud2——2026-08-07实测
+#    双机复现过直接接原始点云会导致规划器完全没有避障能力（点云跟odom
+#    不在同一坐标系，见ego_planner_docker_sim.launch.py文件头详细说明），
+#    代价是目前只支持LOCALIZATION_SOURCE=dlio，=gt时DLIO不跑没有这个
+#    话题，是明确的已知限制。
 # ============================================================
 COPY staging/ego-planner-swarm/src/planner /opt/ego_planner_ws/src
 COPY patches/ego_planner_traj_server_relative_poscmd.patch /tmp/

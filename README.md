@@ -5627,3 +5627,89 @@ save/load往返、config tar排除规则、恢复后镜像存在性检查，全�
   运动学概念），用在无人机上是借用其"2D覆盖行生成"这一段，不是整体照搬，若
   任务不需要非凸分解/障碍规避这类复杂度，简单弓字形扫描更划算。本次为概念
   科普，未涉及代码改动。
+
+## 用户实测复现：PLANNER=ego_planner+CONTROLLER=px4ctrl真实起飞撞柱子，规划器完全没有避障趋势（2026-08-07）
+
+第一次实际用起来（不是文件级校验）就复现：双机场景`PLANNER=ego_planner
+CONTROLLER=px4ctrl`，给NX01发目标点(-3,0,1)，飞机径直撞上房间中心的柱子，
+一点避让趋势都没有。同时用户指出三处需要跟上：ego_planner场景要换一份
+rviz配置、`/term_goal`话题要统一、`status_monitor.py`里规划器名字要加上。
+
+**根因找到了，是设计阶段漏掉的一个坐标系问题**：`ego_planner_docker_sim.launch.py`
+把`grid_map/cloud`直接remap到`mid360_PointCloud2`——这是Gazebo雷达插件发的
+**原始点云**，`header.frame_id`是雷达自身随飞机姿态转动的传感器帧
+（`"{ns}/{ns}_livox"`，见之前"顺带发现：UWB真值节点"那节查过的
+`livox_points_plugin.cpp`）。而`plan_env/grid_map.cpp`的`cloudCallback()`
+读源码确认**完全不做任何TF变换**——直接拿消息里的`pt.x/y/z`当成跟odom同一个
+坐标系的坐标来用（`devi = p3d - md_.camera_pos_`，`camera_pos_`来自
+`grid_map/odom`）。也就是说规划器一直在拿"雷达朝向"当成"障碍物在地图里的
+位置"，构建出来的occupancy grid从第一帧开始就是错的，等于盲飞——不是"避障
+能力弱"，是压根没有可用的障碍物地图。mighty不会踩这个坑，因为它从来不直接
+消费原始点云，是靠`global_mapper_ros`节点先用真实TF把点云变换到`map`坐标系
+再输出`occupancy_grid`/`unknown_grid`给mighty订阅——之前分析集成方案时反而
+把这一步当成"mighty多余的中间层，ego_planner自己有grid_map不需要"，没意识到
+这个中间层同时也是"把点云变换到正确坐标系"这个必要步骤，属于分析疏漏。
+
+顺着查了DLIO自己的发布话题（`dlio/odom_node.cc`/`odom.cc`）,找到现成的
+正确数据源：`dlio/odom_node/deskewed`——`publishCloud()`里明确对这份点云
+做了`pcl::transformPointCloud(...)`，`header.frame_id`直接赋成跟odom消息
+同一个`this->odom_frame`，是已经变换到odom坐标系、跟里程计天然一致的点云。
+把`grid_map/cloud`改接这个话题，不用新写任何变换节点。
+
+**代价（新的已知限制）**：`dlio/odom_node/deskewed`只有`LOCALIZATION_SOURCE=dlio`
+时才存在——`=gt`模式下DLIO根本不跑。这意味着`ego_planner`目前**只支持
+`LOCALIZATION_SOURCE=dlio`**，跟`=gt`组合会导致完全没有点云、没有任何
+避障能力（不报错、不崩溃，只是安静地建不出地图），entrypoint里加了一条
+针对这个组合的警告日志。真要支持`gt`需要另外写一个"订阅原始点云+TF、
+发布变换后点云"的小节点（仿照`global_mapper_ros`的思路），这次没做。
+
+**顺带确认了目标点为什么恰好撞在柱子上**：`ego_planner`的`fsm/flight_type`
+用的是MANUAL_TARGET，原来remap成自定义的相对名`goal_pose`，跟mighty的
+目标点输入（`scripts/dual_goal_input.py`发的`/{ns}/term_goal`，世界坐标
+自动换算成每机局部坐标，换算公式是减去`AGENT_INDEX*3`这个INIT_X偏移）
+是两套完全不同的话题和坐标约定。如果目标点是通过某个没有做这层换算的
+路径直接发给`goal_pose`的，(-3,0,1)当**局部坐标**解读，正好落在NX01
+本地地图原点往后3米——换算回世界坐标就是房间中心，也就是柱子所在的位置。
+两个bug叠加：本该在别处的目标点恰好落在障碍物上，而规划器又完全看不见
+这个障碍物，直接撞上去几乎是必然结果。
+
+**已完成的修复**（都是文件级修改，还没有重新build/实测验证）：
+1. `grid_map/cloud`改接`dlio/odom_node/deskewed`（`src/ego_planner_bridge/launch/ego_planner_docker_sim.launch.py`）。
+2. `/move_base_simple/goal`的remap目标从`goal_pose`改成`term_goal`，跟
+   mighty统一——`namespace=${NAMESPACE}`下解析出来正好是
+   `/${NAMESPACE}/term_goal`，跟`dual_goal_input.py`、RViz现成的
+   "2D Goal Pose (NX01/NX02)"工具是同一个话题，两个规划器的目标点输入
+   方式和坐标约定（每机局部坐标，DLIO各自以自己spawn点为原点）从此
+   完全一致，不用再关心当前跑的是哪个规划器。
+3. `flight-stack-entrypoint.sh`新增`PLANNER=ego_planner`+
+   `LOCALIZATION_SOURCE=gt`组合的警告日志。
+4. `scripts/status_monitor.py`的`build_config_banner()`不再写死"规划器:
+   mighty"，改成读`PLANNER`环境变量。
+5. 新增`patches/mighty_rviz_ego_planner_displays.patch`，给
+   `rviz/multi_mighty.rviz`顶层加了12个Display（NX01/NX02各一份
+   `grid_map/occupancy_inflate`用PointCloud2、`goal_point`/
+   `global_list`/`init_list`/`optimal_list`/`a_star_list`五个用Marker，
+   消息类型分别读`plan_env/grid_map.cpp`和
+   `traj_utils/planning_visualization.h`的`create_publisher<...>`确认过），
+   全部默认`Enabled: false`（不勾选），不影响mighty现有视图，用
+   ego_planner时手动在RViz左侧面板勾选对应条目即可，不需要切换成另一份
+   rviz文件——sim-world容器不知道flight-stack那边的`PLANNER`是什么，
+   没法在entrypoint层面自动切换配置文件，两个规划器的可视化内容合并进
+   同一份rviz配置是更简单可靠的做法。patch已加入
+   `Dockerfile.sim-world`的补丁链（`mighty_rviz_final_config.patch`
+   之后），用真实patch序列实测`git apply --check`过，能应用。
+
+**顺带发现一个跟这次改动无关的既有问题**：模拟完整patch序列时，
+`mighty_disable_d435.patch`应用失败（`urdf/quadrotor.urdf.xacro`不匹配）
+——跟这次rviz改动无关，是这次核对完整补丁链时顺带看到的既有drift，
+没有深挖/修复，记录一下防止以后误以为是这次改动引入的。
+
+**还没做的**：没有重新`docker compose build`过，`dlio/odom_node/deskewed`
+这个话题在这套仿真里的实际数据质量（点数、频率、是否真的跟odom严格同步）
+完全没有验证过；`term_goal`统一之后没有重新用`dual_goal_input.py`或RViz
+工具对ego_planner实测发过目标点；rviz新增的12个Display没有真正打开RViz
+看过是否正常渲染（PointCloud2/Marker的Class字符串、Topic QoS字段是照抄
+现有条目的格式，语法上YAML能正常解析，但没有实机验证）。建议下一步：
+重新build，`LOCALIZATION_SOURCE=dlio`（不是gt），先单机验证`deskewed`
+话题有数据、grid_map能建出跟柱子位置吻合的occupancy grid，再重新试一次
+NX01发目标点，确认这次会绕开柱子。

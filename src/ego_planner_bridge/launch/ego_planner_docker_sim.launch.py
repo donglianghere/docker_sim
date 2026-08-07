@@ -23,20 +23,51 @@ mid-360实际点云质量和飞行空间重新验证），只改了以下几处�
     （跟mighty/DLIO/px4ctrl同一套约定），drone_id参数仍然保留、仍然
     必须两机不同——它是calcSwarmCost用来在共享的/broadcast_bspline
     全局话题上区分"自己"和"其他飞机"轨迹的ID，不是话题命名空间。
-  - grid_map/cloud、grid_map/odom、odom_world 三个输入话题直接remap到
-    真实的mid360_PointCloud2点云和dlio/odom_node/odom里程计（
-    LOCALIZATION_SOURCE=gt时gt_odom_bridge也发到这同一个相对话题名，
+  - grid_map/odom、odom_world remap到dlio/odom_node/odom里程计
+    （LOCALIZATION_SOURCE=gt时gt_odom_bridge也发到这同一个相对话题名，
     不用分支处理）。
+
+    ⚠️ grid_map/cloud **不能**直接接mid360_PointCloud2原始点云——
+    2026-08-07实测双机复现：PLANNER=ego_planner+CONTROLLER=px4ctrl，
+    给NX01发目标点(-3,0,1)，飞机径直撞上房间中心的柱子，规划器完全
+    没有绕障的趋势。根因是plan_env/grid_map.cpp的cloudCallback()不做
+    任何TF变换，直接假设收到的点云已经跟odom处于同一个坐标系——但
+    mid360_PointCloud2是Gazebo雷达插件发布的原始点云，header.frame_id
+    是雷达自身随飞机姿态转动的传感器帧（"{ns}/{ns}_livox"），跟
+    dlio/odom_node/odom所在的、静止不动的odom_frame完全不是一回事，
+    直接喂给grid_map会把"雷达此刻朝向"误当成"障碍物在世界里的位置"，
+    构建出来的占据栅格是错的，规划器等于在盲飞。mighty不会踩这个坑是
+    因为它从不直接消费原始点云，是靠global_mapper_ros做过TF变换之后
+    的occupancy_grid/unknown_grid。
+    改成接DLIO自己发布的dlio/odom_node/deskewed——DLIO的odom.cc里
+    publishCloud()对这份点云做了`pcl::transformPointCloud(...)`并把
+    header.frame_id设成跟odom消息同一个this->odom_frame，是已经变换到
+    odom坐标系、跟里程计天然一致的点云，grid_map.cpp那套"点云和odom同
+    坐标系"的假设在这份数据上才成立。
+    代价：LOCALIZATION_SOURCE=gt时DLIO根本不跑，没有deskewed这个话题
+    ——ego_planner+gt目前没有可用的点云源，是明确的已知限制，还没做
+    （需要一个订阅原始点云+TF、发布变换后点云的小节点，仿照
+    global_mapper_ros的做法），验证ego_planner目前只能用
+    LOCALIZATION_SOURCE=dlio。
   - grid_map/use_depth_filter改成False（明确表示不用深度相机路径，
     纯粹是文档意义上的清晰，不影响实际行为）。
   - grid_map/frame_id改成"${NAMESPACE}/map"，跟项目里"${NAMESPACE}/map"
     的既有frame命名习惯对齐。
   - fsm/flight_type用MANUAL_TARGET(=1)而不是原文件默认的PRESET_TARGET
     (=2)：PRESET_TARGET要求提前在参数里写死目标点列表，MANUAL_TARGET
-    则是运行时订阅一个PoseStamped话题作为目标点，更适合手动测试/后续
-    接入mighty那样的动态目标源。原本硬编码的绝对话题名
-    "/move_base_simple/goal"remap成相对名"goal_pose"，避免两架飞机
-    同时订阅同一个全局话题、抢同一个目标点。
+    则是运行时订阅一个PoseStamped话题作为目标点，更适合手动测试。
+    原本硬编码的绝对话题名"/move_base_simple/goal"remap成"term_goal"
+    ——跟mighty用的命名空间化的"/${NAMESPACE}/term_goal"统一成同一个
+    约定（namespace=${NAMESPACE}下相对名"term_goal"解析出来正好是这个
+    绝对路径），这样scripts/dual_goal_input.py和RViz现成的"2D Goal
+    Pose (NX01/NX02)"工具不用改、也不用关心当前是哪个规划器，直接就能
+    用。2026-08-07发现的撞柱子事故里，目标点很可能就是通过某个没有
+    world->local换算的临时路径直接送进了这个话题，(-3,0,1)当作局部坐标
+    解读正好落在NX01本地地图原点附近、也就是世界坐标的房间中心——统一
+    到term_goal之后，dual_goal_input.py自带的"世界坐标->每机局部坐标"
+    换算（按AGENT_INDEX*3的INIT_X偏移）对ego_planner同样适用（它的
+    odom也是DLIO在each机自己spawn点为原点的局部坐标系，跟mighty同一套
+    假设），不会再出现坐标解读不一致的问题。
   - 没有起map_generator/mockamap（那是ego-planner自带demo用来生成
     虚拟障碍物地图的节点，这里用真实Gazebo世界，不需要）。
 """
@@ -97,13 +128,21 @@ def generate_launch_description():
         remappings=[
             ('odom_world', 'dlio/odom_node/odom'),
             ('grid_map/odom', 'dlio/odom_node/odom'),
-            ('grid_map/cloud', 'mid360_PointCloud2'),
+            # 不能直接接mid360_PointCloud2原始点云（雷达自身转动帧，跟odom
+            # 不是同一坐标系，grid_map.cpp不做TF变换）——用DLIO已经变换到
+            # odom_frame的deskewed点云。只在LOCALIZATION_SOURCE=dlio时存在，
+            # =gt时DLIO不跑，见文件头部说明。
+            ('grid_map/cloud', 'dlio/odom_node/deskewed'),
             ('planning/broadcast_bspline_from_planner', '/broadcast_bspline'),
             ('planning/broadcast_bspline_to_planner', '/broadcast_bspline'),
-            ('/move_base_simple/goal', 'goal_pose'),
+            # 跟mighty统一用term_goal（namespace=${NAMESPACE}下解析成
+            # /${NAMESPACE}/term_goal，跟RViz现成的"2D Goal Pose"工具、
+            # scripts/dual_goal_input.py发的是同一个话题，不用改任何现有
+            # 工具）。
+            ('/move_base_simple/goal', 'term_goal'),
         ],
         parameters=[
-            {'fsm/flight_type': 1},  # MANUAL_TARGET，运行时订阅goal_pose
+            {'fsm/flight_type': 1},  # MANUAL_TARGET，运行时订阅term_goal
             {'fsm/thresh_replan_time': 1.0},
             {'fsm/thresh_no_replan_meter': 1.0},
             {'fsm/planning_horizon': planning_horizon},

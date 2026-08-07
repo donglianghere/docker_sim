@@ -88,7 +88,7 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
         && bash build.sh humble
 
 COPY staging/mighty_ws_src /opt/mighty_ws/src
-COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_spawn_agent_launch.patch patches/mighty_hard_forest_camera.patch patches/mighty_forest_boundary_walls.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_simple_room_world.patch patches/mighty_simple_room_world_mapping.patch patches/mighty_rviz_config_arg.patch patches/mighty_rviz_final_config.patch patches/mighty_imu_sim_time.patch patches/mighty_headless_yaw_fix.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_traveling_yaw_zero_dist_guard.patch /tmp/
+COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_spawn_agent_launch.patch patches/mighty_hard_forest_camera.patch patches/mighty_forest_boundary_walls.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_simple_room_world.patch patches/mighty_simple_room_world_mapping.patch patches/mighty_rviz_config_arg.patch patches/mighty_rviz_final_config.patch patches/mighty_rviz_ego_planner_displays.patch patches/mighty_imu_sim_time.patch patches/mighty_headless_yaw_fix.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_traveling_yaw_zero_dist_guard.patch /tmp/
 RUN cd /opt/mighty_ws/src/mighty \
     && (git apply --check /tmp/mighty_lidar_frame_id.patch && git apply /tmp/mighty_lidar_frame_id.patch \
         || echo "!! mighty_lidar_frame_id.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
@@ -114,6 +114,8 @@ RUN cd /opt/mighty_ws/src/mighty \
         || echo "!! mighty_rviz_config_arg.patch 未能自动应用，需人工核对后手动改 launch/base_mighty.launch.py !!") \
     && (git apply --check /tmp/mighty_rviz_final_config.patch && git apply /tmp/mighty_rviz_final_config.patch \
         || echo "!! mighty_rviz_final_config.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz !!") \
+    && (git apply --check /tmp/mighty_rviz_ego_planner_displays.patch && git apply /tmp/mighty_rviz_ego_planner_displays.patch \
+        || echo "!! mighty_rviz_ego_planner_displays.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz（给PLANNER=ego_planner加12个可视化Display，默认Enabled:false不影响mighty现有视图) !!") \
     && (git apply --check /tmp/mighty_imu_sim_time.patch && git apply /tmp/mighty_imu_sim_time.patch \
         || echo "!! mighty_imu_sim_time.patch 未能自动应用，需人工核对后手动改 src/sim/gazebo_ros_imu_sensor.cpp !!") \
     && (git apply --check /tmp/mighty_headless_yaw_fix.patch && git apply /tmp/mighty_headless_yaw_fix.patch \
