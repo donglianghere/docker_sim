@@ -1,0 +1,52 @@
+diff --git a/src/planner/plan_env/include/plan_env/grid_map.h b/src/planner/plan_env/include/plan_env/grid_map.h
+index cd238a4..2edba40 100755
+--- a/src/planner/plan_env/include/plan_env/grid_map.h
++++ b/src/planner/plan_env/include/plan_env/grid_map.h
+@@ -83,6 +83,7 @@ struct MappingParameters
+ 
+   /* visualization and computation time display */
+   double visualization_truncate_height_, virtual_ceil_height_, ground_height_, virtual_ceil_yp_, virtual_ceil_yn_;
++  double ground_filter_height_; // 独立点云路径(cloudCallback)专用：低于这个世界坐标Z的点当地面噪声丢弃，不参与occupied标记/膨胀
+   bool show_occ_time_;
+ 
+   /* active mapping */
+diff --git a/src/planner/plan_env/src/grid_map.cpp b/src/planner/plan_env/src/grid_map.cpp
+index 0714c57..6576dff 100755
+--- a/src/planner/plan_env/src/grid_map.cpp
++++ b/src/planner/plan_env/src/grid_map.cpp
+@@ -44,6 +44,15 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
+   node_->declare_parameter("grid_map/frame_id", "world");
+   node_->declare_parameter("grid_map/local_map_margin", 1);
+   node_->declare_parameter("grid_map/ground_height", 1.0);
++  // docker_sim: 独立点云路径(cloudCallback，不是深度相机路径)原来完全没有
++  // 地面点过滤——mid-360是全向/大FOV雷达，飞行高度不高时会打到大片地板，
++  // 每个地面点都被当障碍物标记+膨胀，实测occupancy_inflate里地面变成一整片
++  // "占据"区域（不是局部障碍物那种紧凑形状），2026-08-08真机测试反馈"撞墙
++  // 是必然"、"地面膨胀的点云还是一大片"，跟这个直接对应。默认值0.15米
++  // （比ground_height默认高出一截）——只在这次docker_sim集成里通过
++  // ego_planner_docker_sim.launch.py显式设置具体数值，这里的默认值只是
++  // 兜底，不代表调过。
++  node_->declare_parameter("grid_map/ground_filter_height", 0.15);
+   node_->declare_parameter("grid_map/odom_depth_timeout", 1.0);
+ 
+   node_->get_parameter("grid_map/resolution", mp_.resolution_);
+@@ -81,6 +90,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
+   node_->get_parameter("grid_map/frame_id", mp_.frame_id_);
+   node_->get_parameter("grid_map/local_map_margin", mp_.local_map_margin_);
+   node_->get_parameter("grid_map/ground_height", mp_.ground_height_);
++  node_->get_parameter("grid_map/ground_filter_height", mp_.ground_filter_height_);
+   node_->get_parameter("grid_map/odom_depth_timeout", mp_.odom_depth_timeout_);
+ 
+   if (mp_.virtual_ceil_height_ - mp_.ground_height_ > z_size)
+@@ -847,6 +857,11 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstPtr &img)
+     pt = latest_cloud.points[i];
+     p3d(0) = pt.x, p3d(1) = pt.y, p3d(2) = pt.z;
+ 
++    // docker_sim: 地面回波过滤——见declare_parameter那边的详细说明，点云已经
++    // 在odom/map坐标系里（deskewed），p3d(2)就是世界高度，不需要再变换。
++    if (p3d(2) < mp_.ground_filter_height_)
++      continue;
++
+     /* point inside update range */
+     Eigen::Vector3d devi = p3d - md_.camera_pos_;
+     Eigen::Vector3i inf_pt;

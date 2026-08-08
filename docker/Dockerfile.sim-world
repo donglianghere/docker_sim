@@ -38,14 +38,16 @@ COPY staging/PX4-Autopilot /opt/PX4-Autopilot
 # README.md）。这个文件是运行时直接从磁盘读的（sim-world-entrypoint.sh里
 # `-d "$PWD/ROMFS/px4fmu_common"`），不参与编译，但还是放在编译之前打，跟其余
 # patch的应用时机保持一致。
-COPY patches/px4_iris_mpc_thr_hover.patch patches/px4_iris_mpc_yawrate_max.patch patches/px4_onboard_imu_rate.patch /tmp/
+COPY patches/px4_iris_mpc_thr_hover.patch patches/px4_iris_mpc_yawrate_max.patch patches/px4_onboard_imu_rate.patch patches/px4_onboard_imu_rate_firmware_default.patch /tmp/
 RUN cd /opt/PX4-Autopilot \
     && (git apply --check /tmp/px4_iris_mpc_thr_hover.patch && git apply /tmp/px4_iris_mpc_thr_hover.patch \
         || echo "!! px4_iris_mpc_thr_hover.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris !!") \
     && (git apply --check /tmp/px4_iris_mpc_yawrate_max.patch && git apply /tmp/px4_iris_mpc_yawrate_max.patch \
         || echo "!! px4_iris_mpc_yawrate_max.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris !!") \
     && (git apply --check /tmp/px4_onboard_imu_rate.patch && git apply /tmp/px4_onboard_imu_rate.patch \
-        || echo "!! px4_onboard_imu_rate.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink（给-m onboard链路的HIGHRES_IMU/ATTITUDE_QUATERNION加200Hz/100Hz覆盖，缓解mavros/imu/data速率过低、px4ctrl报IMU frequency警告的问题) !!")
+        || echo "!! px4_onboard_imu_rate.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink（给-m onboard链路的HIGHRES_IMU/ATTITUDE_QUATERNION加200Hz/100Hz覆盖，缓解mavros/imu/data速率过低、px4ctrl报IMU frequency警告的问题) !!") \
+    && (git apply --check /tmp/px4_onboard_imu_rate_firmware_default.patch && git apply /tmp/px4_onboard_imu_rate_firmware_default.patch \
+        || echo "!! px4_onboard_imu_rate_firmware_default.patch 未能自动应用，需人工核对后手动改 src/modules/mavlink/mavlink_main.cpp（MAVLINK_MODE_ONBOARD分支的HIGHRES_IMU/ATTITUDE_QUATERNION硬编码默认值改成200/100Hz——上面px4_onboard_imu_rate.patch的运行时脚本覆盖实测没生效，怀疑跟configure_streams_to_default()在mavlink task自己线程里跑存在竞态，这个patch直接改默认值从根上避开竞态，需要重新编译PX4，不是运行时脚本能解决的) !!")
 
 # rosdep/依赖装好之后再编译；PX4 自带的 ubuntu.sh 会装一批 python/apt 依赖，
 # 这一步仍然需要网络（apt/pip），所以留着代理，编译完再统一清理。

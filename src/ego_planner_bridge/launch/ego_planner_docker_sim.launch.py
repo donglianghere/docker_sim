@@ -195,6 +195,16 @@ def generate_launch_description():
             {'grid_map/obstacles_inflation': 0.35},  # 飞机半宽0.235m+0.115m余量，见文件头说明
             {'grid_map/local_map_margin': 10},
             {'grid_map/ground_height': -0.01},
+            # 地面回波过滤（配合ego_planner_grid_map_ground_filter.patch）——
+            # mid-360前倾30度装在飞机顶部，飞行高度不高时会打到大片地板，
+            # cloudCallback原来对每个点一视同仁地标记+膨胀，地面因此变成
+            # 一整片"占据"区域（2026-08-08真机反馈"地面膨胀的点云还是一大片"、
+            # "撞墙是必然"）。0.15米——房间地板在世界z=0，飞机碰撞箱最低点在
+            # 机体原点下方0.055米（见flight-stack-entrypoint.sh的INIT_Z注释），
+            # 0.15米比这个还留了将近10厘米余量，房间里的障碍物（柱子/墙）都是
+            # 顶天立地的全高结构，没有低于15厘米的真实障碍物需要保留，这个
+            # 阈值只会丢地面噪声，不会丢真实障碍物。
+            {'grid_map/ground_filter_height': 0.15},
             # 深度相机路径完全不用（见文件头说明），这几个相机内参/深度
             # 滤波参数留着原始默认值即可，反正永远不会有数据喂进来。
             {'grid_map/cx': 321.04638671875},

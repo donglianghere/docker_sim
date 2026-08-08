@@ -1,0 +1,33 @@
+diff --git a/src/modules/mavlink/mavlink_main.cpp b/src/modules/mavlink/mavlink_main.cpp
+index a08b6f8690..1337067ab0 100644
+--- a/src/modules/mavlink/mavlink_main.cpp
++++ b/src/modules/mavlink/mavlink_main.cpp
+@@ -1482,7 +1482,18 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
+ 		// Note: streams requiring low latency come first
+ 		configure_stream_local("TIMESYNC", 10.0f);
+ 		configure_stream_local("CAMERA_TRIGGER", unlimited_rate);
+-		configure_stream_local("HIGHRES_IMU", 50.0f);
++		// docker_sim: 原来50Hz——之前想用ROMFS里的px4-rc.mavlink脚本在
++		// `mavlink start -m onboard`之后紧跟着`mavlink stream -r 200 ...`
++		// 覆盖这个值，但实测覆盖后还是稳定卡在50Hz，跟这里的硬编码默认值
++		// 完全一致，怀疑是configure_streams_to_default()在mavlink实例自己
++		// 的task_main()线程里跑、跟脚本的顺序执行之间有竞态，脚本的覆盖被
++		// 这个函数自己的默认值重新盖掉了——直接改这里的默认值，从根上
++		// 避开这个竞态，不再依赖脚本层面"跑得比它快"这种时序假设。
++		// mavros的imu/data插件融合HIGHRES_IMU(原始加速度/角速度)和
++		// ATTITUDE_QUATERNION算出sensor_msgs/Imu，喂给px4ctrl，px4ctrl要求
++		// >=100Hz，50Hz这个原始默认值天然就不够，跟docker_sim这套仿真的
++		// 负载/DDS实现无关。
++		configure_stream_local("HIGHRES_IMU", 200.0f);
+ 		configure_stream_local("LOCAL_POSITION_NED", 30.0f);
+ 		configure_stream_local("ATTITUDE", 100.0f);
+ 		configure_stream_local("ALTITUDE", 10.0f);
+@@ -1494,7 +1505,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
+ 		configure_stream_local("ODOMETRY", 30.0f);
+ 
+ 		configure_stream_local("ADSB_VEHICLE", unlimited_rate);
+-		configure_stream_local("ATTITUDE_QUATERNION", 50.0f);
++		configure_stream_local("ATTITUDE_QUATERNION", 100.0f); // docker_sim: 原50Hz，见上面HIGHRES_IMU那条注释
+ 		configure_stream_local("ATTITUDE_TARGET", 10.0f);
+ 		configure_stream_local("AVAILABLE_MODES", 0.3f);
+ 		configure_stream_local("BATTERY_STATUS", 0.5f);

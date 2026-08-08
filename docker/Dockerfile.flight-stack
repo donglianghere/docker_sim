@@ -656,11 +656,14 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #    话题，是明确的已知限制。
 # ============================================================
 COPY staging/ego-planner-swarm/src/planner /opt/ego_planner_ws/src
-COPY patches/ego_planner_traj_server_relative_poscmd.patch /tmp/
+COPY patches/ego_planner_traj_server_relative_poscmd.patch patches/ego_planner_grid_map_ground_filter.patch /tmp/
 RUN cd /opt/ego_planner_ws/src \
     && (git apply -p3 --check /tmp/ego_planner_traj_server_relative_poscmd.patch \
         && git apply -p3 /tmp/ego_planner_traj_server_relative_poscmd.patch \
-        || echo "!! ego_planner_traj_server_relative_poscmd.patch 未能自动应用，需人工核对后手动改 plan_manage/src/traj_server.cpp !!")
+        || echo "!! ego_planner_traj_server_relative_poscmd.patch 未能自动应用，需人工核对后手动改 plan_manage/src/traj_server.cpp !!") \
+    && (git apply -p3 --check /tmp/ego_planner_grid_map_ground_filter.patch \
+        && git apply -p3 /tmp/ego_planner_grid_map_ground_filter.patch \
+        || echo "!! ego_planner_grid_map_ground_filter.patch 未能自动应用，需人工核对后手动改 plan_env/src/grid_map.cpp、plan_env/include/plan_env/grid_map.h（cloudCallback完全没有地面点过滤，导致occupancy_inflate里地面变成一整片"占据"区域，撞墙风险很高) !!")
 COPY src/ego_planner_bridge /opt/ego_planner_ws/src/ego_planner_bridge
 RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     source /opt/ros/humble/setup.bash \
