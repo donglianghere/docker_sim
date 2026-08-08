@@ -5936,3 +5936,64 @@ patch）生成`multi_mighty.rviz`，再从这份正确的15条目版本复制出
 切换之后`mavros/imu/data`速率是否恢复正常，确认这个基础问题解决了，
 再重新测一次避障，这样才能干净地判断`obstacles_inflation=0.35`到底
 够不够。
+
+## IMU速率+rviz渲染不出内容——两个问题都查到真正根因，且都已现场验证过修复（2026-08-08）
+
+用户反馈：ego_planner现在好像能避障了，但仍可能撞柱子；`/NX01/mid360/imu`
+实测260Hz很健康，但`/NX01/mavros/imu/data`只有26Hz；`multi_ego_planner.rviz`
+点云/建图/轨迹/里程计全都显示不出来，只有一架飞机的坐标系能看到。
+
+### IMU速率：真正瓶颈是PX4固件的MAVLINK_MODE_ONBOARD流表，不是DDS
+
+用户提醒"px4-rc.mavlink是仿真的配置"——这个提醒是对的，但顺着查到PX4
+**固件源码**`mavlink_main.cpp`里`MAVLINK_MODE_ONBOARD`这个case（不是sim专属，
+sim和真机编译的是同一份代码）：`HIGHRES_IMU`限速50Hz、`ATTITUDE_QUATERNION`
+限速50Hz——这是`mavros/imu/data`两个上游数据源，50Hz这个固件层的硬天花板
+本身就已经低于px4ctrl要求的100Hz，跟DDS/网络拥堵完全无关。而且`mid360/imu`
+走的是完全不同的链路（Gazebo雷达插件->DLIO，不经过PX4/mavlink），能到260Hz
+正好反过来印证了"CycloneDDS那次分析"不是这次问题的主因——如果是DDS域内
+普遍拥堵，`mid360/imu`也应该被拖慢，但它没有。
+
+已修复：新增`patches/px4_onboard_imu_rate.patch`，给`-m onboard`那条链路
+显式加`mavlink stream -r 200 -s HIGHRES_IMU`/`-r 100 -s ATTITUDE_QUATERNION`
+覆盖（跟这个脚本里GCS链路本来就有的写法一致），不需要碰任何编译代码——
+`px4-rc.mavlink`是运行时直接从ROMFS磁盘读的脚本。**明确的局限**：这次改的
+是仿真专属的启动脚本，真上硬件后同样的限速依然存在（固件默认值没变），
+需要在真实飞控的等价启动配置里补同样的覆盖，这次没有解决真机那一侧。
+
+### rviz渲染不出内容：grid_map/frame_id只是字符串标签，从来没有对应的TF
+
+实测`ros2 topic echo /tf`：DLIO正常发`${NAMESPACE}/odom ->
+${NAMESPACE}/base_link`，UWB frame_align机制（跟PLANNER无关，一直在跑）
+也正常发`NX01/map -> NX02/map`把两机的map连起来——但`${NAMESPACE}/map`
+（`grid_map/frame_id`参数用的名字，只出现在`occupancy_inflate`等消息的
+header里）跟`${NAMESPACE}/odom`（DLIO真正维护的TF树）之间从来没有任何
+变换连接这两个名字。RViz渲染一条消息必须能沿着TF树从消息的frame_id走到
+Fixed Frame，这一环缺失导致所有`frame_id="${NAMESPACE}/map"`的内容
+（点云建图相关的Display）在任何Fixed Frame下都渲染不出来；两机各自都
+缺这一环，也导致明明已经有`NX01/map<->NX02/map`这条桥，两机还是连不起来
+一起显示。
+
+已修复：给每架飞机补一条恒等静态TF（`${NAMESPACE}/map -> ${NAMESPACE}/odom`，
+零偏移——`grid_map/odom`直接remap吃DLIO的odom，"map"和"odom"在这套集成里
+数值上就是同一个坐标系，没有实际位姿差异）。**这次没有走"改entrypoint+
+重新docker cp+restart"这条路，是直接用`docker exec`在运行中的容器里手动
+起了这条TF命令做实测**（entrypoint.sh是容器PID1，这次改动纯粹是新增一条
+命令、不替换任何东西，不需要惊动PID1）——`tf2_echo NX01/odom NX01/map`
+实测确认变成恒等矩阵，`tf2_echo NX01/odom NX02/odom`实测确认能通过
+`NX01/map<->NX02/map`这条已有桥连通、平移量跟两机约3米的spawn间距吻合。
+改动已经写回entrypoint.sh源码，验证过之后才提交。
+
+### 还没做的
+
+用户反馈"可能还会撞柱子"——这次没有针对这一点继续深挖（`obstacles_
+inflation=0.35`是否够用、`optimization/lambda_collision`权重是否需要调
+这些之前留的待办还没重新验证），因为IMU速率问题理论上会直接影响控制精度，
+建议先确认这两个新修复生效之后再重新测一次避障，这样才能干净地判断
+"贴着飞/偶尔撞"到底是规划参数不够还是控制/定位精度问题，不要在两个变量
+都没控制住的情况下调参数。
+
+这次的两个修复都在真实运行的容器上做过验证（`ros2 param get`/`tf2_echo`
+实测数据支撑），但完整的end-to-end重新起飞测试还没做——下一步：重新build
+（这次`Dockerfile.sim-world`加了新patch，需要`docker compose build
+sim-world`，`flight-stack-nx01`因为entrypoint.sh也改了同样需要重建）。
