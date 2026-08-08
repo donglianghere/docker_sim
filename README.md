@@ -6036,3 +6036,52 @@ group——docker_sim这套双机+Gazebo一起跑的真实负载下，默认grou
 **这轮加起来又要build镜像**：CycloneDDS那部分（base镜像）用户已经build
 过了，还需要`sim-world`（PX4 patch）+`flight-stack-nx01`（TF修复+DLIO
 callback group patch）这两个。
+
+## mavros/imu还是卡50Hz+地面被膨胀成一整片——两个都查到更深一层根因（2026-08-08）
+
+用户反馈：`mavros/imu/data`加了运行时脚本覆盖之后还是卡在50Hz上不去；
+`occupancy_inflate`还是有问题，"撞墙是必然"，"地面膨胀的点云还是一大片"。
+
+### 地面被当障碍物：grid_map.cpp的独立点云路径从来没有地面过滤
+
+读`cloudCallback()`全函数确认：对每一个收到的点，不管是不是打在地板上，
+一视同仁地标记occupied+膨胀。mid-360前倾30度装在飞机顶部，正常飞行高度下
+必然会打到大片地板——`obstacles_inflation`改成0.35之后，可见范围内的整个
+地板从z≈0一路膨胀到~0.35m，变成一整片贴地的"占据"层，不是局部障碍物那种
+紧凑形状，跟"地面膨胀的点云还是一大片"完全对得上。之前调大`obstacles_
+inflation`其实是让这个问题更严重了，不是更安全。
+
+新增`patches/ego_planner_grid_map_ground_filter.patch`：加一个
+`grid_map/ground_filter_height`参数，`cloudCallback()`里低于这个世界坐标
+高度的点直接跳过、不参与occupied标记。默认0.15米——对照飞机碰撞箱最低点
+（机体原点下方0.055米）留了将近10厘米余量，房间里的障碍物（柱子/墙）都是
+顶天立地的全高结构，没有需要保留的低矮障碍物，这个阈值理论上只会丢地面
+噪声。
+
+### mavros/imu卡50Hz：运行时脚本覆盖输给了PX4固件自己的竞态
+
+上次的`px4_onboard_imu_rate.patch`（在`px4-rc.mavlink`里`mavlink start
+-m onboard`后面紧跟`mavlink stream -r 200/100 ...`）实测完全没效果——
+速率精确停在50Hz，跟没打patch之前的固件硬编码默认值一模一样。查
+`mavlink_main.cpp`：`configure_streams_to_default()`（真正设置这些流速率
+的函数）是在mavlink实例自己的`task_main()`线程里跑的，这个线程由
+`mavlink start`异步拉起——脚本接下来紧跟着执行的`mavlink stream -r`
+命令，很可能在这个新线程真正跑到"设置默认流速率"这一步之前就已经执行
+完了，之后线程追上来的默认值设置直接把脚本的覆盖覆盖掉了。
+
+新增`patches/px4_onboard_imu_rate_firmware_default.patch`，直接改
+`mavlink_main.cpp`里`MAVLINK_MODE_ONBOARD`分支的硬编码默认值本身
+（`HIGHRES_IMU`/`ATTITUDE_QUATERNION`从50.0f改成200.0f/100.0f）——没有
+"默认值"可以覆盖了，从根上避开这个竞态，代价是这次真的需要PX4重新编译
+（不是运行时脚本读取，改的是编译进固件的源码）。上次那份运行时脚本patch
+留着没删，现在两边设的数字一致，不会再互相竞争。
+
+**都还没验证**：地面过滤这个0.15米阈值纯粹是算出来的，没有实测确认过滤
+之后occupancy_inflate的实际形状变没变；PX4固件默认值这个"竞态"解释是
+读代码推断出来的合理假设，没有反过来做实验证明"加个sleep能不能让脚本覆盖
+生效"这种对照，直接改默认值是绕开问题而不是证实假设，如果这次重新build
+之后速率还是不对，说明这次的假设本身就是错的，需要重新查。
+
+这轮改动涉及`sim-world`（PX4固件patch，这次真的要重新编译PX4，build时间
+会比之前长一些）和`flight-stack-nx01`（ego_planner的grid_map地面过滤
+patch）。
