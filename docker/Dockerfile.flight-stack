@@ -45,7 +45,7 @@ COPY staging/dlio_ws_src /opt/dlio_ws/src
 # `dt == 0`这一种情况，挡不住"非零但极小"——极小dt配上仿真里几乎零噪声的IMU
 # 读数中偶发的微小抖动，会在除法/积分时被放大成数值尖峰，是DLIO在静止状态下
 # 依然发散的一个具体、可验证的推手。两处都改成`dt < 1e-4`的下限钳位。
-COPY patches/dlio_pointcloud_qos.patch patches/dlio_debug_throttle.patch patches/dlio_imu_dt_clamp.patch patches/dlio_extrinsics_mount.patch patches/dlio_namespace.patch patches/dlio_gicp_fitness_debug.patch patches/dlio_bias_bounds_tighten.patch patches/dlio_keyframe_insertion_debug.patch patches/dlio_keyframe_velocity_check.patch patches/dlio_propagate_debug.patch patches/dlio_prev_imu_stamp_fix.patch patches/dlio_gravity_align_default.patch patches/dlio_spaciousness_oob_fix.patch patches/dlio_gicp_lost_track_fallback.patch /tmp/
+COPY patches/dlio_pointcloud_qos.patch patches/dlio_debug_throttle.patch patches/dlio_imu_dt_clamp.patch patches/dlio_extrinsics_mount.patch patches/dlio_namespace.patch patches/dlio_gicp_fitness_debug.patch patches/dlio_bias_bounds_tighten.patch patches/dlio_keyframe_insertion_debug.patch patches/dlio_keyframe_velocity_check.patch patches/dlio_propagate_debug.patch patches/dlio_prev_imu_stamp_fix.patch patches/dlio_gravity_align_default.patch patches/dlio_spaciousness_oob_fix.patch patches/dlio_gicp_lost_track_fallback.patch patches/dlio_odom_publish_timer_cb_group.patch /tmp/
 RUN cd /opt/dlio_ws/src/direct_lidar_inertial_odometry \
     && (git apply --check /tmp/dlio_pointcloud_qos.patch && git apply /tmp/dlio_pointcloud_qos.patch \
         || echo "!! dlio_pointcloud_qos.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
@@ -74,7 +74,9 @@ RUN cd /opt/dlio_ws/src/direct_lidar_inertial_odometry \
     && (git apply --check /tmp/dlio_spaciousness_oob_fix.patch && git apply /tmp/dlio_spaciousness_oob_fix.patch \
         || echo "!! dlio_spaciousness_oob_fix.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
     && (git apply --check /tmp/dlio_gicp_lost_track_fallback.patch && git apply /tmp/dlio_gicp_lost_track_fallback.patch \
-        || echo "!! dlio_gicp_lost_track_fallback.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h !!")
+        || echo "!! dlio_gicp_lost_track_fallback.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h !!") \
+    && (git apply --check /tmp/dlio_odom_publish_timer_cb_group.patch && git apply /tmp/dlio_odom_publish_timer_cb_group.patch \
+        || echo "!! dlio_odom_publish_timer_cb_group.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h（给100Hz的odom发布定时器分配独立callback group，缓解px4ctrl报ODOM frequency过低的问题) !!")
 # 用户问"NX02这个现象到底是不是IMU积分的问题，还是IMU本身有问题"——
 # 顺着GICP fitness全程可疑地卡在0.0000这条线，直接读了NanoGICP/
 # LsqRegistration(nano_gicp.cc、lsq_registration.cc)的优化器实现，找到了

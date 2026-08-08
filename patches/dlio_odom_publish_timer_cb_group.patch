@@ -1,0 +1,36 @@
+diff --git a/include/dlio/odom.h b/include/dlio/odom.h
+index 51641b3..1cbc39a 100755
+--- a/include/dlio/odom.h
++++ b/include/dlio/odom.h
+@@ -113,7 +113,7 @@ private:
+   // Subscribers
+   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub;
+   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
+-  rclcpp::CallbackGroup::SharedPtr lidar_cb_group, imu_cb_group;
++  rclcpp::CallbackGroup::SharedPtr lidar_cb_group, imu_cb_group, publish_timer_cb_group;
+ 
+   // Publishers
+   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub;
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index 4e9f190..f5597d0 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -52,8 +52,16 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
+ 
+   this->br = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
+ 
+-  this->publish_timer = this->create_wall_timer(std::chrono::duration<double>(0.01), 
+-      std::bind(&dlio::OdomNode::publishPose, this));
++  // 独立callback group——原来这个100Hz定时器落在默认group里，跟lidar_sub/
++  // imu_sub各自专属的MutuallyExclusive group不是一回事，但MultiThreadedExecutor
++  // 调度默认group本身没有优先级保证；docker_sim这套仿真双机+Gazebo一起跑，
++  // 实测odom_pub->publish()这个定时器达到率只有~92-94Hz（px4ctrl要求
++  // >=100Hz，严格按每秒收到的消息数判定，稍微不够就会一直报警），跟
++  // lidar_cb_group/imu_cb_group分开，让MultiThreadedExecutor能给它单独
++  // 分配线程，减少跟点云/IMU回调抢占同一个默认执行队列的机会。
++  this->publish_timer_cb_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
++  this->publish_timer = this->create_wall_timer(std::chrono::duration<double>(0.01),
++      std::bind(&dlio::OdomNode::publishPose, this), this->publish_timer_cb_group);
+ 
+   this->T = Eigen::Matrix4f::Identity();
+   this->T_prior = Eigen::Matrix4f::Identity();
