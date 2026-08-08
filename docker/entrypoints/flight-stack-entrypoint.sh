@@ -340,6 +340,24 @@ ros2 launch ego_planner_bridge ego_planner_docker_sim.launch.py \
     namespace:="${NAMESPACE}" drone_id:="${DRONE_ID}" &
 sleep 2
 
+# grid_map/frame_id="${NAMESPACE}/map"只是occupancy_inflate等消息header里的
+# 一个字符串标签，ego_planner自己从不发对应的TF——2026-08-08用户反馈
+# multi_ego_planner.rviz里点云/建图/轨迹全都显示不出来，`ros2 topic echo /tf`
+# 实测确认：DLIO正常发布"${NAMESPACE}/odom -> ${NAMESPACE}/base_link"，
+# UWB frame_align机制（跟PLANNER无关，一直在跑）也正常发布
+# "NX01/map -> NX02/map"把两机的map连在一起，但"${NAMESPACE}/map"跟
+# "${NAMESPACE}/odom"这两个名字之间从来没有任何TF——RViz要渲染一条消息，
+# 需要从消息的frame_id沿着TF树连到Fixed Frame，这一环缺失导致所有
+# frame_id="${NAMESPACE}/map"的显示内容（occupancy_inflate等）永远连不到
+# Fixed Frame，等于什么都画不出来；同时因为两机的map->odom各自都缺这一环，
+# NX01/NX02也没法通过"NX01/map<->NX02/map"这条已有的桥连起来一起显示。
+# 补一条恒等静态TF——ego_planner里grid_map/odom直接remap吃DLIO的odom
+# （见ego_planner_docker_sim.launch.py），"map"和"odom"在这套集成里数值上
+# 就是同一个坐标系，没有实际的位姿差异，零偏移刚好合适。
+ros2 run tf2_ros static_transform_publisher \
+    0 0 0 0 0 0 "${NAMESPACE}/map" "${NAMESPACE}/odom" \
+    --ros-args -r __node:="${NAMESPACE}_static_tf_ego_planner_map_odom" &
+
 fi
 
 echo "== [flight-stack:${NAMESPACE}] 启动 ros2_px4_stack 支撑节点 (repub_odom/mocap_to_livox_frame/静态TF；RUN_OFFBOARD_FOLLOWER=${RUN_OFFBOARD_FOLLOWER}时一并起track_dynus_traj) =="

@@ -1,0 +1,24 @@
+diff --git a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink b/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
+index 17ef44521b..48f2180c66 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
++++ b/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
+@@ -24,6 +24,19 @@ mavlink stream -r 10 -s OPTICAL_FLOW_RAD -u $udp_gcs_port_local
+ 
+ # API/Offboard link
+ mavlink start -x -u $udp_offboard_port_local -r 4000000 -f -m onboard -o $udp_offboard_port_remote
++# -m onboard的默认流表（mavlink_main.cpp的MAVLINK_MODE_ONBOARD分支）把
++# HIGHRES_IMU/ATTITUDE_QUATERNION都限速在50Hz——这是给px4ctrl这类板外控制器
++# 用的链路，mavros的imu/data插件是拿这两个消息融合出sensor_msgs/Imu，50Hz
++# 上限导致px4ctrl自己"IMU frequency seems lower than 100Hz"的检查必然触发
++# （不是网络拥堵/DDS问题，是固件默认配置这条链路本来就到不了100Hz，跟
++# mid360/imu走的是完全不同的链路，互不影响，这也是为什么mid360/imu能到
++# 260Hz而mavros/imu/data卡在只有二十几Hz的部分原因——固件层先设了个50Hz的
++# 天花板，网络/DDS层面的开销在这个已经偏低的天花板之上又打了一次折）。
++# 显式覆盖成200Hz/100Hz——mavlink stream命令可以在mavlink start之后随时
++# 追加调整同一个链路已有的流速率，不需要碰任何编译代码，这个脚本本身就是
++# 运行时直接从ROMFS磁盘读的（sim_env下同理）。
++mavlink stream -r 200 -s HIGHRES_IMU -u $udp_offboard_port_local
++mavlink stream -r 100 -s ATTITUDE_QUATERNION -u $udp_offboard_port_local
+ 
+ # Onboard link to camera
+ mavlink start -x -u $udp_onboard_payload_port_local -r 4000 -f -m onboard -o $udp_onboard_payload_port_remote
