@@ -5997,3 +5997,42 @@ inflation=0.35`是否够用、`optimization/lambda_collision`权重是否需要�
 实测数据支撑），但完整的end-to-end重新起飞测试还没做——下一步：重新build
 （这次`Dockerfile.sim-world`加了新patch，需要`docker compose build
 sim-world`，`flight-stack-nx01`因为entrypoint.sh也改了同样需要重建）。
+
+## px4ctrl又报ODOM频率过低——跟IMU那次不是同一类问题（2026-08-08）
+
+用户反馈px4ctrl还提示"ODOM频率也太低，低于100hz"——px4ctrl的`odom`话题
+两个规划器都remap到`dlio/odom_node/odom`（DLIO自己的里程计，不是mavros的
+odom），所以这个跟mavros/imu那次是两条完全不同的链路。
+
+实测`ros2 topic hz /NX01/dlio/odom_node/odom`：~92-94Hz，`mid360/imu`同时
+测是~251-256Hz（很健康，作为对照）。查`input.cpp`的检查逻辑
+（`Odom_Data_t::feed`）：不是瞬时抖动误报，是严格按"每1秒收到的消息数"
+计数，低于100就报警——94Hz这种持续性的小缺口每次都会稳定触发。
+
+**跟mavros/imu那次性质不同**：那次是PX4固件`MAVLINK_MODE_ONBOARD`分支把
+`HIGHRES_IMU`硬编码限速在50Hz，纯配置问题，跟负载无关。这次查DLIO自己的
+`odom.cc`：`create_wall_timer(0.01)`本身就是在正确地要100Hz，
+`publishPose()`函数体里也没有任何跳过/节流逻辑——请求的速率是对的，缺口
+纯粹是执行层面的。原因：这个定时器创建时没有指定callback group，落在
+rclcpp默认group里，而`lidar_sub`/`imu_sub`各自都有专属的`MutuallyExclusive`
+group——docker_sim这套双机+Gazebo一起跑的真实负载下，默认group没有调度
+优先级保证。给这个定时器也单独开一个callback group（跟已有的
+`lidar_cb_group`/`imu_cb_group`同一个模式），让`MultiThreadedExecutor`
+能独立调度它，不跟落在默认group里的其它工作抢占。
+
+新增`patches/dlio_odom_publish_timer_cb_group.patch`，模拟了DLIO现有的
+完整14个patch序列+这次新加的一起跑，确认在真实应用顺序下仍能干净应用
+（这几个patch都碰`odom.cc`/`odom.h`，顺序敏感）。
+
+**没有做的**：这次没有编译验证过（`create_wall_timer`带
+`callback_group`参数这个rclcpp Humble API签名凭经验判断是对的，跟
+`lidar_sub`/`imu_sub`的写法完全对应，但没有实际跑过colcon build确认
+编译通过）；也没有验证过这条修复能把94Hz真正提升到100Hz以上——如果
+独立callback group之后还是不够，下一个可以调的方向是
+`MultiThreadedExecutor`的线程数（`odom_node.cc`里`spin()`调用有没有
+显式指定`number_of_threads`，默认是"CPU核数"，理论上够用，但双机+Gazebo
+真实抢占下不一定真的能拿到期望的线程调度优先级）。
+
+**这轮加起来又要build镜像**：CycloneDDS那部分（base镜像）用户已经build
+过了，还需要`sim-world`（PX4 patch）+`flight-stack-nx01`（TF修复+DLIO
+callback group patch）这两个。
