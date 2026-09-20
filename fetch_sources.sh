@@ -24,6 +24,16 @@ want() {
   [[ ",$ONLY," == *",$1,"* ]]
 }
 
+# 2026-09-20：下面所有仓库的ref一律用完整/短提交号或tag，**不要写分支名**。
+# 之前 mighty(main)、ros2_px4_stack(dynus)、dlio(feature/ros2) 以及三个
+# gazebo素材仓库锁的是分支，上游一提交新代码，重跑这个脚本拿到的源码就跟
+# 当前这套镜像不是同一份了——而 patches/ 下63个补丁是按当前版本的行号写的，
+# 上游一动补丁就套不上（这个坑踩过一次，见TODO.md里mighty/ros2_px4_stack
+# 三个patch重写的记录：「真实源码比原patch假设的版本多了一段docstring，
+# 行号全部对不上，不是简单改hunk头能救的」）。要跟进上游更新时，手动把对应
+# 那行的提交号换掉、重新验证补丁能套上，而不是让它自己悄悄变。
+# 注意：`git fetch --all --tags` 对已存在的目录仍会拉新提交，但 checkout
+# 锁的是这里写死的提交号，所以工作区内容是确定的。
 clone_pin() {
   # clone_pin <group> <url> <dest_dir> <ref(branch/tag/commit)>
   local group=$1 url=$2 dest=$3 ref=$4
@@ -54,12 +64,12 @@ fi
 echo "############################################"
 echo "# 2. DLIO (vectr-ucla, ROS2分支)             #"
 echo "############################################"
-clone_pin dlio https://github.com/vectr-ucla/direct_lidar_inertial_odometry.git dlio_ws_src/direct_lidar_inertial_odometry feature/ros2
+clone_pin dlio https://github.com/vectr-ucla/direct_lidar_inertial_odometry.git dlio_ws_src/direct_lidar_inertial_odometry c8acc37100e3  # 原为分支feature/ros2，2026-09-20锁定
 
 echo "############################################"
 echo "# 3. mighty 及 mighty.repos 里的全部依赖      #"
 echo "############################################"
-clone_pin mighty https://github.com/mit-acl/mighty.git mighty_ws_src/mighty main
+clone_pin mighty https://github.com/mit-acl/mighty.git mighty_ws_src/mighty 0c2e9d772997  # 原为分支main，2026-09-20锁定
 clone_pin mighty https://gitlab.com/mit-acl/lab/acl-mapping.git mighty_ws_src/acl-mapping 0d3875daf29d163a35c19d356c4652a749ed501d
 clone_pin mighty https://github.com/kotakondo/dynus_interfaces.git mighty_ws_src/dynus_interfaces 628a682c6a12b07fb2be7cffb4782ccdfe5b323d
 clone_pin mighty https://github.com/kotakondo/gazebo_ros_pkgs.git mighty_ws_src/gazebo_ros_pkgs ed1f7b886971d7bf898e6e0f59c622df929c0521
@@ -95,7 +105,7 @@ clone_pin mighty https://github.com/Livox-SDK/Livox-SDK2.git livox_ws_src/Livox-
 echo "############################################"
 echo "# 4. ros2_px4_stack（kotakondo, dynus分支）  #"
 echo "############################################"
-clone_pin ros2px4 https://github.com/kotakondo/ros2_px4_stack.git ros2_px4_stack dynus
+clone_pin ros2px4 https://github.com/kotakondo/ros2_px4_stack.git ros2_px4_stack f4235a9ef8cd  # 原为分支dynus，2026-09-20锁定
 
 echo "############################################"
 echo "# 5. ego-planner-swarm（ZJU-FAST-Lab, ROS2分支）#"
@@ -124,9 +134,9 @@ echo "############################################"
 echo "# 7. hospital/office/tunnel 三个world依赖的  #"
 echo "#    外部Gazebo模型资产（体积较大，选做）     #"
 echo "############################################"
-clone_pin gz_assets https://github.com/aws-robotics/aws-robomaker-hospital-world.git gazebo_models_external/aws-robomaker-hospital-world ros1
-clone_pin gz_assets https://github.com/osrf/gazebo_models.git gazebo_models_external/osrf-gazebo_models master
-clone_pin gz_assets https://github.com/osrf/subt.git gazebo_models_external/osrf-subt master
+clone_pin gz_assets https://github.com/aws-robotics/aws-robomaker-hospital-world.git gazebo_models_external/aws-robomaker-hospital-world 39969a9d2501  # 原为分支ros1，2026-09-20锁定
+clone_pin gz_assets https://github.com/osrf/gazebo_models.git gazebo_models_external/osrf-gazebo_models 8163eb4b5e7e  # 原为分支master，2026-09-20锁定
+clone_pin gz_assets https://github.com/osrf/subt.git gazebo_models_external/osrf-subt 083c6a8acb0c  # 原为分支master，2026-09-20锁定
 
 echo "############################################"
 echo "# 8. point-lio ROS2移植（dfloreaa个人fork，仅用于SLAM选型评估，#"
