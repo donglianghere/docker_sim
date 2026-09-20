@@ -1,0 +1,29 @@
+# 起飞动作（2026-09-20新增）。把"起飞完成判定"从选手侧下沉到机载：
+# server 自己发 TakeoffLand{TAKEOFF} 给控制器、自己看 armed 与里程计、
+# 自己判完成，调用方只发目标、等结果。依据见 docker_sim/模块运行位置与
+# 消息流转设计表.docx 第十五章。
+#
+# server 实现在 contest_mission/takeoff_monitor_node.py，对下仍然发
+# takeoff_land 话题，所以 pt4ctrl / px4ctrl / so3ctrl 三个控制器通用，
+# 不需要每个控制器各实现一份（ros2_px4_stack 没有这条话题，不支持）。
+
+# ---- Goal ----
+# 总超时；<=0 表示用 server 自己的默认参数值
+float32 timeout_s
+---
+# ---- Result ----
+bool success
+# 结束在哪个阶段：armed / stable / hover / done
+string stage
+# 失败原因或成功说明，直接面向人读
+string message
+# 结束时的高度（局部坐标 z），成功时是悬停高度
+float32 final_z
+---
+# ---- Feedback ----
+# 当前阶段：wait_armed / wait_stable / hover
+string phase
+bool armed
+float32 current_z
+# 相对 armed 那一刻的爬升量
+float32 climb_m

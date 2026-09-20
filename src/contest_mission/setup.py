@@ -26,6 +26,7 @@ setup(
             'fire_pillar_aim_node = contest_mission.fire_pillar_aim_node:main',
             'formation_follower_node = contest_mission.formation_follower_node:main',
             'actuator_action_node = contest_mission.actuator_action_node:main',
+            'takeoff_monitor_node = contest_mission.takeoff_monitor_node:main',
             'mission_judge_node = contest_mission.mission_judge_node:main',
             'scenario_reset_node = contest_mission.scenario_reset_node:main',
         ],

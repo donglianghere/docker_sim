@@ -170,6 +170,28 @@ TAKEOFF_STABLE_POS_TOLERANCE_M = 0.3
 #: 额外强制悬停这么久再返回，给控制器更多收敛裕量。
 HOVER_AFTER_TAKEOFF_S = 5.0
 
+#: 探测机载 Takeoff action server 是否存在的等待时长（2026-09-20新增）。
+#: 只是探测，不是等起飞——server 不在就立刻退回老路，不能在这里白等。
+#: "已在空中"判定阈值（2026-09-20实测补上，跟机载 takeoff_monitor_node
+#: 的 already_airborne_z_m 参数同义）：调 takeoff() 时飞机已经解锁且高度
+#: 超过这个值，直接返回成功，不重复下发起飞指令。
+#:
+#: 为什么需要：爬升基线取的是"armed那一刻的高度"，飞机已经在悬停时再调
+#: 一次 takeoff()，基线就是当前悬停高度，"相对基线再爬升
+#: TAKEOFF_MIN_CLIMB_M"这个条件永远不成立，于是白等到超时才报错——实测
+#: 复现过。这条短路让两条路径（action 与退回的选手侧判定）行为一致。
+ALREADY_AIRBORNE_Z_M = 0.5
+
+ACTION_SERVER_PROBE_TIMEOUT_S = 2.0
+
+#: 等 action goal 被 accept/reject 的时长。这一步是一次 service 往返，
+#: 正常是毫秒级，给 5 秒是留给 DDS 发现没跟上的余量。
+ACTION_GOAL_ACCEPT_TIMEOUT_S = 5.0
+
+#: 等 result 时在调用方 timeout 之上额外留的余量，避免机载判定的超时
+#: 和选手侧的超时同时到期、导致分不清是谁先超时。
+ACTION_RESULT_EXTRA_TIMEOUT_S = 10.0
+
 #: 2026-09-17新增：起飞前置检查的超时时间——UWB/里程计数据就绪、PX4
 #: 飞控连接，这两项检查各自用这个超时（不复用`timeout`参数，因为这两项
 #: 正常情况下应该在容器/飞控完全启动后的几秒内就绪，用总的起飞超时
@@ -512,6 +534,19 @@ class DroneSDK:
         from vision_msgs.msg import Detection2DArray
 
         self._TakeoffLand = TakeoffLand
+
+        # 2026-09-20：机载起飞判定用的 action 类型，跟 TakeoffLand 同一个
+        # 包（contestant-sdk 镜像本来就从 flight-stack 拷它的安装产物）。
+        # quadrotor_msgs 还是旧版（没有 action 定义）时置 None，takeoff()
+        # 会自动退回选手侧判定那条老路。
+        try:
+            from quadrotor_msgs.action import Takeoff as _TakeoffAction
+            from rclpy.action import ActionClient as _ActionClient
+            self._Takeoff = _TakeoffAction
+            self._takeoff_action_cli = _ActionClient(self._node, _TakeoffAction, 'takeoff')
+        except ImportError:
+            self._Takeoff = None
+            self._takeoff_action_cli = None
         self._Path = Path
         self._Empty = Empty
 
@@ -1355,6 +1390,28 @@ class DroneSDK:
 
         self.pretakeoff_yaw = self.get_current_yaw()
         self.set_yaw_mode_constant(self.pretakeoff_yaw)
+
+        # 2026-09-20：起飞完成判定已下沉到机载（takeoff_monitor_node 的
+        # Takeoff action）。这里优先走 action：发一个 goal、等 result，
+        # 判定回路整个留在飞机上，链路延迟只影响拿到结论的快慢。
+        #
+        # 机载节点不在（flight-stack 镜像还没重新 build）时自动退回下面
+        # 那条老路——自己发 takeoff_land 话题 + 在选手侧轮询判定。两个
+        # 镜像因此可以分开重建，中间状态不会坏。
+        if self._try_takeoff_via_action(timeout):
+            return
+
+        self._progress('机载起飞 action 不可用，退回选手侧判定（行为与改造前一致）')
+
+        # 跟机载 server 同一条短路：已经在空中就直接返回，不重复下发起飞
+        # 指令（飞机正在 AUTO_HOVER，再塞一条 TAKEOFF 只会扰动状态机）。
+        if self._armed is True and self._odom_xyz is not None \
+                and self._odom_xyz[2] >= ALREADY_AIRBORNE_Z_M:
+            self._progress(
+                f'飞机已解锁且高度{self._odom_xyz[2]:.2f}m，判定为已在空中，跳过起飞'
+            )
+            return
+
         self._publish_takeoff_land(self._TakeoffLand.TAKEOFF)
 
         def _progress_armed() -> None:
@@ -1432,6 +1489,75 @@ class DroneSDK:
         self._progress(f'起飞后额外悬停{HOVER_AFTER_TAKEOFF_S:.0f}秒，稳定后再出发…')
         time.sleep(HOVER_AFTER_TAKEOFF_S)
         self._progress('悬停确认稳定，可以出发')
+
+    def _try_takeoff_via_action(self, timeout: float) -> bool:
+        """尝试走机载的 Takeoff action。
+
+        Returns:
+            True 表示 action 路径走完且起飞成功；False 表示机载 server
+            不可用（镜像还没重建、或这次用的控制器组合没起这个节点），
+            调用方应退回老路。
+
+        Raises:
+            TakeoffTimeoutError: server 在、但明确返回失败或超时——这种
+                情况不能退回老路重发一次起飞指令（飞机可能已经在空中），
+                直接把失败抛给调用方，`stage` 带上机载判定的阶段。
+        """
+        if self._takeoff_action_cli is None:
+            return False
+        # server 不在就立刻退回，不白等：这一步只是探测，不是等起飞
+        if not self._takeoff_action_cli.wait_for_server(timeout_sec=ACTION_SERVER_PROBE_TIMEOUT_S):
+            return False
+
+        goal = self._Takeoff.Goal()
+        goal.timeout_s = float(timeout)
+
+        def _on_feedback(msg: Any) -> None:
+            fb = msg.feedback
+            self._progress(
+                f'起飞中…阶段{fb.phase}，armed={fb.armed}，当前高度{fb.current_z:.2f}m，'
+                f'已爬升{fb.climb_m:.2f}m（判定在机载）'
+            )
+
+        send_future = self._takeoff_action_cli.send_goal_async(goal, feedback_callback=_on_feedback)
+        if not self._wait_future(send_future, ACTION_GOAL_ACCEPT_TIMEOUT_S):
+            raise TakeoffTimeoutError(
+                timeout_s=ACTION_GOAL_ACCEPT_TIMEOUT_S, namespace=self.namespace,
+                stage='action_goal_no_response')
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            # server 在但拒绝了——通常是上一次起飞流程还没结束
+            raise TakeoffTimeoutError(
+                timeout_s=timeout, namespace=self.namespace, stage='action_goal_rejected')
+
+        result_future = goal_handle.get_result_async()
+        # 给机载判定留出比自身 timeout 更宽的余量，避免两侧超时同时到期
+        if not self._wait_future(result_future, timeout + ACTION_RESULT_EXTRA_TIMEOUT_S):
+            raise TakeoffTimeoutError(
+                timeout_s=timeout, namespace=self.namespace, stage='action_result_timeout')
+
+        result = result_future.result().result
+        if not result.success:
+            self._progress(f'机载起飞判定失败：{result.message}')
+            raise TakeoffTimeoutError(
+                timeout_s=timeout, namespace=self.namespace, stage=result.stage)
+        self._progress(f'起飞完成（机载判定）：{result.message}')
+        return True
+
+    def _wait_future(self, future: Any, timeout_s: float) -> bool:
+        """在调用方线程里轮询等待一个 future 完成。
+
+        不能用 `rclpy.spin_until_future_complete()`：这个 SDK 的 rclpy
+        运行时已经有一条后台 spin 线程在跑（见 `_rclpy_runtime.py`），
+        再在别的线程里 spin 同一个 executor 会互相打架。后台线程照常
+        处理回调，这里只需要轮询 future 的完成标志。
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if future.done():
+                return True
+            time.sleep(0.05)
+        return future.done()
 
     def land(self, timeout: float = 30.0) -> None:
         """降落：发布`TakeoffLand{LAND}`，阻塞直到`mavros/state`确认

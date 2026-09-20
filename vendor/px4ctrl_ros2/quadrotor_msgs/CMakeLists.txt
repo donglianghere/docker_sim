@@ -5,6 +5,7 @@ find_package(ament_cmake REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(action_msgs REQUIRED)  # 2026-09-20：Takeoff.action 需要
 
 # px4ctrl只用到这三个消息（原Fast-Drone-250 quadrotor_msgs包里另外23个消息
 # 跟px4ctrl无关，未移植）。PositionCommand.msg里的jerk字段必须保留——
@@ -14,7 +15,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PositionCommand.msg"
   "msg/TakeoffLand.msg"
   "msg/Px4ctrlDebug.msg"
-  DEPENDENCIES std_msgs geometry_msgs
+  "action/Takeoff.action"
+  DEPENDENCIES std_msgs geometry_msgs action_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime std_msgs geometry_msgs)

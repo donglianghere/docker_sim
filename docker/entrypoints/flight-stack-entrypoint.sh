@@ -1586,6 +1586,14 @@ if [ "${DEPLOY_TARGET}" != "hw" ]; then
     echo "== [flight-stack:${NAMESPACE}] 启动 actuator_action_node（阶段6.1执行器符号化动作） =="
     ros2 run contest_mission actuator_action_node \
         --ros-args -r __ns:="/${NAMESPACE}" &
+    # 2026-09-20：起飞完成判定下沉到机载（Takeoff action server）。对下
+    # 仍然发takeoff_land话题，所以pt4ctrl/px4ctrl/so3ctrl三个控制器通用，
+    # 不需要各实现一份；CONTROLLER=ros2_px4_stack没有这条话题，那条路线
+    # 下这个节点不起作用（既有约束，不是这次引入的）。SDK侧探测不到这个
+    # server时会自动退回原来的选手侧判定，所以镜像可以分开重建。
+    echo "== [flight-stack:${NAMESPACE}] 启动 takeoff_monitor_node（起飞完成判定，机载） =="
+    ros2 run contest_mission takeoff_monitor_node \
+        --ros-args -r __ns:="/${NAMESPACE}" &
 fi
 
 wait
