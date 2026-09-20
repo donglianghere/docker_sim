@@ -68,8 +68,33 @@ A4节"未决问题"）**：三个动作具体对应哪个RC通道号、什么PWM
 ROS2参数（见下面`declare_parameter`），先用统一的占位值（通道9、
 PWM 2000、保持1秒）让链路跑通——这三个占位值不代表最终真实配置**，
 真实通道确定后改launch参数就行，不需要改这个文件的代码。
+
+**2026-09-20新增：`action_goal_id`（幂等去重 + 结果关联）**。原来的触发
+方式只设一个`action_name`参数、完成后广播`done:<name>`，有两个真实隐患：
+1. **没有幂等**：参数重复设成同一个值（调用方重试、或者防DDS发现没跟上
+   而连发几次——SDK里`goto()`/`cancel_goto()`就有这种连发防护）会被当成
+   两次独立触发，抓取动作可能真的执行两次。
+2. **结果关联不上**：`done:<name>`里没有任何标识，调用方分不清收到的是
+   "这一次"的完成，还是上一次遗留的状态——只能靠调用前清空本地缓存这种
+   client侧的约定去规避，跨进程重启就失效。
+
+做法（不引入自定义.srv/action接口包，维持"零接口包"的既有风格）：调用方
+在**同一次**`~/set_parameters`调用里同时设`action_name`和`action_goal_id`
+（SDK的`_call_set_parameters_blocking()`本来就是把dict一次性打包成一个
+SetParameters请求，天然满足"同一批"这个要求）。本节点按`goal_id`判重：
+- 同一个`goal_id`正在执行 -> 不重复触发，重新广播一次当前`running`状态；
+- 同一个`goal_id`已经完成 -> 不重复触发，重新广播那次的`done`状态（这样
+  调用方即使错过了第一次广播，重试一次也能拿到结果，而不是把动作再做一遍）；
+- 新的`goal_id`但上一个动作还没结束 -> 明确广播`rejected:...:busy`，让调用
+  方立刻失败，而不是干等到超时（原来的行为是只打一条warn日志就丢弃）。
+
+状态话题格式因此扩展为`<kind>:<name>:<goal_id>`（kind取running/done/
+rejected，rejected再多一段原因）。**向后兼容**：`goal_id`为空字符串时
+（老调用方只设`action_name`），完全维持原来的`done:<name>`格式和原来的
+行为不变，不会破坏任何现有调用方。
 """
 import time
+from collections import OrderedDict
 from typing import Optional, Tuple
 
 from mavros_msgs.msg import OverrideRCIn
@@ -93,12 +118,19 @@ _KNOWN_ACTIONS = ('grab_supply', 'drop_supply', 'horizontal_launch')
 # 使用时再换算成数组下标。
 _NUM_RC_CHANNELS = 18
 
+# 记住多少个已完成的goal_id用于重复下发时重播结果（有界FIFO，防止长时间
+# 运行后无限增长）。一次任务里的动作数量是个位数量级，32足够宽裕。
+_COMPLETED_GOALS_MAX = 32
+
 
 class ActuatorActionNode(Node):
     def __init__(self):
         super().__init__('actuator_action_node')
 
         self.declare_parameter('action_name', '')
+        # 调用方为这一次触发生成的唯一标识（见文件头"action_goal_id"一节）。
+        # 空字符串=老调用方，维持原有行为。
+        self.declare_parameter('action_goal_id', '')
 
         # ≥10Hz是方案1.6节的硬性要求（PX4侧没有超时自动失效机制，必须
         # 靠持续发布维持覆盖状态）；默认给20Hz留一点余量，不是刚好卡在
@@ -119,6 +151,14 @@ class ActuatorActionNode(Node):
 
         self._last_action: Optional[str] = None
         self._last_action_time = None
+
+        # 幂等去重用的运行时状态（见文件头"action_goal_id"一节）。
+        # _active_goal_id: 当前正在执行的那次触发的goal_id（空串=老调用方）。
+        # _completed_goals: 最近完成过的goal_id -> 当时广播的完整状态字符串，
+        #   用于"同一个goal_id重复下发时重播结果而不是重做动作"。用
+        #   OrderedDict当有界FIFO，避免长时间运行后无限增长。
+        self._active_goal_id: str = ''
+        self._completed_goals: "OrderedDict[str, str]" = OrderedDict()
 
         # 当前正在执行的动作的运行时状态（None表示当前没有动作在进行）。
         self._override_timer = None
@@ -143,36 +183,68 @@ class ActuatorActionNode(Node):
         )
 
     def _on_set_parameters(self, params):
+        """参数回调。
+
+        注意这是"设置前"的校验回调——此时新值还没写进参数存储，所以
+        `goal_id`必须从这一批`params`里取，不能用`self.get_parameter()`
+        （那样拿到的是上一次的旧值）。调用方把`action_name`和
+        `action_goal_id`放在同一次set_parameters请求里，这里就能在同一
+        批里同时看到两者。
+        """
+        action_name = None
+        goal_id = None
         for p in params:
-            if p.name != 'action_name':
-                continue
-            action_name = p.value
-            if not action_name:
-                continue  # 空字符串不触发动作，只是"清空"当前记录的动作名
-            self._trigger_action(action_name)
+            if p.name == 'action_name':
+                action_name = p.value
+            elif p.name == 'action_goal_id':
+                goal_id = p.value
+        if action_name:
+            # goal_id缺省（老调用方只设action_name）时用空串，走兼容路径。
+            self._trigger_action(action_name, goal_id or '')
+        # action_name为空字符串时不触发动作，只是"清空"当前记录的动作名
         return SetParametersResult(successful=True)
 
-    def _trigger_action(self, action_name: str):
+    def _trigger_action(self, action_name: str, goal_id: str = ''):
         mapping = self._resolve_action_mapping(action_name)
         if mapping is None:
             self.get_logger().warn(
                 f'未知动作名: {action_name}（已知动作: {_KNOWN_ACTIONS}），没有对应的RC'
                 f'通道映射，忽略这次触发'
             )
+            self._publish_action_status('rejected', action_name, goal_id, reason='unknown_action')
             return
+
+        if goal_id:
+            # 幂等：同一个goal_id重复下发，不重做动作，只重播当前/历史状态。
+            if goal_id == self._active_goal_id and self._override_timer is not None:
+                self.get_logger().info(
+                    f'goal_id={goal_id} 正在执行中，这次重复下发不再触发动作，只重播running状态'
+                )
+                self._publish_action_status('running', action_name, goal_id)
+                return
+            if goal_id in self._completed_goals:
+                self.get_logger().info(
+                    f'goal_id={goal_id} 之前已完成，这次重复下发不再触发动作，只重播完成状态'
+                )
+                self._publish_status(self._completed_goals[goal_id])
+                return
+
         if self._override_timer is not None:
             # 上一个动作的override发布回路还没结束（还没到hold_duration_s/
             # 还没释放通道），此时如果再叠加一个新动作，两个动作可能争抢
-            # 同一个RC通道，行为会变得不可预测——所以这里选择直接忽略新
-            # 触发、打警告，而不是打断上一个动作或者排队。
+            # 同一个RC通道，行为会变得不可预测——所以这里选择直接拒绝新
+            # 触发，而不是打断上一个动作或者排队。跟改造前的区别：现在会
+            # 明确广播一条rejected，调用方可以立刻失败，不用干等到超时。
             self.get_logger().warn(
-                f'动作{self._last_action}的override发布回路尚未结束，忽略新的触发请求: '
+                f'动作{self._last_action}的override发布回路尚未结束，拒绝新的触发请求: '
                 f'{action_name}'
             )
+            self._publish_action_status('rejected', action_name, goal_id, reason='busy')
             return
 
         rc_channel_1indexed, pwm, hold_duration_s = mapping
         self._last_action = action_name
+        self._active_goal_id = goal_id
         self._last_action_time = self.get_clock().now()
         self._active_channel_1indexed = rc_channel_1indexed
         self._active_pwm = pwm
@@ -188,6 +260,7 @@ class ActuatorActionNode(Node):
         # 先立即发一帧，不等第一个定时器周期，避免"保持时长"很短时（比如
         # 占位值1秒、频率20Hz）第一帧被无谓地延迟到1/20秒之后才发出去。
         self._publish_override(rc_channel_1indexed, pwm)
+        self._publish_action_status('running', action_name, goal_id)
         self._override_timer = self.create_timer(1.0 / rate_hz, self._on_override_tick)
 
     def _resolve_action_mapping(self, action_name: str) -> Optional[Tuple[int, int, float]]:
@@ -211,14 +284,21 @@ class ActuatorActionNode(Node):
         self._override_timer.cancel()
         self._override_timer = None
         finished_action = self._last_action
+        finished_goal_id = self._active_goal_id
         self._active_channel_1indexed = None
         self._active_pwm = None
         self._action_hold_duration_s = None
         self._action_start_monotonic = None
+        self._active_goal_id = ''
         self.get_logger().info(
             f'动作{finished_action}保持时长结束，已释放对应RC通道（设回CHAN_NOCHANGE）'
         )
-        self._publish_status(f'done:{finished_action}')
+        done_status = self._publish_action_status('done', finished_action, finished_goal_id)
+        if finished_goal_id:
+            # 记住这次的结果，供同一个goal_id重复下发时重播（有界FIFO）。
+            self._completed_goals[finished_goal_id] = done_status
+            while len(self._completed_goals) > _COMPLETED_GOALS_MAX:
+                self._completed_goals.popitem(last=False)
 
     def _publish_override(self, rc_channel_1indexed: int, value: int):
         """只改`rc_channel_1indexed`这一个通道，其余17个通道全部填
@@ -236,6 +316,22 @@ class ActuatorActionNode(Node):
             return
         msg.channels[index] = value
         self.override_pub.publish(msg)
+
+    def _publish_action_status(
+        self, kind: str, action_name: str, goal_id: str, reason: str = ''
+    ) -> str:
+        """按`<kind>:<name>:<goal_id>`格式广播动作状态，返回广播出去的字符串。
+
+        `goal_id`为空（老调用方）时退化成原来的`<kind>:<name>`格式，保证
+        既有调用方不受影响——注意这种情况下`running`/`rejected`这两种新增
+        的kind同样会广播，但老调用方只匹配`done:<name>`，多出来的状态会被
+        它忽略，不影响行为。
+        """
+        status = f'{kind}:{action_name}' if not goal_id else f'{kind}:{action_name}:{goal_id}'
+        if reason:
+            status = f'{status}:{reason}'
+        self._publish_status(status)
+        return status
 
     def _publish_status(self, status: str):
         msg = String()

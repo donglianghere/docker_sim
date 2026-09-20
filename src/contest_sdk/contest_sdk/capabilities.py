@@ -542,6 +542,9 @@ class DroneSDK:
         self.pretakeoff_yaw: Optional[float] = None
         self._waypoint_state: Optional[str] = None
         self._action_status: Optional[str] = None
+        #: `do_action()`给每次触发生成goal_id用的自增计数器（见该方法
+        #: docstring里"幂等去重+结果关联"一节）。
+        self._action_goal_counter: int = 0
         self._mission_state: Optional[str] = None
         self._servo_status: Optional[str] = None
         self._centered_pose_xy: Optional[Tuple[float, float]] = None
@@ -1054,19 +1057,55 @@ class DroneSDK:
                 两个阶段加在一起的总时长）。
 
         Raises:
-            ActionFailedError: 参数设置被拒绝，或者超过`timeout`秒仍未
-                收到`done:<name>`确认。
+            ActionFailedError: 参数设置被拒绝、机载节点明确拒绝这次触发
+                （比如上一个动作还没结束），或者超过`timeout`秒仍未收到
+                完成确认。
+
+        **幂等去重 + 结果关联（2026-09-20新增）**：每次调用生成一个
+        `goal_id`（`<namespace>-<name>-<序号>`），跟`action_name`放在
+        **同一次**`set_parameters`请求里下发，机载节点按它判重：
+        - 同一个`goal_id`重复下发不会让动作执行第二次（`grab_supply`
+          执行两次是真实风险，原来靠"调用方别重发"这个约定来规避，
+          但SDK自身为了防DDS发现没跟上本来就有连发防护，两者冲突）；
+        - 完成状态回带同一个`goal_id`，所以能确认"收到的是这一次的
+          完成"，而不是上一次遗留的状态——原来只能靠调用前清空本地
+          缓存来规避，跨进程重启就失效。
+
+        兼容老机载节点（只认`action_name`、只发`done:<name>`）：下面
+        的完成判据同时接受带`goal_id`和不带`goal_id`两种格式，所以
+        SDK升级后即使机载镜像还没重新build，行为也跟原来一致。
         """
+        self._action_goal_counter += 1
+        goal_id = f'{self.namespace}-{name}-{self._action_goal_counter}'
+
         self._action_status = None  # 清掉可能残留的上一次done状态，避免误判
         set_ok = self._call_set_parameters_blocking(
-            self._actuator_action_params_cli, {'action_name': name}, timeout_s=min(5.0, timeout)
+            self._actuator_action_params_cli,
+            {'action_name': name, 'action_goal_id': goal_id},
+            timeout_s=min(5.0, timeout),
         )
         if not set_ok:
             raise ActionFailedError(action_name=name, timeout_s=timeout, namespace=self.namespace)
 
-        target_status = f'done:{name}'
+        done_with_id = f'done:{name}:{goal_id}'
+        done_legacy = f'done:{name}'  # 老机载节点的格式，见上面docstring
+        rejected_prefix = f'rejected:{name}'
+
+        def _finished() -> bool:
+            status = self._action_status
+            if status is None:
+                return False
+            # 机载明确拒绝（busy/unknown_action）时立刻结束等待，不干等到超时
+            if status.startswith(rejected_prefix) and (not goal_id or goal_id in status):
+                raise ActionFailedError(
+                    action_name=f'{name}（机载拒绝: {status}）',
+                    timeout_s=timeout,
+                    namespace=self.namespace,
+                )
+            return status in (done_with_id, done_legacy)
+
         ok = self._poll_until(
-            lambda: self._action_status == target_status,
+            _finished,
             timeout,
             lambda: self._progress(f"执行动作'{name}'中…当前action_status={self._action_status!r}"),
         )
