@@ -2,7 +2,7 @@ diff --git a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink b/ROMFS/px4fmu_comm
 index 17ef44521b..48f2180c66 100644
 --- a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
 +++ b/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
-@@ -24,6 +24,19 @@ mavlink stream -r 10 -s OPTICAL_FLOW_RAD -u $udp_gcs_port_local
+@@ -24,6 +24,29 @@ mavlink stream -r 10 -s OPTICAL_FLOW_RAD -u $udp_gcs_port_local
  
  # API/Offboard link
  mavlink start -x -u $udp_offboard_port_local -r 4000000 -f -m onboard -o $udp_offboard_port_remote
@@ -19,6 +19,16 @@ index 17ef44521b..48f2180c66 100644
 +# 运行时直接从ROMFS磁盘读的（sim_env下同理）。
 +mavlink stream -r 200 -s HIGHRES_IMU -u $udp_offboard_port_local
 +mavlink stream -r 100 -s ATTITUDE_QUATERNION -u $udp_offboard_port_local
++# 2026-08-13补：LOCAL_POSITION_NED(_COV)在这条onboard链路的默认流表下实测
++# 只有约42~45Hz（跟`local_position/odom`实测吻合），跟上面HIGHRES_IMU/
++# ATTITUDE_QUATERNION是同一个"onboard模式默认流表限速"根因，同样显式覆盖。
++# mavros/local_position/odom是收到这条消息就1:1转发（local_position.cpp的
++# handle_local_position_ned/_cov），没有ROS侧降频；`LOCALIZATION_SOURCE=
++# uwb_imu`模式下`dlio/odom_node/odom`又是`local_position_readback_node`对
++# `local_position/odom`的纯透传（gt_odom_bridge包），这一条覆盖预期会让
++# 两个话题一起提到~100Hz，不需要分开改。
++mavlink stream -r 100 -s LOCAL_POSITION_NED -u $udp_offboard_port_local
++mavlink stream -r 100 -s LOCAL_POSITION_NED_COV -u $udp_offboard_port_local
  
  # Onboard link to camera
  mavlink start -x -u $udp_onboard_payload_port_local -r 4000 -f -m onboard -o $udp_onboard_payload_port_remote

@@ -20,6 +20,8 @@ setup(
         'console_scripts': [
             'gt_odom_bridge_node = gt_odom_bridge.gt_odom_bridge_node:main',
             'name_label_node = gt_odom_bridge.name_label_node:main',
+            'gt_cloud_bridge_node = gt_odom_bridge.gt_cloud_bridge_node:main',
+            'local_position_readback_node = gt_odom_bridge.local_position_readback_node:main',
         ],
     },
 )

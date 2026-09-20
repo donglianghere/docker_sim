@@ -1,8 +1,8 @@
 diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
-index 4634017..54a5839 100644
+index 9355e7d..2a56343 100644
 --- a/ros2_px4_stack/src/dynus_offboard_node.py
 +++ b/ros2_px4_stack/src/dynus_offboard_node.py
-@@ -332,7 +332,25 @@ class OffboardDynusFollower(BasicMavrosInterface):
+@@ -278,7 +278,24 @@ class OffboardDynusFollower(BasicMavrosInterface):
          flight_state = "TAKEOFF"
          takeoff_pos = self.point_to_traj([self.local_position.pose.position.x, self.local_position.pose.position.y, altitude])
  
@@ -21,10 +21,9 @@ index 4634017..54a5839 100644
 +                    self.local_position.pose.position.x,
 +                    self.local_position.pose.position.y,
 +                    self.local_position.pose.position.z])
-+                self.attitude_setpoint = None
 +                self.wait_for_seconds(0.1)
 +                continue
 +
              if flight_state == "TAKEOFF":
                  # self.get_logger().info("Taking Off")
-                 # TAKEOFF always uses the position/trajectory setpoint regardless of
+                 self.trajectory_setpoint = takeoff_pos

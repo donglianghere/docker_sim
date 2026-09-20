@@ -6,10 +6,34 @@
 
 背景：RViz的"2D Goal Pose"工具一次只能点一个点、发给一架飞机（见
 mighty_rviz_nx02_setgoal.patch），要同时给双机下目标点得点两次、
-自己心算INIT_X偏移，容易出错；命令行现场拼ros2 topic pub也一样
+自己心算偏移，容易出错；命令行现场拼ros2 topic pub也一样
 要手动换算，还容易踩"--once在DDS发现完成前就退出、消息丢了"这个坑
 （这次session里已经踩过好几次）。这个脚本常驻一个rclpy节点、常驻
 publisher，不是每次现拼一次性命令，从根上避开这个坑。
+
+⚠️ 2026-08-12重写：原来的换算是"world_x = local_x + INIT_X"这种只有
+x方向平移、没有旋转的简化公式（INIT_X硬编码NX01=3.0/NX02=6.0），前提
+假设"两机spawn yaw都是0，局部系跟世界系只差平移"。这个假设已经被本次
+session早些时候"给两机各自设置非零spawn yaw"（NX01=30°，NX02=-45°，
+2026-08-12后一次改成两机都非零，之前只改过NX01=45°/NX02=0°那一版）这个
+改动打破——`EKF2_EV_CTRL=15`（含yaw融合）+`EKF2_GPS_CTRL=0`意味着
+`LOCALIZATION_SOURCE=uwb_slam`模式下，PX4的绝对朝向估计完全来自DLIO
+局部SLAM系的yaw（局部系定义"飞机启动那一刻自己朝的方向=0"，跟飞机在
+Gazebo世界里的真实朝向没关系），两机在这个模式下局部系相对世界系都
+整体转了一个角度，纯平移换算是错的——不只是这个面板显示不准，
+`send_goals()`算出来的局部坐标是真的会把飞机送到错误的物理位置。
+
+修复：改用`origin_setter_node`广播的`world -> {ns}/map`这条TF（已经
+包含在线估计出的θ*旋转，不再是硬编码的纯平移假设），tf2_ros.Buffer
+现查现算，同一套SE(2)公式跟origin_setter_node.py内部用的一致（正变换
+`world = R(θ)·local + t`，反变换`local = R(θ)^-1·(world - t)`，z轴不
+旋转只平移，跟origin_setter_node的z处理一致）。代价：飞机必须先完成
+起飞点锁定（`set_origin_from_uwb`），这条TF才存在——没锁定之前这个面板
+没法做世界坐标换算，会明确提示"未标定"而不是继续用旧的错误算法蒙混。
+局部坐标数据源也从`mavros/local_position/pose`换成`dlio/odom_node/odom`
+——后者才是`origin_setter_node`自己标定/`/term_goal`实际消费的那个
+局部系，前者是PX4 EKF2自己的内部估计，两者数值上通常接近但不保证
+逐帧一致，混用会引入新的、更隐蔽的误差源。
 
 用法（在能同时访问NX01/NX02话题的容器里跑，比如flight-stack-nx01，
 ROS2话题同一个DDS domain下跨容器可见）：
@@ -33,22 +57,59 @@ ROS2话题同一个DDS domain下跨容器可见）：
 """
 
 import time
+import math
 import threading
 import curses
 
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time as RclTime
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
+from tf2_ros import Buffer, TransformListener
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
-# 每架飞机local map原点相对world的偏移，只在x方向——跟本session里
-# docker-compose.yml/AGENT_INDEX*3的约定一致，NX01=3, NX02=6。
-INIT_X = {
-    'NX01': 3.0,
-    'NX02': 6.0,
-}
+# 参与双机操作的机队——原来跟INIT_X字典的key共用，INIT_X删掉之后单独
+# 列一份，两机命名规则见docker-compose.yml。
+NAMESPACES = ['NX01', 'NX02']
 
 BOX_WIDTH = 66
+
+
+def _quat_yaw(qz, qw):
+    """这套系统里map->map/world->map这类跨机对齐TF全部是SE(2)（只有yaw，
+    没有roll/pitch），从四元数z/w分量反解yaw跟origin_setter_node.py广播
+    这条TF时用的是同一个公式的逆运算(那边是sin(θ/2)/cos(θ/2)，这里
+    2*atan2(qz,qw)就是标准四元数->yaw角公式在roll=pitch=0时的化简)。"""
+    return 2.0 * math.atan2(qz, qw)
+
+
+def local_to_world(tf, lx, ly, lz):
+    """local(在tf.child_frame_id，即{ns}/map系)->world，tf是
+    lookup_transform('world', f'{ns}/map', ...)查到的TransformStamped，
+    表示"{ns}/map在world系下的位姿"。z轴只平移不旋转，跟
+    origin_setter_node.py里_broadcast_and_persist的z处理一致（这套系统
+    只做SE(2)平面对齐，没有机身倾斜导致的高度耦合）。"""
+    t = tf.transform.translation
+    theta = _quat_yaw(tf.transform.rotation.z, tf.transform.rotation.w)
+    c, s = math.cos(theta), math.sin(theta)
+    wx = t.x + lx * c - ly * s
+    wy = t.y + lx * s + ly * c
+    wz = t.z + lz
+    return wx, wy, wz
+
+
+def world_to_local(tf, wx, wy, wz):
+    """local_to_world的逆变换，tf含义同上。"""
+    t = tf.transform.translation
+    theta = _quat_yaw(tf.transform.rotation.z, tf.transform.rotation.w)
+    c, s = math.cos(theta), math.sin(theta)
+    dx, dy = wx - t.x, wy - t.y
+    lx = dx * c + dy * s
+    ly = -dx * s + dy * c
+    lz = wz - t.z
+    return lx, ly, lz
 
 
 def display_width(s):
@@ -83,36 +144,54 @@ class DualGoalInput(Node):
         super().__init__('dual_goal_input')
         self.pubs = {
             ns: self.create_publisher(PoseStamped, f'/{ns}/term_goal', 10)
-            for ns in INIT_X
+            for ns in NAMESPACES
         }
         self.history = []  # 最近几条: (world_xyz, {ns: local_xyz}, ok)
 
-        # 双机当前世界坐标——订阅各自mavros的local_position/pose（local
-        # map系下的实际位置），加回INIT_X换算成world系，输入面板里常驻
-        # 显示，方便决定下一个目标点该给多少。
-        self.latest_local_pos = {ns: None for ns in INIT_X}
+        # 双机当前世界坐标——订阅各自的dlio/odom_node/odom（local map系下的
+        # 实际位置，也是origin_setter_node标定+/term_goal实际消费的那个
+        # 局部系），配合world -> {ns}/map这条TF换算成world系，输入面板里
+        # 常驻显示，方便决定下一个目标点该给多少。
+        self.latest_local_pos = {ns: None for ns in NAMESPACES}
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                           history=HistoryPolicy.KEEP_LAST)
-        for ns in INIT_X:
+        for ns in NAMESPACES:
             self.create_subscription(
-                PoseStamped, f'/{ns}/mavros/local_position/pose',
-                self._make_pose_cb(ns), qos)
+                Odometry, f'/{ns}/dlio/odom_node/odom',
+                self._make_odom_cb(ns), qos)
 
-    def _make_pose_cb(self, ns):
-        def cb(msg: PoseStamped):
-            p = msg.pose.position
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+    def _make_odom_cb(self, ns):
+        def cb(msg: Odometry):
+            p = msg.pose.pose.position
             self.latest_local_pos[ns] = (p.x, p.y, p.z)
         return cb
 
+    def lookup_world_map_tf(self, ns):
+        """world -> {ns}/map，origin_setter_node广播——查不到时说明这架
+        飞机还没完成起飞点锁定(或者locked过但容器重启后还没重新锁)，
+        返回None，调用方要能处理这个情况，不能当成0旋转硬凑。"""
+        try:
+            return self.tf_buffer.lookup_transform('world', f'{ns}/map', RclTime())
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            return None
+
     def current_world_positions(self):
-        """{ns: (wx,wy,wz)}，还没收到过位置数据的飞机值是None。"""
+        """{ns: (wx,wy,wz)}，还没收到过位置数据、或者还没完成起飞点锁定
+        (查不到world -> {ns}/map)的飞机值都是None——两种情况在这里不区分，
+        调用方(build_lines)按需要再细分提示文案。"""
         result = {}
         for ns, local in self.latest_local_pos.items():
             if local is None:
                 result[ns] = None
+                continue
+            tf = self.lookup_world_map_tf(ns)
+            if tf is None:
+                result[ns] = None
             else:
-                lx, ly, lz = local
-                result[ns] = (lx + INIT_X[ns], ly, lz)
+                result[ns] = local_to_world(tf, *local)
         return result
 
     def subscriber_counts(self):
@@ -120,25 +199,38 @@ class DualGoalInput(Node):
 
     def send_goals(self, world_targets):
         """world_targets: {ns: (wx,wy,wz)}——同一目标点(3个数输入)时两个
-        ns的值相同，各给各的(6个数输入)时不同。按各自的INIT_X换算成
-        local坐标后分别发布。"""
+        ns的值相同，各给各的(6个数输入)时不同。按各自world -> {ns}/map
+        这条TF(含θ*旋转)换算成local坐标后分别发布。
+
+        返回(locals_or_None, error_or_None)——任何一架飞机的TF查不到就
+        整体拒绝发送，不做"一架能发一架不能发"这种部分成功，那样两机会
+        出现一架收到新指令、一架还停在原指令上的不一致状态，比直接拒绝
+        更容易让操作员误判。"""
+        tfs = {}
+        for ns in world_targets:
+            tf = self.lookup_world_map_tf(ns)
+            if tf is None:
+                return None, (f'{ns}还没完成起飞点锁定(查不到world -> {ns}/map这条TF)，'
+                               f'无法把世界坐标换算成局部坐标，指令未发送')
+            tfs[ns] = tf
+
         locals_ = {}
         for ns, world_xyz in world_targets.items():
             wx, wy, wz = world_xyz
-            lx = wx - INIT_X[ns]
-            locals_[ns] = (lx, wy, wz)
+            lx, ly, lz = world_to_local(tfs[ns], wx, wy, wz)
+            locals_[ns] = (lx, ly, lz)
             msg = PoseStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = 'map'
             msg.pose.position.x = lx
-            msg.pose.position.y = wy
-            msg.pose.position.z = wz
+            msg.pose.position.y = ly
+            msg.pose.position.z = lz
             msg.pose.orientation.w = 1.0
             self.pubs[ns].publish(msg)
         self.history.append((dict(world_targets), locals_))
         if len(self.history) > 5:
             self.history.pop(0)
-        return locals_
+        return locals_, None
 
 
 def build_lines(node: DualGoalInput, message=''):
@@ -152,17 +244,26 @@ def build_lines(node: DualGoalInput, message=''):
     lines.append(box_sep())
     lines.append(box_line('双机当前世界坐标：'))
     world_pos = node.current_world_positions()
-    for ns in INIT_X:
+    for ns in NAMESPACES:
         wp = world_pos.get(ns)
-        if wp is None:
-            lines.append(box_line(f'  {ns}: 还没收到位置数据...'))
-        else:
+        if wp is not None:
             wx, wy, wz = wp
             lines.append(box_line(f'  {ns}: ({wx:+.2f}, {wy:+.2f}, {wz:+.2f})'))
+        elif node.latest_local_pos.get(ns) is None:
+            lines.append(box_line(f'  {ns}: 还没收到位置数据...'))
+        else:
+            lines.append(box_line(f'  {ns}: 未标定(还没触发起飞点锁定，无法换算世界坐标)'))
     lines.append(box_sep())
-    lines.append(box_line('各飞机local map原点相对world的偏移（仅x方向）：'))
-    for ns, off in INIT_X.items():
-        lines.append(box_line(f'  {ns}: world_x - {off:.1f} = local_x'))
+    lines.append(box_line('各飞机local map系相对world系的对齐(origin_setter_node标定)：'))
+    for ns in NAMESPACES:
+        tf = node.lookup_world_map_tf(ns)
+        if tf is None:
+            lines.append(box_line(f'  {ns}: 未标定'))
+        else:
+            t = tf.transform.translation
+            theta_deg = math.degrees(_quat_yaw(tf.transform.rotation.z, tf.transform.rotation.w))
+            lines.append(box_line(
+                f'  {ns}: t=({t.x:+.2f},{t.y:+.2f},{t.z:+.2f}) θ*={theta_deg:+.1f}°'))
     lines.append(box_sep())
     counts = node.subscriber_counts()
     sub_str = '  '.join(f'{ns}订阅数={c}' for ns, c in counts.items())
@@ -317,15 +418,17 @@ def curses_main(stdscr, node):
                     continue
 
                 if len(nums) == 3:
-                    world_targets = {ns: tuple(nums) for ns in INIT_X}
+                    world_targets = {ns: tuple(nums) for ns in NAMESPACES}
                 else:
                     world_targets = {
                         'NX01': tuple(nums[0:3]),
                         'NX02': tuple(nums[3:6]),
                     }
 
-                node.send_goals(world_targets)
-                if len(nums) == 3:
+                _locals, err = node.send_goals(world_targets)
+                if err:
+                    shared_message.set(f'!! {err} !!')
+                elif len(nums) == 3:
                     wx, wy, wz = nums
                     shared_message.set(
                         f'已发送同一目标 world=({wx:+.2f},{wy:+.2f},{wz:+.2f}) 给 NX01/NX02')

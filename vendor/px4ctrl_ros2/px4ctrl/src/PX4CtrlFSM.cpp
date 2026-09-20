@@ -210,11 +210,32 @@ void PX4CtrlFSM::process()
 			des = get_cmd_des();
 		}
 
-		if (takeoff_land_data.triggered && takeoff_land_data.takeoff_land_cmd == quadrotor_msgs::msg::TakeoffLand::LAND)
+		// 2026-08-27新增：原版这里只打ERROR拒绝，要求LAND必须在AUTO_HOVER
+		// 触发——docker_sim在pt4ctrl上已经实测确认过这条限制在"规划器持续
+		// 发布反馈式setpoint流"的场景下(mighty/ego_planner都会一直发cmd，
+		// 哪怕已经悬停在目标点不再移动，也不会主动停止发布)会导致
+		// cmd_is_received()永远为true，飞机永远等不到那个"没有新指令"的
+		// 窗口，CMD_CTRL->AUTO_HOVER这条退路实际上永远走不到，LAND因此
+		// 永久被拒绝，降落按钮形同虚设，见DEBUG_JOURNAL.md 2026-08-13
+		// "降落按钮好像都不好用"那次排查+2026-08-27真机复现"起飞一次后
+		// 无法降落、也无法第二次起飞"。当时只给pt4ctrl（vendor/px4ctrl_
+		// ros2/pt4ctrl/src/PX4CtrlFSM.cpp同一处）打了这个补丁，px4ctrl/
+		// so3ctrl两个真正的vendor包一直没有跟进——真机当前CONTROLLER=
+		// px4ctrl，这次一并补上，逻辑跟pt4ctrl那份完全一致：CMD_CTRL下也
+		// 能直接触发AUTO_LAND，`state == CMD_CTRL`这个前置条件保证只有在
+		// 上面RC/odom/cmd都还健康(没有被上面的分支改判成MANUAL_CTRL/
+		// AUTO_HOVER)时才允许，跟AUTO_HOVER自己那条LAND分支的安全前提是
+		// 同一个级别，不会绕过RC失控保护。降落轨迹本身(get_takeoff_land_
+		// des)只在Z方向匀速下降，X/Y钉在触发那一刻的位置不动——如果触发时
+		// 飞机还有水平方向速度，会有一次速度突变（从"跟踪轨迹的速度"直接
+		// 归零转垂直下降），不是逐字等价于"先悬停稳定再降落"，但比"永远
+		// 降不下来"更安全，可接受。
+		if (state == CMD_CTRL && takeoff_land_data.triggered && takeoff_land_data.takeoff_land_cmd == quadrotor_msgs::msg::TakeoffLand::LAND)
 		{
-			RCLCPP_ERROR(node_->get_logger(), "[px4ctrl] Reject AUTO_LAND, which must be triggered in AUTO_HOVER. \
-					Stop sending control commands for longer than %fs to let px4ctrl return to AUTO_HOVER first.",
-						  param.msg_timeout.cmd);
+			state = AUTO_LAND;
+			set_start_pose_for_takeoff_land(odom_data);
+
+			RCLCPP_INFO(node_->get_logger(), "\033[32m[px4ctrl] CMD_CTRL(L3) --> AUTO_LAND\033[32m");
 		}
 
 		break;
@@ -222,7 +243,25 @@ void PX4CtrlFSM::process()
 
 	case AUTO_TAKEOFF:
 	{
-		if ((now_time - takeoff_land.toggle_takeoff_land_time).seconds() < AutoTakeoffLand_t::MOTORS_SPEEDUP_TIME) // Wait for several seconds to warn prople.
+		// 2026-08-27新增：原版这里唯一的退出条件是真的爬升到takeoff_height，
+		// 没有像AUTO_HOVER/CMD_CTRL/AUTO_LAND那样的"RC悬停开关拨离/odom丢失
+		// 就退回MANUAL_CTRL"这条保护——真机实测撞上：MANUAL_CTRL->AUTO_
+		// TAKEOFF切换本身成功了(mode切到OFFBOARD)，但紧接着的解锁被PX4拒绝
+		// (ARM rejected by PX4!，具体原因是PX4自己的prearm check，这台机器
+		// 上查不到，需要QGC直连飞控看Arming Check页)。电机没转，飞机永远
+		// 爬不到目标高度，状态机因此永久卡死——之后不管拨不拨RC开关、点不
+		// 点起飞按钮都没有任何反应，之前只能靠重启px4ctrl_node（重启容器）
+		// 恢复，见DEBUG_JOURNAL.md 2026-08-27相关记录。补上跟其它三个飞行
+		// 状态完全一样的退出检查，给飞手一个不需要重启进程就能夺回控制权
+		// 的手段。
+		if (!rc_data.is_hover_mode || !odom_is_received(now_time))
+		{
+			state = MANUAL_CTRL;
+			toggle_offboard_mode(false);
+
+			RCLCPP_WARN(node_->get_logger(), "[px4ctrl] AUTO_TAKEOFF --> MANUAL_CTRL(L1)");
+		}
+		else if ((now_time - takeoff_land.toggle_takeoff_land_time).seconds() < AutoTakeoffLand_t::MOTORS_SPEEDUP_TIME) // Wait for several seconds to warn prople.
 		{
 			des = get_rotor_speed_up_des(now_time);
 		}
@@ -414,8 +453,26 @@ Desired_State_t PX4CtrlFSM::get_cmd_des()
 	des.v = cmd_data.v;
 	des.a = cmd_data.a;
 	des.j = cmd_data.j;
-	des.yaw = cmd_data.yaw;
-	des.yaw_rate = cmd_data.yaw_rate;
+	// 2026-09-07新增yaw锁定开关（param.yaw_lock_enabled，静态参数，
+	// PX4CTRL_YAW_LOCK_ENABLED环境变量控制，见docker_sim/DEBUG_JOURNAL.md
+	// 同日期条目完整设计讨论）：开启后CMD_CTRL态不再跟随规划器
+	// (ego_planner的calculate_yaw())算出来的行进方向朝向，改成锁定在
+	// takeoff_land.start_pose(3)——起飞/解锁瞬间用get_yaw_from_quaternion
+	// (odom_data.q)已经安全捕获好的实际朝向（set_start_pose_for_takeoff_
+	// land()写入），复用这个现成值，不需要额外状态、也不会有"开关触发那
+	// 一刻该锁定成多少"的瞬态跳变风险。四旋翼平动加速度只由roll/pitch
+	// 倾角决定、跟yaw无关，所以锁定朝向不影响位置/轨迹跟踪本身，只是前视
+	// 相机不再跟随飞行方向。
+	if (param.yaw_lock_enabled)
+	{
+		des.yaw = takeoff_land.start_pose(3);
+		des.yaw_rate = 0.0;
+	}
+	else
+	{
+		des.yaw = cmd_data.yaw;
+		des.yaw_rate = cmd_data.yaw_rate;
+	}
 
 	return des;
 }

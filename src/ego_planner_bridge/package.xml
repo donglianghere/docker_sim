@@ -5,10 +5,11 @@
   <version>0.0.0</version>
   <description>
     docker_sim项目专用：把ego-planner-swarm的规划器核心（ego_planner_node+
-    traj_server）接到DLIO/Gazebo点云里程计和px4ctrl(ROS2版)所需的launch文件。
-    不含任何自己的节点代码，纯粹是参数/remap的集成层，跟px4ctrl_bridge的
-    定位类似——ego_planner_node/traj_server本身来自staging/ego-planner-swarm，
-    不属于这个包。
+    traj_server）接到DLIO/Gazebo点云里程计和px4ctrl(ROS2版)所需的launch文件，
+    外加一个rviz_goal_bridge_node——用tf2把RViz "2D Goal Pose"点击坐标（在
+    当前Fixed Frame下的原始数值）变换到目标飞机自己的“namespace/odom”系，
+    再转发给term_goal。ego_planner_node/traj_server本身来自
+    staging/ego-planner-swarm，不属于这个包。
   </description>
   <maintainer email="robots@todo.todo">robots</maintainer>
   <license>GPLv3</license>
@@ -16,6 +17,14 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>ego_planner</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
+  <exec_depend>dynus_interfaces</exec_depend>
+  <exec_depend>quadrotor_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -34,6 +34,22 @@ source /opt/decomp_ws/install/setup.bash 2>/dev/null || true
 source /opt/mighty_ws/install/setup.bash
 source /opt/dlio_ws/install/setup.bash
 source /opt/ros2_px4_stack_ws/install/setup.bash
+# 2026-08-08新增录ego_planner这批话题之后补的——traj_utils/msg/Bspline
+# （/NX01/planning/bspline）来自ego_planner_ws，quadrotor_msgs/msg/
+# PositionCommand（/NX01/position_cmd）和Px4ctrlDebug（/NX01/debugPx4ctrl）
+# 来自px4ctrl_ws，不source这两个工作区，跟上面注释里说的/trajs一样的坑：
+# ros2 bag record认不出这些自定义消息类型，会跳过、只打印警告。
+source /opt/ego_planner_ws/install/setup.bash
+source /opt/px4ctrl_ws/install/setup.bash
+
+# 这个脚本是docker exec起的全新shell进程，跟entrypoint.sh自己那个shell
+# 完全独立，PLANNER=ego_planner时必须自己重新切RMW才能录到真实节点的
+# 消息（不补的话bag只有话题名、没有任何消息）——完整原因、还有"容器刚
+# 重启配置文件还没写出来"这个启动时序竞态的说明，都在
+# scripts/ros2_env_setup.sh自己的注释里，跟watch_sim.sh共用同一份，
+# 不在这里重复。这个脚本是被docker cp进容器再执行的独立文件，运行时跟
+# ros2_env_setup.sh在同一个/tmp目录下，直接source相对路径就行。
+source "$(dirname "${BASH_SOURCE[0]}")/ros2_env_setup.sh"
 
 OUT_DIR="${OUT_DIR:-/logs/rosbag}"
 MAX_DURATION="${MAX_DURATION:-300}"  # 秒，默认5分钟一个块
@@ -48,6 +64,53 @@ TOPICS=(
   /NX01/occupancy_grid /NX02/occupancy_grid
   /frame_align/NX01/NX02 /frame_align/NX02/NX01
   /plug/model_states_plug
+  # 2026-08-08用户要求实时录目标/规划轨迹/实际轨迹/实际输出——下面这批是
+  # PLANNER=ego_planner时才有的话题，mighty模式下这些话题不存在，
+  # `ros2 bag record`只会一直等、不会报错（不影响上面mighty那批话题正常
+  # 录），两边共用同一份列表，不用按PLANNER分支维护两份。
+  # 目标：rviz_goal_world是2D Goal Pose点出来的原始世界坐标(offset换算前)
+  /NX01/rviz_goal_world /NX02/rviz_goal_world
+  # 规划轨迹：optimal_list是B样条优化后的最终轨迹，init_list/global_list
+  # 是中间过程（A*粗路径/优化前初值），position_cmd是traj_server按10ms
+  # 节拍采样这条轨迹之后真正发给px4ctrl的逐帧指令（含yaw/yaw_dot）
+  /NX01/optimal_list /NX02/optimal_list
+  /NX01/init_list /NX02/init_list
+  /NX01/global_list /NX02/global_list
+  /NX01/planning/bspline /NX02/planning/bspline
+  /NX01/position_cmd /NX02/position_cmd
+  # 实际轨迹：DLIO自己的里程计（比mavros/local_position/pose多了速度/
+  # 姿态协方差这些字段），跟position_cmd对齐能看出跟踪误差
+  /NX01/dlio/odom_node/odom /NX02/dlio/odom_node/odom
+  # 2026-09-10新增：DLIO原始话题（上面那行）不等于真正喂给PX4 EKF2的
+  # 频率——DLIO自己的100Hz发布定时器混了IMU传播/真实雷达修正两种帧，
+  # PX4侧ulog里estimator_aid_src_ev_pos/ev_hgt又被固件日志系统按固定
+  # 500ms/2Hz抽样记录（见logged_topics.cpp的kEKFVerboseIntervalMilliseconds），
+  # 事后从ulog反推不出repub_odom真正转发给mavros的频率。这一路是
+  # repub_odom.py转发出来、mavros再转给PX4的那一路，录下来才能算出
+  # EKF2外部视觉输入的真实到达频率，不用再靠ulog反推。
+  /NX01/mavros/vision_pose/pose_cov /NX02/mavros/vision_pose/pose_cov
+  # 实际输出：px4ctrl真正发给PX4的姿态/推力目标 vs mavros上报的实际IMU
+  # 姿态，加上px4ctrl自己的调试话题
+  /NX01/mavros/setpoint_raw/target_attitude /NX02/mavros/setpoint_raw/target_attitude
+  /NX01/mavros/imu/data /NX02/mavros/imu/data
+  /NX01/debugPx4ctrl /NX02/debugPx4ctrl
+  # ego_planner用的占据栅格（跟mighty的occupancy_grid不是同一个话题/类型）
+  /NX01/grid_map/occupancy_inflate /NX02/grid_map/occupancy_inflate
+  # 2026-09-03新增：SE(2)在线标定论文的离线复算需要的四路数据（见
+  # `docker_sim/实验方案_SE2在线标定论文补充实验.md` L1层）。有了这几路，
+  # 录一次飞行就能在宿主机上离线把W/d_min/批量/滑窗/Huber全部扫一遍，
+  # 不用每换一组参数就重飞一次。
+  #   pose_abs   : origin_setter真正吃的那一路带噪声绝对位置观测
+  #   pose_truth : 同一时刻的Gazebo真值位姿(无噪声，含真实yaw)——评估用，
+  #                特意发成geometry_msgs/PoseStamped而不是让离线工具去解
+  #                gazebo_msgs/ModelStates，因为宿主机上装的ROS没有
+  #                gazebo_msgs这个包，解不了那个类型
+  #   yaw_estimate/yaw_sample_count: 机上估计器当时的实际输出，用来跟
+  #                离线复算结果对照，确认离线那份逻辑跟机上一致
+  /NX01/uwb/pose_abs /NX02/uwb/pose_abs
+  /NX01/uwb/pose_truth /NX02/uwb/pose_truth
+  /NX01/origin_setter/yaw_estimate /NX02/origin_setter/yaw_estimate
+  /NX01/origin_setter/yaw_sample_count /NX02/origin_setter/yaw_sample_count
 )
 
 echo "== record_rosbag: 每${MAX_DURATION}秒一个块，写到 ${OUT_DIR}/bag_<时间戳> =="

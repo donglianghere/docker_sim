@@ -38,16 +38,56 @@ COPY staging/PX4-Autopilot /opt/PX4-Autopilot
 # README.md）。这个文件是运行时直接从磁盘读的（sim-world-entrypoint.sh里
 # `-d "$PWD/ROMFS/px4fmu_common"`），不参与编译，但还是放在编译之前打，跟其余
 # patch的应用时机保持一致。
-COPY patches/px4_iris_mpc_thr_hover.patch patches/px4_iris_mpc_yawrate_max.patch patches/px4_onboard_imu_rate.patch patches/px4_onboard_imu_rate_firmware_default.patch /tmp/
+COPY patches/px4_iris_mpc_thr_hover.patch patches/px4_iris_mpc_yawrate_max.patch patches/px4_iris_ekf2_vision_aiding.patch patches/px4_onboard_imu_rate.patch patches/px4_onboard_imu_rate_firmware_default.patch patches/px4_onboard_position_rate_firmware_default.patch /tmp/
 RUN cd /opt/PX4-Autopilot \
     && (git apply --check /tmp/px4_iris_mpc_thr_hover.patch && git apply /tmp/px4_iris_mpc_thr_hover.patch \
         || echo "!! px4_iris_mpc_thr_hover.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris !!") \
     && (git apply --check /tmp/px4_iris_mpc_yawrate_max.patch && git apply /tmp/px4_iris_mpc_yawrate_max.patch \
         || echo "!! px4_iris_mpc_yawrate_max.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris !!") \
+    && (git apply --check /tmp/px4_iris_ekf2_vision_aiding.patch && git apply /tmp/px4_iris_ekf2_vision_aiding.patch \
+        || echo "!! px4_iris_ekf2_vision_aiding.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris（EKF2_EV_CTRL=15+EKF2_HGT_REF=3，让PX4真正融合vision_pose数据，不再只靠SITL模拟GPS定位）!!") \
     && (git apply --check /tmp/px4_onboard_imu_rate.patch && git apply /tmp/px4_onboard_imu_rate.patch \
         || echo "!! px4_onboard_imu_rate.patch 未能自动应用，需人工核对后手动改 ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink（给-m onboard链路的HIGHRES_IMU/ATTITUDE_QUATERNION加200Hz/100Hz覆盖，缓解mavros/imu/data速率过低、px4ctrl报IMU frequency警告的问题) !!") \
     && (git apply --check /tmp/px4_onboard_imu_rate_firmware_default.patch && git apply /tmp/px4_onboard_imu_rate_firmware_default.patch \
-        || echo "!! px4_onboard_imu_rate_firmware_default.patch 未能自动应用，需人工核对后手动改 src/modules/mavlink/mavlink_main.cpp（MAVLINK_MODE_ONBOARD分支的HIGHRES_IMU/ATTITUDE_QUATERNION硬编码默认值改成200/100Hz——上面px4_onboard_imu_rate.patch的运行时脚本覆盖实测没生效，怀疑跟configure_streams_to_default()在mavlink task自己线程里跑存在竞态，这个patch直接改默认值从根上避开竞态，需要重新编译PX4，不是运行时脚本能解决的) !!")
+        || echo "!! px4_onboard_imu_rate_firmware_default.patch 未能自动应用，需人工核对后手动改 src/modules/mavlink/mavlink_main.cpp（MAVLINK_MODE_ONBOARD分支的HIGHRES_IMU/ATTITUDE_QUATERNION硬编码默认值改成200/100Hz——上面px4_onboard_imu_rate.patch的运行时脚本覆盖实测没生效，怀疑跟configure_streams_to_default()在mavlink task自己线程里跑存在竞态，这个patch直接改默认值从根上避开竞态，需要重新编译PX4，不是运行时脚本能解决的) !!") \
+    && (git apply --check /tmp/px4_onboard_position_rate_firmware_default.patch && git apply /tmp/px4_onboard_position_rate_firmware_default.patch \
+        || echo "!! px4_onboard_position_rate_firmware_default.patch 未能自动应用，需人工核对后手动改 src/modules/mavlink/mavlink_main.cpp（MAVLINK_MODE_ONBOARD分支的LOCAL_POSITION_NED/ODOMETRY硬编码默认值从30Hz改成100Hz——2026-08-12实测确认LOCALIZATION_SOURCE=uwb_imu模式下px4ctrl靠这条链路拿位置/速度反馈，30Hz配置实测只有~17Hz，跟一次轨迹跟踪中途失控炸机的时间点吻合，是同一类"配置值/固件默认值/实测值三层落差"问题，参照上面IMU那两个patch的处理方式) !!")
+
+# sitl_gazebo-classic是PX4-Autopilot注册的独立git submodule（有自己的.git，
+# 不能跟上面几个patch一样cd /opt/PX4-Autopilot直接apply——路径对不上，得
+# cd进submodule自己的目录）。2026-09-10新增：修复
+# gazebo_mavlink_interface.cpp里"CreateSensorSubscription只检查
+# model_->NestedModels()[0]"这个upstream自己注释承认的已知限制（"this
+# will only capture the first nested model found on the base model...
+# As an improvement, this can be made more generic by going through all
+# the nested models"）——contest_mission的对地测距雷达用
+# <include>model://lidar</include>焊到iris上（见gen_iris_mid360_sdf.py），
+# 但iris自带的GPS子模型(gps0)已经占了NestedModels()[0]这个唯一被检查的
+# 位置，导致雷达的MAVLink DISTANCE_SENSOR订阅永远不会被创建、mavros永远
+# 收不到数据（GPS本身不受影响，因为它正好是[0]）。改成遍历全部嵌套子
+# 模型，两者都能正常工作。
+#
+# 2026-09-10第二个patch：上面这个patch解决了"能不能找到嵌套子模型"，
+# 但实测（`gz topic -i`直接查两个topic的Publishers/Subscribers字段）
+# 发现光找到还不够——多机场景下`spawn_entity.py -entity NX01`把根模型
+# 重命名成"NX01"后，Gazebo给嵌套lidar子模型返回的`GetName()`变成扁平的
+# "NX01_lidar"（没有upstream代码假设的"::"域分隔符），导致订阅方拼出
+# "~/NX01/link/NX01_lidar"，但gazebo_lidar_plugin.cpp自己发布的topic是
+# 干净的"~/NX01/link/lidar"（走的是另一套基于ScopedName()按"::"拆分的
+# 命名法）——两个topic对不上，订阅方永远收不到消息，PX4侧
+# `distance_sensor`一直是never published。这是本session排查这个问题
+# 的第三个假设（前两个：只查NestedModels()[0]、headless环境
+# visualize=true，都已证伪；中途还试过换成model://sonar但会把gzserver
+# 直接crash掉，已经撤回），用`gz topic -i`实锤验证过，不是猜测。详见
+# DEBUG_JOURNAL.md。
+COPY patches/px4_sitl_gazebo_nested_sensor_fix.patch patches/px4_sitl_gazebo_nested_sensor_name_prefix_fix.patch patches/px4_sitl_gazebo_lidar_no_visualize.patch /tmp/
+RUN cd /opt/PX4-Autopilot/Tools/simulation/gazebo-classic/sitl_gazebo-classic \
+    && (git apply --check /tmp/px4_sitl_gazebo_nested_sensor_fix.patch && git apply /tmp/px4_sitl_gazebo_nested_sensor_fix.patch \
+        || echo "!! px4_sitl_gazebo_nested_sensor_fix.patch 未能自动应用，需人工核对后手动改 src/gazebo_mavlink_interface.cpp 的 CreateSensorSubscription（把只检查model_->NestedModels()[0]改成遍历全部嵌套子模型，否则对地测距雷达的MAVLink数据永远到不了mavros）!!") \
+    && (git apply --check /tmp/px4_sitl_gazebo_nested_sensor_name_prefix_fix.patch && git apply /tmp/px4_sitl_gazebo_nested_sensor_name_prefix_fix.patch \
+        || echo "!! px4_sitl_gazebo_nested_sensor_name_prefix_fix.patch 未能自动应用（依赖上面nested_sensor_fix.patch已经应用成功），需人工核对后手动改 src/gazebo_mavlink_interface.cpp 里两处'find_last_of(\"::\")'+'if (found)'的判断，改成'!= std::string::npos'，并在没找到::时改成手动去掉'<根模型名>_'前缀——否则多机场景下订阅方和发布方topic名对不上，distance_sensor还是收不到数据 !!") \
+    && (git apply --check /tmp/px4_sitl_gazebo_lidar_no_visualize.patch && git apply /tmp/px4_sitl_gazebo_lidar_no_visualize.patch \
+        || echo "!! px4_sitl_gazebo_lidar_no_visualize.patch 未能自动应用，需人工核对后手动改 models/lidar/model.sdf 把<visualize>true</visualize>改成false（怀疑headless环境下visualize=true导致这颗单波束ray sensor的Update()没有正常走完，distance_sensor uORB话题'never published'，同类问题mid360那颗雷达之前也踩过、已经改成false，见gen_iris_mid360_sdf.py——2026-09-10已证伪，不是根因，留着无害）!!")
 
 # rosdep/依赖装好之后再编译；PX4 自带的 ubuntu.sh 会装一批 python/apt 依赖，
 # 这一步仍然需要网络（apt/pip），所以留着代理，编译完再统一清理。
@@ -84,6 +124,14 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 COPY staging/livox_ws_src /opt/livox_ws/src
+# livox_ros_driver2 2026-08-13起改clone官方Livox-SDK仓库（原来是kotakondo个人fork），
+# 官方master分支InitImuMsg()的IMU消息frame_id依然硬编码"livox_frame"、没有跟点云
+# 发布一样读可配置的frame_id_成员，这里补回fork当初加的那处小修复（详见
+# fetch_sources.sh里livox_ros_driver2那条clone_pin的注释）。
+COPY patches/livox_ros_driver2_imu_frame_id.patch /tmp/
+RUN cd /opt/livox_ws/src/livox_ros_driver2 \
+    && (git apply --check /tmp/livox_ros_driver2_imu_frame_id.patch && git apply /tmp/livox_ros_driver2_imu_frame_id.patch \
+        || echo "!! livox_ros_driver2_imu_frame_id.patch 未能自动应用，需人工核对后手动改 src/lddc.cpp 的 InitImuMsg() !!")
 RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     cd /opt/livox_ws/src/Livox-SDK2 \
         && mkdir -p build && cd build && cmake .. && make -j"${BUILD_JOBS}" && make install && ldconfig \
@@ -92,7 +140,78 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
         && bash build.sh humble
 
 COPY staging/mighty_ws_src /opt/mighty_ws/src
-COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_spawn_agent_launch.patch patches/mighty_hard_forest_camera.patch patches/mighty_forest_boundary_walls.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_simple_room_world.patch patches/mighty_simple_room_world_mapping.patch patches/mighty_rviz_config_arg.patch patches/mighty_rviz_final_config.patch patches/mighty_rviz_ego_planner_displays.patch patches/mighty_rviz_ego_planner_config.patch patches/mighty_imu_sim_time.patch patches/mighty_headless_yaw_fix.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_traveling_yaw_zero_dist_guard.patch /tmp/
+
+# 2026-09-18实验：删掉vendor进来的这份gazebo_ros_pkgs源码（fork自
+# kotakondo/gazebo_ros_pkgs，不是官方ros-simulation/gazebo_ros_pkgs），改用
+# Dockerfile.base里apt已经装好的`ros-humble-gazebo-ros-pkgs`（3.9.0，含
+# gazebo_ros_camera.cpp/gazebo_ros_joint_pose_trajectory.cpp等所有相机/关节
+# 插件）——排查用户提出"能不能换成Ubuntu22.04原生gazebo"这个方向。已经
+# 确认这份vendor代码相对官方上游只有2个commit的差异（改gazebo_ros_diff_
+# drive.cpp/gazebo_ros_imu_sensor.cpp的时间戳来源，用wall time代替sim
+# time），完全不涉及相机插件；今天也已经把唯一patch过这份源码的
+# logical_camera那个patch删掉了——现在这份vendor代码对相机插件来说
+# 就是原封不动的上游代码，唯一的变量是"本地重新编译"vs"Ubuntu官方预编译
+# 的.deb包"。删掉vendor源码不会影响gazebo_msgs的服务/消息定义（apt那份
+# 同样提供GetEntityState/SetEntityState/ModelStates等，
+# scenario_reset_node/mission_judge_node用的都是这几个标准接口，不依赖
+# 任何自定义消息——LogicalCameraImage那个自定义消息已经删除，不再有
+# 依赖）。如果实测发现问题依然复现，说明不是"vendor重新编译"这个变量；
+# 如果实测发现问题消失了，就实锤问题出在本地编译环境本身（编译器版本/
+# 优化选项/链接方式等，不是代码逻辑本身），需要进一步对比编译参数。
+RUN rm -rf /opt/mighty_ws/src/gazebo_ros_pkgs
+
+# 2026-09-17：`gazebo_ros_camera_set_enabled_topic.patch`（运行时动态开关
+# 相机的ROS2 topic）整体删除——排查了一整个会话都没能稳定复现"补丁在→
+# 相机正常、补丁不在→相机也正常"这个开关本身的可靠性，反而实测确认这个
+# 补丁编译进插件后即使从未调用过也会间歇性导致相机整体假死（根因没有
+# 查清楚），用户直接要求`set_camera_enabled()`这整个功能连同这个patch
+# 一并删除，不再保留。`patches/gazebo_ros_camera_set_enabled_topic.patch`
+# 文件本身也已删除，contest_sdk/mission.py里的调用点同步清理，见
+# DEBUG_JOURNAL.md 2026-09-17记录。
+
+# 2026-09-17新增/2026-09-18删除：logical_camera插件（从仓库自己git历史
+# cherry-pick出来的官方PR ab1ae5c，不做图像渲染、纯几何计算视锥内有哪些
+# model）——原本想用来彻底绕开Gazebo Classic多相机渲染竞争这个已知限制，
+# 但排查了一整天确认插件在gzserver进程内publish()之后消息完全送不到
+# 任何订阅者，根因未定位到（跨容器/单容器/单机/多机、1个或2个传感器都
+# 复现，"挪到主线程发布"这个修复也验证过无效），用户决定放弃这条路，
+# patch文件本身、`logical_camera_bridge_node.py`、`gen_iris_mid360_sdf.py`
+# 里的相关模板/分支全部删除，见DEBUG_JOURNAL.md 2026-09-17/09-18记录。
+
+COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_spawn_agent_launch.patch patches/mighty_hard_forest_camera.patch patches/mighty_forest_boundary_walls.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_simple_room_world.patch patches/mighty_simple_room_world_mapping.patch patches/mighty_rviz_config_arg.patch patches/mighty_imu_sim_time.patch patches/mighty_headless_yaw_fix.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_findandatime_live_state_fallback.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_traveling_yaw_zero_dist_guard.patch /tmp/
+# 2026-09-11：mighty_fire_drill_room_world.patch/_world_mapping.patch/
+# mighty_contest_markers_material.patch（以及下面原来紧跟着的4张
+# worlds/media贴图COPY）故意不在这里apply了——挪到本文件最后"5.5"节、
+# colcon build完成之后再应用，见该处大段注释说明原因（纯场景道具坐标
+# 调整不该触发mighty整个C++重编译，这是2026-09-11实测"改了几个道具
+# 坐标，build却慢得不正常"这个问题的根因和修复）。
+# rviz/multi_mighty.rviz、rviz/multi_ego_planner.rviz都直接整份文件覆盖，
+# 不走git apply的diff补丁——RViz自己保存配置时会整份用自己的YAML序列化器
+# 重写一遍（去注释、重新排序、格式跟patch积累出来的版本对不上），拿它跟
+# 旧版本做diff会是一份几千行、几乎每行都变的巨大patch，属于典型的"diff
+# 本身比全量替换更脆弱、更难看懂"场景，所以直接COPY整份文件，不勉强套用
+# 这个项目其余地方"改动一律走diff patch"的惯例。
+# multi_mighty.rviz：2026-08-10从一次实际跑起来的sim-world容器里现场导出
+# 的"当前正在用"的配置（用户在RViz里交互调整过Fixed Frame/清理掉了当时
+# 用不上的显示项之后另存的），不是从upstream逐行改出来的小改动，原来的
+# mighty_rviz_final_config.patch/mighty_rviz_ego_planner_displays.patch
+# 两个diff补丁已经删除、被这份文件完全取代。
+# multi_ego_planner.rviz：2026-08-13同样从实际跑起来的sim-world容器里
+# 现场导出（这次导出时容器是单机彩排模式，NUM_AGENTS=1只起了NX01，跟
+# multi_mighty.rviz当初"双机场景导出"的前提不同——导出内容里TF树/
+# SyncSource/Fixed Frame都只剩NX01，没有NX02，是这次导出时的真实运行
+# 状态，不是遗漏；另外多了`world`/`world_mocap`两个frame，对应
+# `uwb_origin_bridge`的起飞点一键锁定TF链路，旧版（diff补丁生成的版本）
+# 里没有这两个frame，说明旧版是早于这个功能上线时生成的），原来生成它的
+# `mighty_rviz_ego_planner_config.patch`这个new-file diff补丁已删除、
+# 被这份文件完全取代，见`patches/`目录（不再COPY进/tmp/，也不在下面的
+# git apply链里）。
+COPY patches/mighty_rviz_multi_mighty.rviz /opt/mighty_ws/src/mighty/rviz/multi_mighty.rviz
+COPY patches/mighty_rviz_multi_ego_planner.rviz /opt/mighty_ws/src/mighty/rviz/multi_ego_planner.rviz
+# 2026大赛任务场景（fire_drill_room.world）用的几张贴图（AprilTag x3 +
+# 起降点H标识）原来COPY到这里——2026-09-11挪到本文件最后"5.5"节、
+# colcon build完成之后再COPY，理由跟同一批挪走的3个world/材质patch
+# 一样（见下面5.5节的说明），这里不再放。
 RUN cd /opt/mighty_ws/src/mighty \
     && (git apply --check /tmp/mighty_lidar_frame_id.patch && git apply /tmp/mighty_lidar_frame_id.patch \
         || echo "!! mighty_lidar_frame_id.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
@@ -116,12 +235,6 @@ RUN cd /opt/mighty_ws/src/mighty \
         || echo "!! mighty_simple_room_world_mapping.patch 未能自动应用，需人工核对后手动改 launch/base_mighty.launch.py !!") \
     && (git apply --check /tmp/mighty_rviz_config_arg.patch && git apply /tmp/mighty_rviz_config_arg.patch \
         || echo "!! mighty_rviz_config_arg.patch 未能自动应用，需人工核对后手动改 launch/base_mighty.launch.py !!") \
-    && (git apply --check /tmp/mighty_rviz_final_config.patch && git apply /tmp/mighty_rviz_final_config.patch \
-        || echo "!! mighty_rviz_final_config.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz !!") \
-    && (git apply --check /tmp/mighty_rviz_ego_planner_displays.patch && git apply /tmp/mighty_rviz_ego_planner_displays.patch \
-        || echo "!! mighty_rviz_ego_planner_displays.patch 未能自动应用，需人工核对后手动改 rviz/multi_mighty.rviz（给PLANNER=ego_planner加12个可视化Display，默认Enabled:false不影响mighty现有视图) !!") \
-    && (git apply --check /tmp/mighty_rviz_ego_planner_config.patch && git apply /tmp/mighty_rviz_ego_planner_config.patch \
-        || echo "!! mighty_rviz_ego_planner_config.patch 未能自动应用，需人工核对后手动新增 rviz/multi_ego_planner.rviz（multi_mighty.rviz的复制版，12个EGO Display默认Enabled:true，NX01/NX02两个mighty分组默认Enabled:false，配合sim-world-entrypoint.sh的PLANNER开关选用) !!") \
     && (git apply --check /tmp/mighty_imu_sim_time.patch && git apply /tmp/mighty_imu_sim_time.patch \
         || echo "!! mighty_imu_sim_time.patch 未能自动应用，需人工核对后手动改 src/sim/gazebo_ros_imu_sensor.cpp !!") \
     && (git apply --check /tmp/mighty_headless_yaw_fix.patch && git apply /tmp/mighty_headless_yaw_fix.patch \
@@ -130,6 +243,8 @@ RUN cd /opt/mighty_ws/src/mighty \
         || echo "!! mighty_share_traj_heartbeat.patch 未能自动应用，需人工核对后手动改 include/mighty/mighty_node.hpp、src/mighty/mighty_node.cpp !!") \
     && (git apply --check /tmp/mighty_replan_state_resync.patch && git apply /tmp/mighty_replan_state_resync.patch \
         || echo "!! mighty_replan_state_resync.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
+    && (git apply --check /tmp/mighty_findandatime_live_state_fallback.patch && git apply /tmp/mighty_findandatime_live_state_fallback.patch \
+        || echo "!! mighty_findandatime_live_state_fallback.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
     && (git apply --check /tmp/mighty_trajectory_wall_check_log.patch && git apply /tmp/mighty_trajectory_wall_check_log.patch \
         || echo "!! mighty_trajectory_wall_check_log.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty_node.cpp !!") \
     && (git apply --check /tmp/mighty_z_window_ceiling_occupied.patch && git apply /tmp/mighty_z_window_ceiling_occupied.patch \
@@ -219,12 +334,14 @@ RUN cd /opt/mighty_ws/src/mighty \
 
 # mid360.xacro 里 IMU 传感器整段原来被注释掉——DLIO 需要点云+IMU两路输入才能算
 # 里程计，没有IMU的话DLIO永远初始化不了、mighty订阅的state话题永远没人发布。
-COPY patches/livox_mid360_imu.patch patches/livox_mid360_visual_gravity.patch /tmp/
+COPY patches/livox_mid360_imu.patch patches/livox_mid360_visual_gravity.patch patches/livox_mid360_max_range.patch /tmp/
 RUN cd /opt/mighty_ws/src/livox_laser_simulation_ros2 \
     && (git apply --check /tmp/livox_mid360_imu.patch && git apply /tmp/livox_mid360_imu.patch \
         || echo "!! livox_mid360_imu.patch 未能自动应用，需人工核对后手动改 urdf/mid360.xacro !!") \
     && (git apply --check /tmp/livox_mid360_visual_gravity.patch && git apply /tmp/livox_mid360_visual_gravity.patch \
-        || echo "!! livox_mid360_visual_gravity.patch 未能自动应用，需人工核对后手动改 urdf/mid360.xacro !!")
+        || echo "!! livox_mid360_visual_gravity.patch 未能自动应用，需人工核对后手动改 urdf/mid360.xacro !!") \
+    && (git apply --check /tmp/livox_mid360_max_range.patch && git apply /tmp/livox_mid360_max_range.patch \
+        || echo "!! livox_mid360_max_range.patch 未能自动应用，需人工核对后手动把urdf/mid360.xacro里laser_max_range从20.0改成40.0（2026-09-14用户要求，房间20x25米，20米量程探测提前量太短，容易复现撞障碍物） !!")
 # mid360.xacro 里雷达那个link原来只有<xacro:box_inertia>（惯性属性），没有
 # <visual>标签，GUI里天然看不到任何雷达形状（不是bug，是模型压根没画）；射线
 # 传感器和插件两处<visualize>也都写死false（故意关掉扫描线调试显示）；
@@ -296,6 +413,61 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_SIMULATION=ON
 
 # ============================================================
+# 2.5 大赛场景(fire_drill_room)纯道具/贴图/launch映射patch——colcon build
+#     之后才应用，不在上面section 2那条大RUN链里
+# ============================================================
+# 2026-09-11背景：改了`fire_drill_room_layout.yaml`里几个道具坐标（障碍物
+# 圆柱/立柱/物资点/仿地模块位置）之后，用户反馈"之前都很快，改了道具位置后
+# build就慢了"——查了这三个patch（mighty_fire_drill_room_world.patch/
+# _world_mapping.patch/mighty_contest_markers_material.patch）加上4张
+# worlds/media贴图，原来全部挪在上面section 2那条大RUN链里、colcon build
+# （见上面`-DBUILD_SIMULATION=ON`那行）**之前**应用——这几个patch/贴图
+# 只改`worlds/`（场景SDF+材质+贴图）和`launch/base_mighty.launch.py`
+# （选哪个world/rviz配置的映射），本身不含任何C++代码，`CMakeLists.txt`
+# 里对应的是`install(DIRECTORY ... worlds ...)`这种纯拷贝规则，colcon
+# 内部根本不需要为这些文件重新编译任何东西——但Docker的layer cache是
+# "从第一个失效层开始，后面每一层不管实际会不会产生不同结果，都得重新
+# 跑一遍"，改了这几个patch文件内容 → COPY这几个patch的那层cache失效
+# → 后面`git apply`那条大RUN链失效 → 紧跟着的`colcon build`那条RUN
+# （整个mighty包的C++全量重编译，多个规划器+仿真插件，耗时是这次
+# build变慢的真正原因）也跟着失效、被迫重新跑一遍，即使ccache能让
+# 单个编译单元命中缓存、实际编译很快，configure/link/多个target
+# 加起来也不是纯拷贝几个文件能比的。
+#
+# 修复：把这3个patch+4张贴图挪到colcon build**之后**单独一层——这样以后
+# 只改场景道具坐标/贴图（不碰任何.cpp/.hpp源码）的话，Docker从这里往下
+# 的层才会失效，上面section 2那条大RUN链（含colcon build）能完整复用
+# 缓存，不用重新编译。因为`git apply`操作的是`/opt/mighty_ws/src/mighty`
+# 这个持久化在镜像文件系统里的目录（不是每层重新clone），这里`cd`进去
+# 接着apply完全没问题——这几个patch本来就假设"前面那条大RUN链的其它
+# patch已经应用过"这个文件状态（比如`_world_mapping.patch`改的是
+# `mighty_simple_room_world_mapping.patch`/`mighty_rviz_config_arg.patch`
+# 已经改过的同一个`launch/base_mighty.launch.py`），只要应用顺序不变、
+# 在同一个持久化目录上操作，先后放在哪个Docker层里不影响patch本身
+# 能不能apply成功。
+#
+# apply完之后还要多一步：colcon build的`install(DIRECTORY worlds
+# launch ...)`已经把**没打这3个patch之前**的`worlds/`、`launch/`拷贝
+# 进了`/opt/mighty_ws/install/mighty/share/mighty/`（实体运行时真正
+# 读取的路径），这里patch完src之后必须显式把这两个目录重新同步一遍
+# install，否则仿真读到的还是旧场景——这步纯文件拷贝，比重新跑一次
+# colcon build快得多。
+COPY patches/mighty_fire_drill_room_world.patch patches/mighty_fire_drill_room_world_mapping.patch patches/mighty_contest_markers_material.patch /tmp/
+COPY patches/mighty_contest_apriltag_id0.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/apriltag_id0.png
+COPY patches/mighty_contest_apriltag_id1.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/apriltag_id1.png
+COPY patches/mighty_contest_apriltag_id2.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/apriltag_id2.png
+COPY patches/mighty_contest_helipad_marker.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/helipad_marker.png
+RUN cd /opt/mighty_ws/src/mighty \
+    && (git apply --check /tmp/mighty_fire_drill_room_world.patch && git apply /tmp/mighty_fire_drill_room_world.patch \
+        || echo "!! mighty_fire_drill_room_world.patch 未能自动应用，需人工核对后手动补 worlds/fire_drill_room.world !!") \
+    && (git apply --check /tmp/mighty_fire_drill_room_world_mapping.patch && git apply /tmp/mighty_fire_drill_room_world_mapping.patch \
+        || echo "!! mighty_fire_drill_room_world_mapping.patch 未能自动应用，需人工核对后手动改 launch/base_mighty.launch.py !!") \
+    && (git apply --check /tmp/mighty_contest_markers_material.patch && git apply /tmp/mighty_contest_markers_material.patch \
+        || echo "!! mighty_contest_markers_material.patch 未能自动应用，需人工核对后手动补 worlds/media/materials/scripts/contest_markers.material !!") \
+    && cp -r /opt/mighty_ws/src/mighty/worlds/. /opt/mighty_ws/install/mighty/share/mighty/worlds/ \
+    && cp /opt/mighty_ws/src/mighty/launch/base_mighty.launch.py /opt/mighty_ws/install/mighty/share/mighty/launch/base_mighty.launch.py
+
+# ============================================================
 # 3. hospital/office/tunnel 外部Gazebo模型资产（选做，见 fetch_sources.sh 里的说明）
 # ============================================================
 COPY staging/gazebo_models_external /opt/gazebo_models_external
@@ -319,6 +491,16 @@ COPY staging/gazebo_models_external /opt/gazebo_models_external
 # 在我们vendor的osrf-gazebo_models/osrf-subt里完全找不到同名目录，这个world目前
 # 没法修，需要额外去找/下载对应资产才行，不确定来源，没有瞎猜URL去拉。
 ENV GAZEBO_MODEL_PATH=/opt/gazebo_models_external/aws-robomaker-hospital-world/models:/opt/gazebo_models_external/osrf-gazebo_models:/opt/mighty_ws/src/mighty/urdf:/opt/PX4-Autopilot/Tools/simulation/gazebo-classic/sitl_gazebo-classic/models:${GAZEBO_MODEL_PATH}
+# fire_drill_room.world里`file://media/materials/scripts/contest_markers.material`
+# 这种相对URI，Gazebo是拿GAZEBO_RESOURCE_PATH每一段去拼"<段>/<相对路径>"找的
+# （跟上面GAZEBO_MODEL_PATH找`model://xxx`是两套完全独立的搜索机制，不要混淆——
+# 教训见sim-world-entrypoint.sh里`source /usr/share/gazebo/setup.sh`那条注释：
+# 这个变量之前一直是空的，只是因为simple_room.world引用的Gazebo/Grey等内置材质
+# 由gazebo-11自带的/usr/share/gazebo-11媒体目录兜底，从来没人发现GAZEBO_RESOURCE_PATH
+# 没配过）。这里加的是`worlds`这一层（不是`worlds/media`），因为URI里已经带了
+# `media/`这一段相对路径。运行时entrypoint会再`source /usr/share/gazebo/setup.sh`
+# 把gazebo-11自带的媒体目录前置拼接进来，两边都保留，不会互相覆盖。
+ENV GAZEBO_RESOURCE_PATH=/opt/mighty_ws/src/mighty/worlds:${GAZEBO_RESOURCE_PATH}
 # 补PX4自己的models目录：iris.sdf.jinja内部<include>了model://gps等PX4自带的
 # 传感器模型（渲染iris时这几个mesh/传感器模型本身要能被Gazebo解析找到），
 # 原来没把这层加进搜索路径，实测报"Unable to find uri[model://gps]"。
@@ -330,6 +512,22 @@ COPY src/uwb_sim /opt/uwb_ws/src/uwb_sim
 RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     source /opt/ros/humble/setup.bash \
     && cd /opt/uwb_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 4b. contest_mission（2026大赛任务系统专属包，纯Python，2026-09-08
+#     新增）——这个镜像只需要阶段7.2/7.3两个"需要读写Gazebo模型状态"的
+#     节点（mission_judge_node/scenario_reset_node，归属sim-world容器
+#     的原因见设计方案5.3容器归属表），阶段2~6那批感知/控制类节点归
+#     flight-stack、不在这个镜像里。整个包（含flight-stack那边用的
+#     节点源码）还是完整COPY过来，只是这个镜像的entrypoint.sh只会
+#     启动这两个——contest_mission是纯Python包，多余的源码文件不占
+#     编译时间，没必要为了"只要两个节点"再拆一个子包。
+# ============================================================
+COPY src/contest_mission /opt/contest_mission_ws/src/contest_mission
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/contest_mission_ws \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 ENV http_proxy= \

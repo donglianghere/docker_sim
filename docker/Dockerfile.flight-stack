@@ -45,7 +45,28 @@ COPY staging/dlio_ws_src /opt/dlio_ws/src
 # `dt == 0`这一种情况，挡不住"非零但极小"——极小dt配上仿真里几乎零噪声的IMU
 # 读数中偶发的微小抖动，会在除法/积分时被放大成数值尖峰，是DLIO在静止状态下
 # 依然发散的一个具体、可验证的推手。两处都改成`dt < 1e-4`的下限钳位。
-COPY patches/dlio_pointcloud_qos.patch patches/dlio_debug_throttle.patch patches/dlio_imu_dt_clamp.patch patches/dlio_extrinsics_mount.patch patches/dlio_namespace.patch patches/dlio_gicp_fitness_debug.patch patches/dlio_bias_bounds_tighten.patch patches/dlio_keyframe_insertion_debug.patch patches/dlio_keyframe_velocity_check.patch patches/dlio_propagate_debug.patch patches/dlio_prev_imu_stamp_fix.patch patches/dlio_gravity_align_default.patch patches/dlio_spaciousness_oob_fix.patch patches/dlio_gicp_lost_track_fallback.patch patches/dlio_odom_publish_timer_cb_group.patch /tmp/
+#
+# 2026-08-19新增dlio_propagate_sanity_guard.patch——真机联调实测过一次
+# 完全静止状态下速度在单帧内(dt<0.01s)从毫米级跳到>1m/s、紧接着GICP LOST
+# TRACK、姿态整个跑飞、最终free(): invalid next size堆损坏、进程SIGABRT
+# 崩溃退出的完整链路，具体触发点没有抓到（诊断打印限流1秒一次，跳变发生
+# 在两次打印之间）。这是工程化安全网，不是精确定位崩溃根因的修复——给
+# propagateState()加两道防线（dt异常大/积分出的速度超过物理合理上限），
+# 命中就丢弃这一帧更新、回滚到上一个已知状态，避免失控继续传播到进程
+# 崩溃这种最坏结果，背后那个更深层的bug还没有精确定位。
+#
+# ⚠️ 2026-08-19顺带发现：dlio_extrinsics_mount.patch（给Gazebo仿真里
+# mid360.xacro水平安装配置杆臂偏移t=[0,0,0.06]）跟真机专用的cfg/dlio.yaml
+# 改动（雷达+IMU一体绕Y轴前倾25°、R改成对应旋转矩阵，t保留上游原始真实
+# 硬件标定值不动）冲突——这个patch试图匹配的旧内容已经被真机改动覆盖掉，
+# 会在下面的git apply --check这一步静默失败（容错设计是失败只echo警告、
+# 不中断build）。这对真机场景反而是"歪打正着"（失败保住了正确的真实硬件t
+# 值，没被仿真的t值覆盖），但这是脆弱的巧合状态，不是设计好的行为——
+# 如果以后cfg/dlio.yaml的内容变动、这个patch重新变得可应用，会静默地把
+# 真机的杆臂标定值替换成错误的仿真值。当前环境里sim的docker-compose.yml
+# 已经丢失（只有hw在实际使用这个Dockerfile），暂时不处理这个patch本身，
+# 记在docker_sim/read_hw.md待办里。
+COPY patches/dlio_pointcloud_qos.patch patches/dlio_debug_throttle.patch patches/dlio_imu_dt_clamp.patch patches/dlio_extrinsics_mount.patch patches/dlio_namespace.patch patches/dlio_gicp_fitness_debug.patch patches/dlio_bias_bounds_tighten.patch patches/dlio_keyframe_insertion_debug.patch patches/dlio_keyframe_velocity_check.patch patches/dlio_propagate_debug.patch patches/dlio_prev_imu_stamp_fix.patch patches/dlio_gravity_align_default.patch patches/dlio_spaciousness_oob_fix.patch patches/dlio_gicp_lost_track_fallback.patch patches/dlio_odom_publish_timer_cb_group.patch patches/dlio_propagate_sanity_guard.patch patches/dlio_keyframe_search_window.patch /tmp/
 RUN cd /opt/dlio_ws/src/direct_lidar_inertial_odometry \
     && (git apply --check /tmp/dlio_pointcloud_qos.patch && git apply /tmp/dlio_pointcloud_qos.patch \
         || echo "!! dlio_pointcloud_qos.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc !!") \
@@ -76,7 +97,11 @@ RUN cd /opt/dlio_ws/src/direct_lidar_inertial_odometry \
     && (git apply --check /tmp/dlio_gicp_lost_track_fallback.patch && git apply /tmp/dlio_gicp_lost_track_fallback.patch \
         || echo "!! dlio_gicp_lost_track_fallback.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h !!") \
     && (git apply --check /tmp/dlio_odom_publish_timer_cb_group.patch && git apply /tmp/dlio_odom_publish_timer_cb_group.patch \
-        || echo "!! dlio_odom_publish_timer_cb_group.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h（给100Hz的odom发布定时器分配独立callback group，缓解px4ctrl报ODOM frequency过低的问题) !!")
+        || echo "!! dlio_odom_publish_timer_cb_group.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h（给100Hz的odom发布定时器分配独立callback group，缓解px4ctrl报ODOM frequency过低的问题) !!") \
+    && (git apply --check /tmp/dlio_propagate_sanity_guard.patch && git apply /tmp/dlio_propagate_sanity_guard.patch \
+        || echo "!! dlio_propagate_sanity_guard.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc 的propagateState()（给积分结果加dt/速度合理性检查，防止一次异常输入雪崩式发散到进程崩溃) !!") \
+    && (git apply --check /tmp/dlio_keyframe_search_window.patch && git apply /tmp/dlio_keyframe_search_window.patch \
+        || echo "!! dlio_keyframe_search_window.patch 未能自动应用，需人工核对后手动改 src/dlio/odom.cc、include/dlio/odom.h（buildSubmap()/computeConvexHull()/computeConcaveHull()三处原来对num_processed_keyframes做全量O(N)遍历，关键帧数量随会话时长无界增长导致CPU/内存/odom发布频率持续恶化，2026-09-04真机实测确认，加max_keyframes_for_search_参数把这三处遍历限制在最近插入的窗口内) !!")
 # 用户问"NX02这个现象到底是不是IMU积分的问题，还是IMU本身有问题"——
 # 顺着GICP fitness全程可疑地卡在0.0000这条线，直接读了NanoGICP/
 # LsqRegistration(nano_gicp.cc、lsq_registration.cc)的优化器实现，找到了
@@ -299,7 +324,14 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 COPY staging/mighty_ws_src /opt/mighty_ws/src
-COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_onboard_vehicle_profile.patch patches/mighty_lidar_point_cloud_topic_arg.patch patches/mighty_static_tf_fix.patch patches/mighty_static_tf_namespace_fix.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_force_goal_z.patch patches/mighty_headless_yaw_fix.patch patches/mighty_local_frame_only.patch patches/mighty_avoidance_tuning.patch patches/mighty_replan_failure_cap.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_z_range_narrow.patch patches/mighty_traveling_yaw_zero_dist_guard.patch patches/mighty_enable_thrust_constraint.patch patches/mighty_avoidance_horizon_guard.patch patches/mighty_goal_overshoot_tuning.patch patches/mighty_planning_params_override_note.patch /tmp/
+
+# 2026-09-17新增/2026-09-18删除：logical_camera插件补丁——排查了一整天
+# 确认插件在gzserver进程内publish()之后消息完全送不到任何订阅者，根因
+# 未定位到，用户决定放弃这条路，patch文件、`logical_camera_bridge_node.py`、
+# `gen_iris_mid360_sdf.py`里的相关代码全部删除，见DEBUG_JOURNAL.md
+# 2026-09-17/09-18记录。
+
+COPY patches/mighty_lidar_frame_id.patch patches/mighty_occupancy_grid_qos_fix.patch patches/mighty_sensor_mount.patch patches/mighty_onboard_vehicle_profile.patch patches/mighty_lidar_point_cloud_topic_arg.patch patches/mighty_static_tf_fix.patch patches/mighty_static_tf_namespace_fix.patch patches/mighty_disable_d435.patch patches/mighty_enable_gravity.patch patches/mighty_force_goal_z.patch patches/mighty_headless_yaw_fix.patch patches/mighty_local_frame_only.patch patches/mighty_avoidance_tuning.patch patches/mighty_replan_failure_cap.patch patches/mighty_share_traj_heartbeat.patch patches/mighty_replan_state_resync.patch patches/mighty_findandatime_live_state_fallback.patch patches/mighty_swarm_goal_deconfliction.patch patches/mighty_freestart_escalation.patch patches/mighty_trajectory_wall_check_log.patch patches/mighty_z_window_ceiling_occupied.patch patches/mighty_z_range_narrow.patch patches/mighty_traveling_yaw_zero_dist_guard.patch patches/mighty_enable_thrust_constraint.patch patches/mighty_avoidance_horizon_guard.patch patches/mighty_goal_overshoot_tuning.patch patches/mighty_planning_params_override_note.patch patches/mighty_yaw_lookahead.patch patches/mighty_yaw_proportional_rate.patch patches/mighty_yaw_filter_alpha_fix.patch patches/mighty_yaw_lookahead_5s_goal_aim.patch patches/mighty_goal_seen_yaw_freeze.patch patches/mighty_yaw_debug_print.patch patches/mighty_conditional_gazebo_ros_deps.patch /tmp/
 RUN cd /opt/mighty_ws/src/mighty \
     && (git apply --check /tmp/mighty_lidar_frame_id.patch && git apply /tmp/mighty_lidar_frame_id.patch \
         || echo "!! mighty_lidar_frame_id.patch 未能自动应用，需人工核对后手动改 mighty_node.cpp !!") \
@@ -333,6 +365,12 @@ RUN cd /opt/mighty_ws/src/mighty \
         || echo "!! mighty_share_traj_heartbeat.patch 未能自动应用，需人工核对后手动改 include/mighty/mighty_node.hpp、src/mighty/mighty_node.cpp !!") \
     && (git apply --check /tmp/mighty_replan_state_resync.patch && git apply /tmp/mighty_replan_state_resync.patch \
         || echo "!! mighty_replan_state_resync.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
+    && (git apply --check /tmp/mighty_findandatime_live_state_fallback.patch && git apply /tmp/mighty_findandatime_live_state_fallback.patch \
+        || echo "!! mighty_findandatime_live_state_fallback.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp !!") \
+    && (git apply --check /tmp/mighty_swarm_goal_deconfliction.patch && git apply /tmp/mighty_swarm_goal_deconfliction.patch \
+        || echo "!! mighty_swarm_goal_deconfliction.patch 未能自动应用，需人工核对后手动改 include/mighty/mighty_type.hpp、src/mighty/mighty_node.cpp、src/mighty/mighty.cpp（sanitizeTerminalGoal()新增对别的agent目标点冲突的检测+推离，需要本机自己的数字id打破对称，见mighty_type.hpp的parameters.id字段和mighty_node.cpp里par_.id=id_的赋值） !!") \
+    && (git apply --check /tmp/mighty_freestart_escalation.patch && git apply /tmp/mighty_freestart_escalation.patch \
+        || echo "!! mighty_freestart_escalation.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp（generateGlobalPath()里freeStart()默认清理半径不够用时逐步加大重试，修复两机挤在一起后astar_heat的priority queue empty死锁） !!") \
     && (git apply --check /tmp/mighty_trajectory_wall_check_log.patch && git apply /tmp/mighty_trajectory_wall_check_log.patch \
         || echo "!! mighty_trajectory_wall_check_log.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty_node.cpp !!") \
     && (git apply --check /tmp/mighty_z_window_ceiling_occupied.patch && git apply /tmp/mighty_z_window_ceiling_occupied.patch \
@@ -348,7 +386,30 @@ RUN cd /opt/mighty_ws/src/mighty \
     && (git apply --check /tmp/mighty_goal_overshoot_tuning.patch && git apply /tmp/mighty_goal_overshoot_tuning.patch \
         || echo "!! mighty_goal_overshoot_tuning.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!") \
     && (git apply --check /tmp/mighty_planning_params_override_note.patch && git apply /tmp/mighty_planning_params_override_note.patch \
-        || echo "!! mighty_planning_params_override_note.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!")
+        || echo "!! mighty_planning_params_override_note.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml !!") \
+    && (git apply --check /tmp/mighty_yaw_lookahead.patch && git apply /tmp/mighty_yaw_lookahead.patch \
+        || echo "!! mighty_yaw_lookahead.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp、mighty.hpp、mighty_type.hpp、mighty_node.cpp、config/*mighty.yaml（getDesiredYaw改成看yaw_look_ahead_time秒之后的轨迹点决定TRAVELING/GOAL_SEEN的yaw目标，而不是1个dc周期外的next_goal.pos；YAWING分支补上跟TRAVELING/GOAL_SEEN同款的零向量死区守卫，之前只守卫了TRAVELING/GOAL_SEEN、没覆盖YAWING，导致"到达目标点定最终朝向时持续自转"这个现象没被之前那版mighty_traveling_yaw_zero_dist_guard.patch堵住） !!") \
+    && (git apply --check /tmp/mighty_yaw_proportional_rate.patch && git apply /tmp/mighty_yaw_proportional_rate.patch \
+        || echo "!! mighty_yaw_proportional_rate.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp（MIGHTY::yaw()把copysign(1,diff)*w_max这种bang-bang恒幅角速度指令改成diff/dc这种跟误差成比例的角速度，saturate()饱和的是diff的量级而不只是当废弃品扔掉——desired_yaw小幅抖动时不再每周期都满速甩头，只有diff真正接近饱和上限时才等价于原来的满速指令） !!") \
+    && (git apply --check /tmp/mighty_yaw_filter_alpha_fix.patch && git apply /tmp/mighty_yaw_filter_alpha_fix.patch \
+        || echo "!! mighty_yaw_filter_alpha_fix.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml（alpha_filter_dyaw从0.1改成0.8，对齐同仓库其它配置文件，修复轨迹跟踪时机头左右摇摆） !!") \
+    && (git apply --check /tmp/mighty_yaw_lookahead_5s_goal_aim.patch && git apply /tmp/mighty_yaw_lookahead_5s_goal_aim.patch \
+        || echo "!! mighty_yaw_lookahead_5s_goal_aim.patch 未能自动应用，需人工核对后手动改 config/hw_mighty.yaml、src/mighty/mighty.cpp（yaw_look_ahead_time从1.0秒改成5.0秒，且getNextGoal()新增"5秒内能跑到plan_末尾就直接瞄准G_term"的规则，不再瞄可能只是horizon截断出来的中间subgoal） !!") \
+    && (git apply --check /tmp/mighty_goal_seen_yaw_freeze.patch && git apply /tmp/mighty_goal_seen_yaw_freeze.patch \
+        || echo "!! mighty_goal_seen_yaw_freeze.patch 未能自动应用，需人工核对后手动改 include/mighty/mighty.hpp、src/mighty/mighty.cpp（GOAL_SEEN状态进入那一刻锁定yaw、之后不再跟着位置噪声重算，越接近G_term时"位置到G_term方向"对位置噪声越敏感，这是摇摆的第二个几何根因） !!") \
+    && (git apply --check /tmp/mighty_yaw_debug_print.patch && git apply /tmp/mighty_yaw_debug_print.patch \
+        || echo "!! mighty_yaw_debug_print.patch 未能自动应用，需人工核对后手动改 src/mighty/mighty.cpp（getDesiredYaw()里节流打印desired_yaw/local_state.yaw/diff，排查机头摇摆根子用，诊断用途，确认根因后应该删掉） !!") \
+    && (git apply --check /tmp/mighty_conditional_gazebo_ros_deps.patch && git apply /tmp/mighty_conditional_gazebo_ros_deps.patch \
+        || echo "!! mighty_conditional_gazebo_ros_deps.patch 未能自动应用，需人工核对后手动改 package.xml（gazebo_ros/gazebo_plugins两个<depend>加上condition=\"\$BUILD_SIMULATION == '1'\"，跟CMakeLists.txt里的BUILD_SIMULATION开关对齐，否则arm64/无Gazebo环境下colcon build会因为这两个包没编译过直接拒绝编译mighty本身） !!")
+
+# 只在flight-stack镜像应用——sim-world虽然也编译mighty包（供世界/spawn/rviz
+# 等共享资源用），但sim-world-entrypoint.sh从不启动mighty_node本身（真正
+# 跑规划器的是flight-stack-nx01/nx02两个容器），这次改动只影响运行时yaw
+# 计算行为，sim-world用不上；而且sim-world的mighty patch链本来就比
+# flight-stack短很多（缺mighty_avoidance_tuning/mighty_replan_failure_cap/
+# mighty_planning_params_override_note等几个），实测这个新patch的上下文
+# 在sim-world那条短链上对不上，会直接apply失败——不勉强凑到两条链都用同一份
+# patch。
 
 # acl-mapping是一个git仓库，global_mapper_ros只是它下面的一个子目录
 # （不是独立的git repo，跟"mighty"那个repo结构不一样）——patch的cwd必须是
@@ -441,6 +502,10 @@ RUN cd /opt/mighty_ws/src/acl-mapping \
 # gt_odom_bridge：定位数据来源切换开关（LOCALIZATION_SOURCE=gt|dlio，见
 # flight-stack-entrypoint.sh）用的桥接节点，跟mighty包源码无关但塞进同一个
 # workspace一起用colcon编译，省得单开一个workspace/COPY/colcon build三件套。
+# 新增gt_cloud_bridge_node用了sensor_msgs_py.point_cloud2——这个包不在
+# ros-humble-desktop/ros-base的默认核心集合里，照着下面ros-humble-example-
+# interfaces那次教训（rosdep install失败被`|| true`吞掉、几十秒后才在不相关的
+# 报错点炸出来），这里显式apt装一次。
 COPY src/gt_odom_bridge /opt/mighty_ws/src/gt_odom_bridge
 # mighty的CMakeLists.txt里`find_package(example_interfaces REQUIRED)`是
 # pristine源码里本来就有的依赖（不是这次改动引入的），但`rosdep install
@@ -452,16 +517,71 @@ COPY src/gt_odom_bridge /opt/mighty_ws/src/gt_odom_bridge
 # 不是这个包在apt源里不存在，大概率是rosdep/网络层面偶发的）。与其继续依赖
 # 可能失败的rosdep，这里显式apt装一次，不吞异常，装不上直接在这一步报错，不用
 # 等colcon build跑几十秒才在一个跟真正原因不相关的报错点炸出来。
+# 2026-08-15 Jetson首次真机build才发现：/opt/mighty_ws/src是COPY整个
+# staging/mighty_ws_src进来的（见上面COPY那行），里面除了mighty/acl-mapping/
+# dynus_interfaces这些真机运行时真正用得到的包，还混了一堆仿真专用包
+# （gazebo_ros_pkgs全家桶、realsense_gazebo_plugin、uav_simulator/*系列），
+# 这些包的CMakeLists.txt都要find_package(gazebo_ros)之类，colcon build默认
+# 不加--packages-select/skip限制会扫到src/下所有package.xml、全部尝试编译。
+# amd64开发机上因为Dockerfile.base装了Gazebo Classic，这些包能编译过、一直没
+# 暴露问题；但Gazebo Classic官方从没发布过arm64包（apt-cache madison在arm64下
+# 连source包都搜不到），Dockerfile.base里对应那层装Gazebo时已经按TARGETARCH
+# 跳过了arm64，这里就得把这批仿真专用包也从colcon build里跳过，否则会在
+# find_package(gazebo_ros)这步直接编译失败。flight-stack-hw本来就是纯真机部署
+# （见docker-compose.hw.yml），运行时也用不上这些仿真节点，跳过没有副作用。
+# gt_odom_bridge（下面单独COPY进来那个）不在跳过名单里，是2026-08-15实测踩坑
+# 之后改回来的：一开始以为它整个包都是"跳过DLIO、改用Gazebo仿真真值"的测试
+# 专用代码就顺手跳过了，结果flight-stack-entrypoint.sh里`ros2 run gt_odom_bridge
+# name_label_node`（RViz头顶名字标注，第681行附近，无条件启动、任何
+# LOCALIZATION_SOURCE下都要用，纯订阅nav_msgs/visualization_msgs，不碰Gazebo）
+# 因为找不到这个包直接失败，被脚本末尾`wait -n`+`set -eo pipefail`抓到，
+# 拖垮整个entrypoint（哪怕DLIO/MAVROS/ego_planner全都正常跑着）。gt_odom_bridge
+# 是ament_python包，setup.py里4个console_scripts（gt_odom_bridge_node/
+# name_label_node/gt_cloud_bridge_node/local_position_readback_node）只有
+# 前两个（不含name_label_node）真的用得到gazebo_msgs.msg.ModelStates；
+# package.xml的<depend>gazebo_msgs</depend>是整个包级别声明的，但gazebo_msgs
+# 本身是纯消息包（不需要libgazebo，见下面的说明），能在arm64正常编译，
+# 所以这个包不需要跳过，正常编译即可——entrypoint.sh自己已经用
+# LOCALIZATION_SOURCE分支决定gt_odom_bridge_node/local_position_readback_node
+# 要不要真正启动，没必要在编译期这层再跳。
+# gazebo_msgs不在上面这批跳过名单里，是故意的：它只是纯消息定义包（package.xml
+# 里只<depend>了builtin_interfaces/geometry_msgs/trajectory_msgs/std_msgs+
+# rosidl_default_generators，不link libgazebo，任何架构都能编译），mighty的
+# CMakeLists.txt里`find_package(gazebo_msgs REQUIRED)`是无条件的（fake_sim
+# target要用，这个target本身也不依赖真正的Gazebo库），跳过gazebo_msgs反而会让
+# mighty这个真机运行时真正需要的核心包配置失败。mighty的package.xml原本对
+# gazebo_ros/gazebo_plugins（这两个才是真正需要libgazebo-dev、arm64编译不了的）
+# 也是硬<depend>，colcon因此会在这两个包缺失时直接拒绝编译mighty——
+# mighty_conditional_gazebo_ros_deps.patch（上面已应用）把这两条depend加上
+# condition="$BUILD_SIMULATION == '1'"，下面显式export BUILD_SIMULATION=0
+# 让condition在真机构建里评估为假，跟CMakeLists.txt本来就有的
+# if(BUILD_SIMULATION)语义对齐。
+# 2026-09-06新增：mighty_ws_src/acl-mapping/fla_utils（被global_mapper_ros
+# 依赖，PLANNER=mighty时真正会用到）的CMakeLists.txt硬性
+# find_package(cv_bridge REQUIRED)/find_package(image_transport REQUIRED)，
+# 但package.xml没有声明这两个依赖（上游打包疏漏），下面rosdep install不会
+# 替它装、装了也白装，必须显式apt装（下面apt-get install那行新增
+# ros-humble-cv-bridge/ros-humble-image-transport两个包）。这台机器当时
+# rosdep update本身也连不上raw.githubusercontent.com（网络/代理问题，
+# 另一个独立问题），但即使网络正常也救不了这个——根子是package.xml缺声明，
+# 不是rosdep有没有跑成功。这里走纯C++ find_package，不是Python
+# cv_bridge_boost那条路，不会重蹈本项目之前在vision-stack那边
+# "cv_bridge报KeyError: 16"（numpy版本冲突）的坑，两者是不同的使用场景。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     apt-get update \
-    && apt-get install -y --no-install-recommends ros-humble-example-interfaces \
+    && apt-get install -y --no-install-recommends ros-humble-example-interfaces ros-humble-sensor-msgs-py \
+        ros-humble-cv-bridge ros-humble-image-transport \
     && source /opt/ros/humble/setup.bash \
     && source /opt/decomp_ws/install/setup.bash \
     && cd /opt/mighty_ws \
     && rosdep update \
     && rosdep install --from-paths src --ignore-src -r -y || true \
-    && colcon build --parallel-workers "${BUILD_JOBS}" --packages-skip ros2_livox_simulation \
+    && export BUILD_SIMULATION=0 \
+    && colcon build --parallel-workers "${BUILD_JOBS}" \
+        --packages-skip ros2_livox_simulation gazebo_plugins gazebo_ros gazebo_dev \
+            gazebo_ros_pkgs realsense_gazebo_plugin map_generator local_sensing poscmd_2_odom \
+            so3_quadrotor_simulator so3_control mockamap \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_SIMULATION=OFF
 
 # ============================================================
@@ -478,7 +598,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 #    自己核对一遍再应用，我没有在真实环境里跑过这个patch，只是把结论落成待办）。
 # ============================================================
 COPY staging/ros2_px4_stack /opt/ros2_px4_stack_ws/src/ros2_px4_stack
-COPY patches/ros2_px4_stack_dynus.patch patches/ros2_px4_stack_vision_pose_staleness.patch patches/ros2_px4_stack_takeoff_altitude.patch patches/ros2_px4_stack_kick_offboard_fix.patch patches/ros2_px4_stack_kick_offboard_timeout.patch patches/ros2_px4_stack_control_law.patch patches/ros2_px4_stack_control_law_launch.patch patches/ros2_px4_stack_takeoff_gate.patch patches/ros2_px4_stack_zb_norm_guard.patch patches/ros2_px4_stack_yb_cross_norm_guard.patch patches/ros2_px4_stack_base_link_tf_conflict.patch patches/ros2_px4_stack_offboard_follower_toggle.patch /tmp/
+COPY patches/ros2_px4_stack_dynus.patch patches/ros2_px4_stack_vision_pose_staleness.patch patches/ros2_px4_stack_takeoff_altitude.patch patches/ros2_px4_stack_kick_offboard_fix.patch patches/ros2_px4_stack_kick_offboard_timeout.patch patches/ros2_px4_stack_remove_attitude_mode.patch patches/ros2_px4_stack_takeoff_gate.patch patches/ros2_px4_stack_zb_norm_guard.patch patches/ros2_px4_stack_yb_cross_norm_guard.patch patches/ros2_px4_stack_base_link_tf_conflict.patch patches/ros2_px4_stack_offboard_follower_toggle.patch patches/ros2_px4_stack_repub_odom_event_driven.patch patches/ros2_px4_stack_skip_repub_odom_uwb_imu.patch patches/ros2_px4_stack_vision_sanity_speed_gate.patch /tmp/
 RUN cd /opt/ros2_px4_stack_ws/src/ros2_px4_stack \
     && (git apply --check /tmp/ros2_px4_stack_dynus.patch && git apply /tmp/ros2_px4_stack_dynus.patch \
         || echo "!! patch 未能自动应用，需要人工核对后手动改，见 docker/README的已知问题章节 !!") \
@@ -490,10 +610,8 @@ RUN cd /opt/ros2_px4_stack_ws/src/ros2_px4_stack \
         || echo "!! ros2_px4_stack_kick_offboard_fix.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
     && (git apply --check /tmp/ros2_px4_stack_kick_offboard_timeout.patch && git apply /tmp/ros2_px4_stack_kick_offboard_timeout.patch \
         || echo "!! ros2_px4_stack_kick_offboard_timeout.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
-    && (git apply --check /tmp/ros2_px4_stack_control_law.patch && git apply /tmp/ros2_px4_stack_control_law.patch \
-        || echo "!! ros2_px4_stack_control_law.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
-    && (git apply --check /tmp/ros2_px4_stack_control_law_launch.patch && git apply /tmp/ros2_px4_stack_control_law_launch.patch \
-        || echo "!! ros2_px4_stack_control_law_launch.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py !!") \
+    && (git apply --check /tmp/ros2_px4_stack_remove_attitude_mode.patch && git apply /tmp/ros2_px4_stack_remove_attitude_mode.patch \
+        || echo "!! ros2_px4_stack_remove_attitude_mode.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py（删掉upstream自带但从未验证过的attitude直控模式：_pack_into_attitude/get_thrust/self.attitude_pub/self.attitude_setpoint，以及_publish_setpoint里的优先级判断，只保留trajectory模式） !!") \
     && (git apply --check /tmp/ros2_px4_stack_takeoff_gate.patch && git apply /tmp/ros2_px4_stack_takeoff_gate.patch \
         || echo "!! ros2_px4_stack_takeoff_gate.patch 未能自动应用，需人工核对后手动改 src/dynus_offboard_node.py !!") \
     && (git apply --check /tmp/ros2_px4_stack_zb_norm_guard.patch && git apply /tmp/ros2_px4_stack_zb_norm_guard.patch \
@@ -503,7 +621,13 @@ RUN cd /opt/ros2_px4_stack_ws/src/ros2_px4_stack \
     && (git apply --check /tmp/ros2_px4_stack_base_link_tf_conflict.patch && git apply /tmp/ros2_px4_stack_base_link_tf_conflict.patch \
         || echo "!! ros2_px4_stack_base_link_tf_conflict.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py !!") \
     && (git apply --check /tmp/ros2_px4_stack_offboard_follower_toggle.patch && git apply /tmp/ros2_px4_stack_offboard_follower_toggle.patch \
-        || echo "!! ros2_px4_stack_offboard_follower_toggle.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py（加RUN_OFFBOARD_FOLLOWER开关，供CONTROLLER=px4ctrl时跳过track_dynus_traj节点） !!")
+        || echo "!! ros2_px4_stack_offboard_follower_toggle.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py（加RUN_OFFBOARD_FOLLOWER开关，供CONTROLLER=px4ctrl时跳过track_dynus_traj节点） !!") \
+    && (git apply --check /tmp/ros2_px4_stack_repub_odom_event_driven.patch && git apply /tmp/ros2_px4_stack_repub_odom_event_driven.patch \
+        || echo "!! ros2_px4_stack_repub_odom_event_driven.patch 未能自动应用，需人工核对后手动改 transforms/repub_odom.py（把_publish_loop定时重发缓存消息改成三个回调各自事件驱动直接发布，避免DLIO实际频率低于100Hz时重复发送内容/时间戳相同的vision_pose消息） !!") \
+    && (git apply --check /tmp/ros2_px4_stack_skip_repub_odom_uwb_imu.patch && git apply /tmp/ros2_px4_stack_skip_repub_odom_uwb_imu.patch \
+        || echo "!! ros2_px4_stack_skip_repub_odom_uwb_imu.patch 未能自动应用，需人工核对后手动改 launch/dynus_mavros.launch.py（LOCALIZATION_SOURCE=uwb_imu时跳过repub_odom节点，避免跟uwb_imu_fusion_node抢mavros/vision_pose/pose_cov话题、形成PX4输出被当成新观测读回喂给自己的反馈环） !!") \
+    && (git apply --check /tmp/ros2_px4_stack_vision_sanity_speed_gate.patch && git apply /tmp/ros2_px4_stack_vision_sanity_speed_gate.patch \
+        || echo "!! ros2_px4_stack_vision_sanity_speed_gate.patch 未能自动应用，需人工核对后手动改 ros2_px4_stack/transforms/repub_odom.py（_livox_odom_cb转发给PX4 vision_pose之前加隐含速度合理性检查，超过max_reasonable_speed_mps(默认15m/s)就丢弃这一帧不转发，防止上游定位源重连时的不连续坐标跳变直接喂给PX4的位置控制环路，2026-09-04真机实测DLIO重连时出现过0.1秒内跳变31米） !!")
 # 上面这个patch让_kick_offboard()真的跑起来之后，用户反馈"二号机没起来"——
 # 实测mavros/state：NX01最终armed:true、mode:OFFBOARD，NX02停在
 # armed:false、mode:OFFBOARD，5分钟后重新查依然没变。两架飞机日志里
@@ -589,6 +713,32 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #    ros2_px4_stack读的是同一份，不会出现两个控制器数字不同步）。
 #    需要 dynus_interfaces（goal_to_poscmd依赖），已经是mighty_ws的一部分，
 #    这里 source mighty_ws/install/setup.bash 复用，不用重新拉取/编译。
+#
+#    so3ctrl（新增第三个可选控制器）：vendor/px4ctrl_ros2/so3ctrl 是跟
+#    px4ctrl平级的第四个子包（package名so3ctrl），复用px4ctrl的飞行状态机
+#    (PX4CtrlFSM，逐字未改)，内部控制律换成KumarRobotics/kr_mav_control的
+#    SO3几何位置环，详见该目录NOTICE.md的许可证归属说明。因为整个
+#    vendor/px4ctrl_ros2/目录都会被下面这行COPY进去、下面的colcon build
+#    没有--packages-select限制会扫描src/下所有package.xml，新增这个子包
+#    不需要改这里的COPY/colcon build命令，同一次构建自动一起编译。
+#    launch文件 px4ctrl_bridge/launch/so3ctrl_docker_sim.launch.py 复用
+#    px4ctrl_bridge里goal_to_poscmd/px4_param_relax/takeoff_gate这三个
+#    跟具体控制器无关的公共节点，不用为so3ctrl单独再写一份。
+#
+#    pt4ctrl（2026-08-13新增第四个可选控制器）：vendor/px4ctrl_ros2/pt4ctrl
+#    是跟px4ctrl/so3ctrl平级的第五个子包，同样复用px4ctrl的飞行状态机
+#    (PX4CtrlFSM，起飞/悬停/降落/RC失控保护逐字未改)，但删掉了推力模型
+#    估计+姿态解算这两步控制律，改成把状态机算出的位置/速度/加速度/偏航
+#    参考量打包成trajectory_msgs/MultiDOFJointTrajectory发到
+#    mavros/setpoint_trajectory/local，交给PX4固件自己的位置控制环解算
+#    姿态/推力（仿ros2_px4_stack的point_to_traj/_pack_into_traj转发方式）。
+#    同样因为整个vendor/px4ctrl_ros2/目录被COPY进去+colcon build无
+#    --packages-select限制，这个子包不需要改这里的COPY/colcon build命令。
+#    launch文件px4ctrl_bridge/launch/pt4ctrl_docker_sim.launch.py同样复用
+#    goal_to_poscmd/px4_param_relax/takeoff_gate三个公共节点。⚠️ 这是全新
+#    实现（不是从任何上游vendor代码移植来的），只做过本地colcon build
+#    编译+启动冒烟测试（ROS2 Jazzy环境，不是这个项目实际用的Humble），
+#    从未在这套docker_sim仿真里实际飞过，详见DEBUG_JOURNAL.md。
 # ============================================================
 COPY vendor/px4ctrl_ros2 /opt/px4ctrl_ws/src/px4ctrl_ros2
 COPY patches/px4ctrl_ros2_namespace.patch /tmp/
@@ -656,14 +806,53 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #    话题，是明确的已知限制。
 # ============================================================
 COPY staging/ego-planner-swarm/src/planner /opt/ego_planner_ws/src
-COPY patches/ego_planner_traj_server_relative_poscmd.patch patches/ego_planner_grid_map_ground_filter.patch /tmp/
+COPY patches/ego_planner_traj_server_relative_poscmd.patch patches/ego_planner_traj_server_yaw_rate_limit.patch patches/ego_planner_grid_map_ground_filter.patch patches/ego_planner_grid_map_min_ray_length.patch patches/ego_planner_visualization_namespace_frame.patch patches/ego_planner_manual_target_goal_marker.patch patches/ego_planner_terminal_collision_check.patch patches/ego_planner_waypoint_recursive_spin_fix.patch patches/ego_planner_swarm_frame_alignment.patch patches/ego_planner_rebound_replan_arclength_underflow.patch patches/ego_planner_segment_point_underflow.patch patches/ego_planner_exec_traj_reach_check.patch patches/ego_planner_progress_diag.patch patches/ego_planner_traj_server_stop_after_finish.patch patches/ego_planner_traj_server_yaw_mode.patch /tmp/
 RUN cd /opt/ego_planner_ws/src \
     && (git apply -p3 --check /tmp/ego_planner_traj_server_relative_poscmd.patch \
         && git apply -p3 /tmp/ego_planner_traj_server_relative_poscmd.patch \
         || echo "!! ego_planner_traj_server_relative_poscmd.patch 未能自动应用，需人工核对后手动改 plan_manage/src/traj_server.cpp !!") \
+    && (git apply -p3 --check /tmp/ego_planner_traj_server_yaw_rate_limit.patch \
+        && git apply -p3 /tmp/ego_planner_traj_server_yaw_rate_limit.patch \
+        || echo "!! ego_planner_traj_server_yaw_rate_limit.patch 未能自动应用，需人工核对后手动改 plan_manage/src/traj_server.cpp（把calculate_yaw()里硬编码的constexpr YAW_DOT_MAX_PER_SEC=PI(~180°/s)改成运行时参数traj_server/yaw_dot_max，配合ego_planner_docker_sim.launch.py读OMEGA_MAX环境变量，复用mighty那边"机头转向跟不上"排查调好的6°/s，原来~180°/s的上限跟px4ctrl实际能跟上的姿态变化速率差太多，疑似2026-08-08"轨迹完美绕障、飞机侧面撞上"的成因之一) !!") \
     && (git apply -p3 --check /tmp/ego_planner_grid_map_ground_filter.patch \
         && git apply -p3 /tmp/ego_planner_grid_map_ground_filter.patch \
-        || echo "!! ego_planner_grid_map_ground_filter.patch 未能自动应用，需人工核对后手动改 plan_env/src/grid_map.cpp、plan_env/include/plan_env/grid_map.h（cloudCallback完全没有地面点过滤，导致occupancy_inflate里地面变成一整片"占据"区域，撞墙风险很高) !!")
+        || echo "!! ego_planner_grid_map_ground_filter.patch 未能自动应用，需人工核对后手动改 plan_env/src/grid_map.cpp、plan_env/include/plan_env/grid_map.h（cloudCallback完全没有地面点过滤，导致occupancy_inflate里地面变成一整片"占据"区域，撞墙风险很高) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_grid_map_min_ray_length.patch \
+        && git apply -p3 /tmp/ego_planner_grid_map_min_ray_length.patch \
+        || echo "!! ego_planner_grid_map_min_ray_length.patch 未能自动应用，需人工核对后手动改 plan_env/src/grid_map.cpp（min_ray_length参数原来的判断被注释掉、命中点插入也完全不看这个参数，mid360自扫描到机身/桨叶的近距离伪点被当障碍物写进栅格，飞机自己所在位置被判定为"起点在障碍物里"，A*搜不到路径） !!") \
+    && (git apply -p3 --check /tmp/ego_planner_visualization_namespace_frame.patch \
+        && git apply -p3 /tmp/ego_planner_visualization_namespace_frame.patch \
+        || echo "!! ego_planner_visualization_namespace_frame.patch 未能自动应用，需人工核对后手动改 traj_utils/src/planning_visualization.cpp、traj_utils/include/traj_utils/planning_visualization.h（Marker/MarkerArray的frame_id硬编码"world"/"map"裸名字，多机命名空间下这两个frame在TF树里跟机体不连通，RViz永远渲染不出规划可视化，需要改成"<namespace>/map") !!") \
+    && (git apply -p3 --check /tmp/ego_planner_manual_target_goal_marker.patch \
+        && git apply -p3 /tmp/ego_planner_manual_target_goal_marker.patch \
+        || echo "!! ego_planner_manual_target_goal_marker.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp（MANUAL_TARGET模式的waypointCallback从来没调用过displayGoalPoint()，目标点没有可视化，2026-08-08用户反馈"目标点没有显著标出来"，需要补上这个调用) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_terminal_collision_check.patch \
+        && git apply -p3 /tmp/ego_planner_terminal_collision_check.patch \
+        || echo "!! ego_planner_terminal_collision_check.patch 未能自动应用，需人工核对后手动改 bspline_opt/src/bspline_optimizer.cpp（calcSwarmCost()/check_collision_and_rebound()/rebound_optimize()/refine_optimize()四处"只查前2/3控制点/时长"的碰撞&机间避障检测改成覆盖到终点——目标点在障碍物里或两机共享同一目标点时，轨迹终点段原本永远不会被检测到、避障力恒为零，飞机会一路被"必须到达目标点"推进障碍物核心，或者死死卡在离共享目标一米多外反复重规划、永远进不去也永远不放弃，详见docker_sim/DEBUG_JOURNAL.md 2026-08-09相关记录) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_waypoint_recursive_spin_fix.patch \
+        && git apply -p3 /tmp/ego_planner_waypoint_recursive_spin_fix.patch \
+        || echo "!! ego_planner_waypoint_recursive_spin_fix.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp（planNextWaypoint()里exec_state_不是WAIT_TARGET时会忙等exec_state_==EXEC_TRAJ、反复调用rclcpp::spin_some(node_)——但这个函数是从waypointCallback()这个订阅回调里调用的，回调本身已经在被main()的rclcpp::spin(node)这个外层executor执行，从回调内部对同一个node_递归spin会直接抛"Node ... has already been added to an executor."、SIGABRT整个ego_planner_node——upstream本来就有这个bug，terminal_collision_check.patch让飞机更容易卡在GEN_NEW_TRAJ、大幅提高了触发概率，2026-08-09实测复现：给一个障碍物内的目标点(规划正确失败)、紧接着再给一个自由空间的合法目标点，必炸。改成不忙等，按exec_state_是不是EXEC_TRAJ/REPLAN_TRAJ(已有成功轨迹)直接分流到REPLAN_TRAJ或GEN_NEW_TRAJ，不递归spin) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_swarm_frame_alignment.patch \
+        && git apply -p3 /tmp/ego_planner_swarm_frame_alignment.patch \
+        || echo "!! ego_planner_swarm_frame_alignment.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp、plan_manage/include/ego_planner/ego_replan_fsm.h（给ego_planner补一套swarm坐标对齐机制，照抄mighty_node.cpp已经在用的/frame_align模式——每机DLIO里程计是各自spawn点为原点的局部系，比较两机控制点前必须先用applyFrameAlignTransform()把对方广播的B样条控制点变换到本机局部系，否则机间距离会系统性偏离真值一个spawn偏移的量级；配套加了publishSelfAsStaticObstacle()1Hz心跳，避免长时间停在WAIT_TARGET的飞机从别人的swarm_trajs_buf_里消失。默认swarm/use_frame_alignment=false，不影响未显式开启这个开关的场景。这份改动2026-08-09原本是staging里10天没提交、没归档的uncommitted修改，2026-08-19从工作区提取整理成正式patch，提取时特意排除了跟ego_planner_manual_target_goal_marker.patch冲突的一处意外回退(displayGoalPoint()调用被误删)，只保留跟swarm对齐功能真正相关的部分，详见docker_sim/DEBUG_JOURNAL.md 2026-08-19相关记录) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_rebound_replan_arclength_underflow.patch \
+        && git apply -p3 /tmp/ego_planner_rebound_replan_arclength_underflow.patch \
+        || echo "!! ego_planner_rebound_replan_arclength_underflow.patch 未能自动应用，需人工核对后手动改 plan_manage/src/planner_manager.cpp（reboundReplan()里`pseudo_arc_length.size() - 2`用size_t运算，剩余轨迹时长<ts且离局部目标<0.3m时pseudo_arc_length会停在size()==1，size()-2下溢成SIZE_MAX，紧接着的while循环条件恒真、只能靠越界读到的垃圾值凑巧退出，退不出来就是主线程100% CPU纯自旋，单线程执行器被这个定时器回调堵死后该节点所有回调全部饿死，表现为进程还在、ros2 node list有它、零ERROR/WARN，但所有话题彻底停发——最坏的一种无声失效，只能重启容器恢复。触发场景是飞机接近终点，跟"假性完成""卡在终点附近反复重规划"是同一族问题。从docker_real真机部署仓库移植过来，真机侧2026-08-31用gdb attach一个无声挂死的ego_planner_node定位到根因并验证过修复有效，详见该仓库read_hw.md 2026-08-31记录、本patch文件头注释) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_segment_point_underflow.patch \
+        && git apply -p3 /tmp/ego_planner_segment_point_underflow.patch \
+        || echo "!! ego_planner_segment_point_underflow.patch 未能自动应用，需人工核对后手动改 plan_manage/src/planner_manager.cpp（reboundReplan()里`segment_point[segment_point.size() - 2]`前面判空判的是`pseudo_arc_length`——这个vector函数一开始就无条件push_back(0.0)，永远不为空，判断形同虚设。真正该判空的是segment_point：t_cur超过local_data_.duration_（轨迹已经跑完/离终点很近）时前面"从当前轨迹采样"那段循环一次没跑，segment_point是空的，size()-2在size_t下溢成天文数字，读到一段无效内存——2026-09-16加临时诊断日志实测confirmed：同一次D6绕飞测试里出现过8次segment_point.size()=0，均精确对应t_cur超过duration_的时刻，这个越界读真实发生过，不是纯理论推测。改成判断segment_point.empty()，为空时干净返回false而不是读野内存，是跟ego_planner_rebound_replan_arclength_underflow.patch同一个作者当年漏掉的同族bug、这次一并补上) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_exec_traj_reach_check.patch \
+        && git apply -p3 /tmp/ego_planner_exec_traj_reach_check.patch \
+        || echo "!! ego_planner_exec_traj_reach_check.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp（case EXEC_TRAJ分支判断到达终点时，原版只看局部目标是不是全局终点+轨迹时间是否跑完，从没检查实际飞到的位置pos离end_pt_还有多远——只要满足前两条就直接判定到达切WAIT_TARGET，不管真实位置在哪。2026-08-19两机对穿测试实测撞上：swarm avoidance生效后重规划轨迹段被压缩得很短，某段恰好把局部目标设成终点、时间又跑完，FSM因此假性宣布成功，飞机实际还在半路（最多差2米多），没有碰撞风险但也没真正完成任务，详见docker_sim/DEBUG_JOURNAL.md 2026-08-19相关记录。补上跟旁边REPLAN_TRAJ分支同样的no_replan_thresh_距离判断，没真到终点就继续REPLAN_TRAJ，不假装已完成) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_progress_diag.patch \
+        && git apply -p3 /tmp/ego_planner_progress_diag.patch \
+        || echo "!! ego_planner_progress_diag.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp（临时诊断日志，排查D6长距离绕飞时'重规划一直成功但飞机不往前推进'现象，不改行为） !!") \
+    && (git apply -p3 --check /tmp/ego_planner_traj_server_stop_after_finish.patch \
+        && git apply -p3 /tmp/ego_planner_traj_server_stop_after_finish.patch \
+        || echo "!! ego_planner_traj_server_stop_after_finish.patch 未能自动应用，需人工核对后手动改 plan_manage/src/traj_server.cpp（cmdCallback()到达终点后原本无限期继续发布position_cmd，px4ctrl的CMD_CTRL状态永远等不到cmd流中断超过msg_timeout.cmd(0.5s)、永远不会自动回退AUTO_HOVER，而AUTO_LAND只能从AUTO_HOVER触发，等于飞到目标点之后永远无法降落——2026-08-19实测撞上，详见docker_sim/DEBUG_JOURNAL.md 2026-08-19相关记录。改成到达终点后只再保持发布HOVER_AFTER_FINISH_SEC(1.0s)，之后主动停止发布，交还给px4ctrl自己的AUTO_HOVER机制做长期悬停) !!") \
+    && (git apply -p3 --check /tmp/ego_planner_traj_server_yaw_mode.patch \
+        && git apply -p3 /tmp/ego_planner_traj_server_yaw_mode.patch \
+        || echo "!! ego_planner_traj_server_yaw_mode.patch 未能自动应用，需人工核对后手动改 plan_manage/src/traj_server.cpp（2026-09-15用户要求D6绕飞'机头始终对准立柱中心'——calculate_yaw()原来只有一种"朝速度方向"的算法，新增yaw_mode_三选一旁路开关(VELOCITY默认/CONSTANT/POINT)，通过新增的traj_server/yaw_mode+traj_server/yaw_param两个话题从contest_sdk新方法set_yaw_mode_velocity()/set_yaw_mode_constant()/set_yaw_mode_point()驱动，默认值VELOCITY保证不设置这两个话题时行为跟原来完全一致，不影响D3/D5/返航等其它goto()调用，详见docker_sim/DEBUG_JOURNAL.md相关记录) !!")
 COPY src/ego_planner_bridge /opt/ego_planner_ws/src/ego_planner_bridge
 RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     source /opt/ros/humble/setup.bash \
@@ -674,7 +863,395 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
        --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ============================================================
-# 6. 统一飞机物理参数配置（对应《专项报告：飞机物理参数配置问题》里的建议——
+# 6. uwb_origin_bridge（docker_sim专属胶水包，纯Python，无第三方依赖）——
+#    起飞点"一键锁定"：订阅一路"绝对位置"话题（真机是真实UWB驱动，这套
+#    仿真里是uwb_sim新增的/{ns}/uwb/pose_abs，见sim-world镜像里
+#    uwb_ground_truth_node.py的改动）+ DLIO/gt_odom_bridge的odom话题，
+#    提供一个Trigger服务把两者的差值锁存成静态TF+持久化文件。跟
+#    PLANNER/CONTROLLER/LOCALIZATION_SOURCE三个开关都无关，无条件启动，
+#    见uwb_origin_bridge/launch/uwb_origin_bridge.launch.py的说明。
+# ============================================================
+COPY src/uwb_origin_bridge /opt/uwb_origin_ws/src/uwb_origin_bridge
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/uwb_origin_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 6b. pointcloud_z_filter（docker_sim专属胶水包，纯Python，2026-08-27新增）——
+#     按Z轴高度区间过滤dlio/odom_node/pointcloud/deskewed、grid_map/
+#     occupancy_inflate两路点云，只给地面站/RViz显示用（封闭空间飞行时
+#     天花板点云会挡住俯视图），不改动原始话题、不影响避障。依赖
+#     sensor_msgs_py，已经在上面mighty_ws那个RUN块里通过ros-humble-
+#     sensor-msgs-py装过（gt_odom_bridge的gt_cloud_bridge_node.py也用
+#     这个库），这里不需要重复apt install。跟uwb_origin_bridge一样不
+#     依赖PLANNER/CONTROLLER等开关，但只有DEPLOY_TARGET=hw时entrypoint.sh
+#     才会启动（用途是给真机现场调试看点云，仿真里rviz可以直接连真实
+#     世界坐标系不需要这层过滤）。
+# ============================================================
+COPY src/pointcloud_z_filter /opt/pointcloud_z_filter_ws/src/pointcloud_z_filter
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/pointcloud_z_filter_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 6c. contest_mission（2026大赛任务系统专属包，纯Python，2026-09-08新增）——
+#     目前只有qr_apriltag_detect_node.py（执行方案阶段2.2）：仿真侧"假识别"
+#     节点，订阅Gazebo相机插件发布的sensor_msgs/Image，QR用pyzbar、AprilTag
+#     用纯Python的apriltag库解码，统一发布vision_msgs/Detection2DArray（跟
+#     真机vision-stack的YOLO/QR节点用同一个消息类型，但真机的AprilTag走的是
+#     独立apriltag_ros第三方包+不同消息格式，仿真这边为了简化没有照搬那条
+#     路——只有真机需要的完整6DOF位姿解算，仿真阶段2的验收标准只要ID/bbox，
+#     见qr_apriltag_detect_node.py文件头说明）。只在DEPLOY_TARGET!=hw时由
+#     entrypoint.sh启动（阶段11.1：真机vision-stack是独立容器，接口本来就
+#     对齐，不需要这个节点）。
+#
+#     2026-09-08 build后实测发现：这里当时漏装了`ros-humble-vision-msgs`
+#     ——阶段2写代码时假设它"直接apt install即可"，但从来没有真的加进这条
+#     apt-get install命令里，host端jazzy环境凑巧原本就装了这个包，本地
+#     语法/打包验证一直没测出来，直到这次真的build+跑容器才在
+#     `qr_apriltag_detect_node`/`precision_servo_node`的启动日志里看到
+#     `ModuleNotFoundError: No module named 'vision_msgs'`崩溃退出。
+#
+#     python3-pyzbar走apt装（跟真机vision-stack同一个包名/理由：apt版自带
+#     匹配的libzbar0依赖，见docker_real/docker_sim/docker/
+#     Dockerfile.vision-stack同一处注释）。apriltag库apt没有对应包，只能pip
+#     装——⚠️显式pin `numpy<2`：这台镜像的`ros-humble-cv-bridge`（上面
+#     "acl-mapping/fla_utils硬性find_package(cv_bridge)"那段已经apt装过）
+#     的`cv_bridge_boost`是预编译.so，链接的是apt版numpy(1.x)的C-API，pip
+#     装东西如果连带把numpy拉到2.x会导致`from cv_bridge import CvBridge`
+#     炸`KeyError: 16`——这正是真机vision-stack那边2026-08-22实测踩过的坑
+#     （见Dockerfile.vision-stack同名注释），仿真这边第一次要在同一个镜像里
+#     同时用cv_bridge（C++ find_package装的）+pip装东西，照抄那次的解法，
+#     不要假设"这次pip装的东西不一样就不会中招"。
+# ============================================================
+COPY src/contest_mission /opt/contest_mission_ws/src/contest_mission
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends python3-pyzbar ros-humble-vision-msgs \
+    && pip3 install "numpy<2" apriltag \
+    && source /opt/ros/humble/setup.bash \
+    && cd /opt/contest_mission_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 7. 真实Mid-360驱动（Livox-SDK2 + livox_ros_driver2，2026-08-13新增）——
+#    此前只在sim-world镜像里编译过（那边编译livox_ros_driver2只是为了拿仿真Mid-360
+#    插件要用的CustomMsg消息类型定义，DLIO本身不订阅这个消息、也不需要驱动可执行
+#    文件真的跑起来）。真机上flight-stack容器需要驱动可执行文件本身去连真实设备、
+#    发布点云+IMU给DLIO，这里补上跟sim-world一致的编译步骤。frame_id patch的
+#    背景见fetch_sources.sh里livox_ros_driver2那条clone_pin的注释。
+#    仅编译进镜像，不在entrypoint里无条件启动——真实设备IP/序列号
+#    （config/MID360_config.json）需要按实际硬件配置好之后才能连上，
+#    什么时候/怎么启动这个节点留到真机联调阶段再定。
+# ============================================================
+COPY staging/livox_ws_src /opt/livox_ws/src
+# 2026-08-18新增livox_ros_driver2_imu_unit_conversion.patch——真机联调实测
+# 确认Livox SDK原始acc_x/y/z是g为单位、驱动没转成sensor_msgs/Imu.msg要求
+# 的m/s²，导致DLIO重力补偿残留将近9.8的"幽灵向下加速度"、速度/位置持续
+# 发散（数千m/s量级）；本来想在DLIO的imu/intrinsics/accel/sm缩放矩阵那边
+# 转换，但DLIO的imu/calibration(自动标定)开启时会无条件把这个矩阵强制设成
+# 单位矩阵、无视配置，两边配合不了，改成从驱动源头直接乘9.80665转换，
+# 详见patch文件头注释和direct_lidar_inertial_odometry/cfg/dlio.yaml里
+# accel/sm那段注释。必须在imu_frame_id.patch之后应用（两个patch都改
+# InitImuMsg()，有先后依赖，顺序不能换）。
+COPY patches/livox_ros_driver2_imu_frame_id.patch patches/livox_ros_driver2_imu_unit_conversion.patch /tmp/
+RUN cd /opt/livox_ws/src/livox_ros_driver2 \
+    && (git apply --check /tmp/livox_ros_driver2_imu_frame_id.patch && git apply /tmp/livox_ros_driver2_imu_frame_id.patch \
+        || echo "!! livox_ros_driver2_imu_frame_id.patch 未能自动应用，需人工核对后手动改 src/lddc.cpp 的 InitImuMsg() !!") \
+    && (git apply --check /tmp/livox_ros_driver2_imu_unit_conversion.patch && git apply /tmp/livox_ros_driver2_imu_unit_conversion.patch \
+        || echo "!! livox_ros_driver2_imu_unit_conversion.patch 未能自动应用，需人工核对后手动改 src/lddc.cpp 的 InitImuMsg()，把acc_x/y/z乘9.80665再赋值 !!")
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    cd /opt/livox_ws/src/Livox-SDK2 \
+        && mkdir -p build && cd build && cmake .. && make -j"${BUILD_JOBS}" && make install && ldconfig \
+    && source /opt/ros/humble/setup.bash \
+        && cd /opt/livox_ws/src/livox_ros_driver2 \
+        && bash build.sh humble
+
+# ============================================================
+# 7b. point_lio（dfloreaa/point_lio_ros2，可选SLAM后端，2026-08-14新增）——
+#     跟DLIO是"二选一"的SLAM，通过SLAM_BACKEND环境变量在
+#     flight-stack-entrypoint.sh里切换（默认仍是SLAM_BACKEND=dlio，现状
+#     不变，见docker-compose.yml）。官方hku-mars/Point-LIO没有ROS2分支，
+#     dfloreaa这个第三方ROS2移植是目前star数最高(244)的候选，打了两个
+#     patch让它能接进这套仿真：
+#     - point_lio_avia_custom_msg.patch：官方Livox CustomMsg支持
+#       （avia_handler）在这个ROS2移植里被整个注释掉、只留PointCloud2四种
+#       handler（不含AVIA），本项目Gazebo仿真的mid360点云走的正是标准
+#       livox_ros_driver2::msg::CustomMsg（Gazebo插件livox_points_plugin.cpp
+#       里custom_pub发布的那一路，topic名跟DLIO专用、字段被
+#       patches/livox_pointcloud_timestamp.patch定制过的_PointCloud2那一路
+#       并行发布、互不冲突，见DEBUG_JOURNAL.md相关记录）——取消注释恢复
+#       这条路径，顺带修了一处ROS2移植时引入的运算符优先级bug
+#       （avia_handler盲区过滤漏加括号，官方是`(A||B||C)&&D`，这个fork被
+#       注释掉的版本写成`A||B||(C&&D)`，z坐标分支会绕过blind盲区判定）。
+#       依赖livox_ros_driver2这个ROS2消息包，所以这个patch必须放在上面
+#       第7步livox_ws build完之后，不能跟第1步DLIO放一起。
+#     - point_lio_docker_sim_launch.patch：命名空间+接口映射，跟DLIO的
+#       dlio_namespace.patch同一套约定——{ns}/odom、{ns}/base_link两个TF
+#       frame名字，输出remap到dlio/odom_node/odom、
+#       dlio/odom_node/pointcloud/deskewed两个固定话题名，mighty/
+#       ego_planner_bridge/gt_odom_bridge/ros2_px4_stack这些下游消费者
+#       不用感知SLAM_BACKEND是dlio还是point_lio，不用改一行代码。顺带
+#       改了mapping.acc_norm（mid360.yaml上游默认假设加速度计以g为单位，
+#       本项目仿真mid360 IMU插件实测直接输出SI单位m/s²，跟DLIO踩过的
+#       同一个坑，见DEBUG_JOURNAL.md"Livox IMU读数未按g单位换算"一节）。
+#     - point_lio_high_freq_diag.patch（2026-09-06新增，临时诊断用）：
+#       `POINT_LIO_HIGH_FREQ_ODOM=true`真机实测确认里程计不跟随真实
+#       运动（只有1-2厘米噪声波动），根因未定位。在两处
+#       `publish_odometry_without_downsample`发布点各加一条节流打印
+#       （每约100次发布打印一次，日志前缀`[HIGH_FREQ_DIAG output/
+#       input]`），输出位置+两次打印之间的位移量+这次用了多少个点，
+#       供打开高频模式后现场对照真实运动核实。排查完根因后应该删掉
+#       这个patch，不是永久性功能，见DEBUG_JOURNAL.md/read_hw.md
+#       同日记录。
+#     - point_lio_drop_stale_lidar_frames.patch（2026-09-08新增）：真机
+#       实测"飞机明显移动了，SLAM/UAV读数完全不跟随"排查出来的另一个
+#       独立根因（不是satu_acc那个）——livox_pcl_cbk/standard_pcl_cbk
+#       把收到的点云无条件push_back进lidar_buffer这个deque，主循环
+#       严格按front()顺序逐帧处理，从来没有"处理跟不上就丢旧帧"的
+#       逻辑。真机CPU资源紧张（8核整机loadavg实测9~12，point_lio自己
+#       吃了233% CPU）时处理速度略低于点云~20Hz的发布速度，这个deque
+#       持续增长——19分半的运行时间里，发布的odom消息时间戳比当下
+#       时刻滞后了152秒，而且还在涨（不是固定偏移，是持续积压）。
+#       这个滞后远超PX4 EKF2_EV_DELAY能接受的范围，vision_pose融合被
+#       静默拒绝；表现出来就是"移动了却完全没反应"——不是没反应，是
+#       系统还在处理152秒之前的旧数据。`rclcpp::SensorDataQoS()`那层
+#       本身是BEST_EFFORT+浅队列，跟不上就丢弃，不是这里的问题；问题
+#       在这个应用层自己另开的deque，完全没有边界。改成收到新帧前先
+#       清空还没处理完的旧帧，任何时刻lidar_buffer最多只有1帧（最新
+#       的），用丢帧换实时性。dlio/fast_lio没暴露过这个bug不是因为
+#       它们更严谨（同款deque写法），是它们处理效率够高、从未真正
+#       触发过这条FIFO无限增长的路径。
+#     - point_lio_arm_openmp.patch（2026-09-08新增）：CMakeLists.txt原来
+#       只给x86/amd64开并行（MP_EN+按核心数放大到3/4线程），Jetson Orin
+#       NX真机是aarch64，落到最下面的else()分支，从未定义MP_EN，
+#       laserMapping.cpp里的#pragma omp parallel for全程单线程跑——跟
+#       fast_lio在ARM上的同类gap一样（见7c节fast_lio_arm_openmp.patch）。
+#       这里没有照抄x86分支"按核心数放大"的公式，而是给aarch64单独加一个
+#       分支、固定给3个线程：point_lio自己在x86仿真机上出过并行失控冲到
+#       1150% CPU的事故（用POINT_LIO_CPU_CORES+taskset限流过），跟
+#       fast_lio"完全没并行"是相反的风险方向，固定保守值给同容器里的
+#       mavros/ego_planner/pt4ctrl/vision-stack留余量。
+#     - point_lio_docker_sim_launch.patch（2026-09-08追加）：mapping.
+#       satu_acc配套修正——上面acc_norm从1.0(g)改成9.81(SI)之后，
+#       Estimator.cpp的h_model_IMU_output拿satu_acc跟**原始未换算**的
+#       IMU读数比（真机mid360/imu实测静止时z轴≈9.73 m/s²），satu_acc
+#       没跟着acc_norm等比例放大，还留在上游默认3.0，导致0.99*3.0=2.97
+#       远小于静止重力分量，加速度这一路IMU测量从开机静止那一刻起就
+#       永久判定"饱和"、被清零——真机首次实测"移动飞机SLAM里程计完全
+#       不变化"排查出来的根因，dlio/fast_lio不受影响（各自独立yaml，
+#       没有这个耦合）。改成29.43(=3.0×9.81，保持"3g"饱和阈值的物理
+#       含义不变)。satu_gyro不受影响（angvel_avr没有被acc_norm这套换算
+#       覆盖），保持35.0上游默认值。见下面"已知未处理项"，这条已从
+#       "未核实"移到"已修"。
+#     - point_lio_docker_sim_launch.patch（2026-09-08再追加）：按比赛
+#       场地20×25×6米重新定mapping.det_range/cube_side_length——排查
+#       lidar_buffer积压问题时顺带查了这两个参数的实际生效值：
+#       det_range=100(来自mid360.yaml)、cube_side_length=**1000**
+#       （不是parameters.cpp的C++默认值200——launch文件本来就有一行
+#       'cube_side_length': 1000.0覆盖它，yaml里没有这个key，一直用
+#       这个1000）。这组值代入lasermap_fov_segment()的触发条件
+#       (`dist_to_map_edge<=1.5*det_range`，静止时dist_to_map_edge=
+#       cube_len/2=500)算出来500>150，从不触发——要飞机离起点350米
+#       才会第一次裁剪，20×25米场地内不可能达到，local map从起飞起
+#       从未真正裁剪过、无边界累积所有历史点——跟fast_lio真机排查时
+#       遇到的问题同一个方向（cube太大导致从不裁剪、地图无限增长），
+#       是真机CPU紧张的一个促成因素。改成det_range=20(留够16米半
+#       对角线的余量)、cube_side_length=100(保证cube_len/2(50)>
+#       1.5*det_range(30)，覆盖整个场地活动范围又不会无限增长)。
+#       DET_RANGE只在这一处使用，不参与点云距离过滤，调小不误伤
+#       有效点云。sim/hw统一生效（场地尺寸是双方共同事实，不是需要
+#       隔离的真机专属安装参数）。
+#     ⚠️ 已知未处理项（不是这次接入的阻塞项，留给实测阶段核实）：
+#     mapping.satu_gyro（IMU饱和量程，社区参考mid360内置IMU ICM40609约
+#     35rad/s，未核实官方datasheet一手数据，但不涉及acc_norm那种单位
+#     耦合，风险远低于已修的satu_acc）、mapping.extrinsic_T/R（LiDAR-IMU
+#     外参，mid360.yaml沿用的是hku-mars官方硬件标定值，本项目仿真里两个
+#     传感器是否严格共点未核实）——真机部署前需要单独核实。仅编译进
+#     镜像，不代表已经过完整实测验证。
+# ============================================================
+COPY staging/pointlio_ws_src/point_lio_ros2 /opt/point_lio_ws/src/point_lio
+COPY patches/point_lio_avia_custom_msg.patch patches/point_lio_docker_sim_launch.patch patches/point_lio_high_freq_diag.patch patches/point_lio_drop_stale_lidar_frames.patch patches/point_lio_arm_openmp.patch /tmp/
+RUN cd /opt/point_lio_ws/src/point_lio \
+    && (git apply --check /tmp/point_lio_avia_custom_msg.patch && git apply /tmp/point_lio_avia_custom_msg.patch \
+        || echo "!! point_lio_avia_custom_msg.patch 未能自动应用，需人工核对后手动改 package.xml、CMakeLists.txt、src/preprocess.h、src/preprocess.cpp、src/laserMapping.cpp !!") \
+    && (git apply --check /tmp/point_lio_docker_sim_launch.patch && git apply /tmp/point_lio_docker_sim_launch.patch \
+        || echo "!! point_lio_docker_sim_launch.patch 未能自动应用，需人工核对后手动改 launch/mapping_mid360.launch.py !!") \
+    && (git apply --check /tmp/point_lio_high_freq_diag.patch && git apply /tmp/point_lio_high_freq_diag.patch \
+        || echo "!! point_lio_high_freq_diag.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp !!") \
+    && (git apply --check /tmp/point_lio_drop_stale_lidar_frames.patch && git apply /tmp/point_lio_drop_stale_lidar_frames.patch \
+        || echo "!! point_lio_drop_stale_lidar_frames.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp 的livox_pcl_cbk/standard_pcl_cbk（点云buffer要改成只保留最新一帧，不能无限积压） !!") \
+    && (git apply --check /tmp/point_lio_arm_openmp.patch && git apply /tmp/point_lio_arm_openmp.patch \
+        || echo "!! point_lio_arm_openmp.patch 未能自动应用，需人工核对后手动改 CMakeLists.txt !!")
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    apt-get update \
+    && source /opt/ros/humble/setup.bash \
+    && source /opt/livox_ws/install/setup.bash \
+    && cd /opt/point_lio_ws \
+    && rosdep update \
+    && rosdep install --from-paths src --ignore-src -r -y || true \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 7c. FAST-LIO2（hku-mars/FAST_LIO官方ROS2分支，2026-09-07新增）——第三个
+#     可选SLAM后端，仍通过SLAM_BACKEND环境变量切换（dlio/point_lio/
+#     fast_lio三选一，默认不变仍是dlio）。起因：point_lio的
+#     POINT_LIO_HIGH_FREQ_ODOM=true模式2026-09-06真机实测确认里程计不
+#     跟随真实运动、根因未定位（见point_lio_high_freq_diag.patch说明），
+#     用户决定不再深挖point_lio这条线，转而评估FAST-LIO2这个同为
+#     iterated-ESKF、但架构上天然不会踩DLIO那种GICP"0/0=NaN伪收敛"
+#     退化坑（点到面残差+ikd-Tree，不依赖GICP对应点数量）的候选。
+#     本次先只做仿真侧集成验证（功能/退化场景/代码走查在仿真做成本更低，
+#     真机侧目前反而更适合留给"Jetson算力/内存profiling"这类只有真实
+#     硬件才测得出来的问题，仿真验证过关后再考虑真机接入）。
+#     来源核实：staging/pointlio_ws_src/FAST_LIO_official_ros2实测确认是
+#     从https://github.com/hku-mars/FAST_LIO.git官方clone，HEAD精确匹配
+#     fetch_sources.sh里的clone_pin声明（a4743b0），工作区干净、非本项目
+#     私自改过的分支。
+#     两个patch：
+#     - fast_lio_namespace.patch：原版laserMapping.cpp里odom/TF的
+#       frame_id（"camera_init"/"body"）是硬编码在6处publish_*函数里的
+#       字符串字面量，双实例同跑会互相覆盖发布同名TF——新增
+#       odom_header_frame_id/odom_child_frame_id两个declare_parameter
+#       （默认值仍是原版的"camera_init"/"body"，不传参数时行为完全不变），
+#       替换掉全部10处硬编码引用。绝对话题名（/Odometry、
+#       /cloud_registered等）没有碰源码，走launch文件remappings覆盖
+#       （ROS2机制本来就支持remap话题名，只有message payload里的字符串
+#       字段值remap不到，这也是为什么frame_id必须走源码patch、话题名
+#       不需要）。
+#     - fast_lio_docker_sim_launch.patch：新增
+#       launch/fast_lio_docker_sim.launch.py（不修改官方原版
+#       launch/mapping.launch.py，保留对照上游用），跟DLIO/point_lio同
+#       一套下游接口约定——输出remap到dlio/odom_node/odom、
+#       dlio/odom_node/pointcloud/deskewed两个固定话题名，
+#       odom_header_frame_id/odom_child_frame_id按namespace算成
+#       {ns}/odom、{ns}/base_link，mighty/ego_planner_bridge/
+#       gt_odom_bridge/ros2_px4_stack这些下游消费者不用感知
+#       SLAM_BACKEND具体是哪一个。common.lid_topic默认'mid360'——对应
+#       Gazebo仿真插件livox_points_plugin.cpp本来就在并行发布的标准
+#       livox_ros_driver2::msg::CustomMsg话题，FAST-LIO2对Livox(AVIA)
+#       原生支持这个消息类型，不需要像point_lio那样另外patch
+#       preprocess.cpp加CustomMsg handler。
+#     - fast_lio_pointcloud_qos.patch（2026-09-07新增，真机/仿真实测踩出
+#       来的真实bug）：仿真起来SLAM_BACKEND=fast_lio之后fastlio_mapping
+#       节点本身正常启动，但一直打印"New publisher discovered on topic
+#       '.../mid360', offering incompatible QoS...Last incompatible
+#       policy: RELIABILITY_QOS_POLICY"、从未产生过任何里程计输出——原版
+#       laserMapping.cpp里Livox CustomMsg那路订阅（AVIA分支）用裸整数20
+#       构造QoS（解析成默认的RELIABLE），livox_points_plugin.cpp给这个
+#       话题显式用的是BEST_EFFORT（sensor_qos，KeepLast(1)），DDS QoS
+#       兼容规则下RELIABLE订阅者收不到BEST_EFFORT发布者的消息——跟本项目
+#       DLIO踩过的完全同一个坑（dlio_pointcloud_qos.patch），只是这次是
+#       FAST-LIO2自己这个ROS2分支的疏漏（紧邻的PointCloud2分支反而正确
+#       用了rclcpp::SensorDataQoS()）。改成跟PointCloud2分支一样用
+#       SensorDataQoS()。（顺带核实过IMU那路订阅：Gazebo这边
+#       libimu_plugin.so的默认QoS是SensorDataQoS().reliable()——即
+#       RELIABLE，跟FAST-LIO2那边裸整数10（同样解析成RELIABLE）是兼容的
+#       ，IMU这路没有问题，不需要改。）
+#     - fast_lio_imu_last_lidar_end_time_init.patch（2026-09-07新增，
+#       源码走查发现的潜在UB，非实测复现）：IMU_Processing.hpp的
+#       last_lidar_end_time_成员变量原版既没有类内默认值、也不在构造
+#       函数初始化列表或Reset()里赋值——第一次被真正使用是
+#       UndistortPcl()里"if (tail_stamp < last_lidar_end_time_)
+#       continue;"，此时它是一段从未写过的堆内存。跟本项目DLIO那个
+#       prev_imu_stamp初始化成0.、标定结束那一刻用它算出天文数字级dt的
+#       bug（dlio_prev_imu_stamp_fix.patch）同一类"warm-up阶段结束后，
+#       第一次用到的'上一次时间戳'哨兵值没有被正确设置"问题，只是具体
+#       后果不同：DLIO是直接拿去做减法、必然产生epoch量级天文数字；这里
+#       是先做比较，多数情况下未初始化内存恰好是较小的值（epoch时间戳
+#       远大于0）时不会触发异常分支——是未定义行为、不是必然复现的崩溃，
+#       没有实测复现出具体故障现象，纯粹是源码走查+跟DLIO先例类比发现
+#       的防御性修复，改成跟同一个构造函数里已有的start_timestamp_(-1)
+#       同样的写法，用-1当"还没设置过"的哨兵值。
+#     ⚠️ 以上两个新patch都只做过patch可应用性层面的验证（git apply
+#     --check通过、四个FAST-LIO2 patch一起apply到干净checkout无冲突），
+#     还没有实际rebuild+仿真起飞验证过fast_lio真的能收到点云、算出正确
+#     里程计——这是下一步用户手动docker compose build之后要验证的。
+#     依赖livox_ros_driver2这个ROS2消息包，所以放在上面第7步livox_ws
+#     build完之后，跟point_lio一样。
+#     CMakeLists.txt里find_package(PythonLibs REQUIRED)是裸CMake调用，
+#     不经过rosdep（package.xml没有声明对应的system依赖key），显式装
+#     python3-dev；rclcpp_components/std_srvs/visualization_msgs三个
+#     同理被CMakeLists直接find_package但package.xml没声明
+#     <depend>（上游package.xml本身的疏漏），前面DLIO/mighty已经把
+#     ros-humble-desktop这类基础包装过一轮、大概率已经在，这里显式补装
+#     做兜底，不依赖"大概率已经在"这个假设。
+#     ⚠️ 已知未处理项（不是这次接入的阻塞项，留给仿真实测阶段核实）：
+#     mapping.extrinsic_T/R沿用config/mid360.yaml官方硬件标定值（跟
+#     point_lio遇到的情况一样，本项目仿真里两个传感器是否严格共点未
+#     核实）；FAST-LIO2没有point_lio那种mapping.acc_norm单位开关，
+#     假设加速度计直接输出SI单位m/s²（跟本项目仿真mid360 IMU插件实测
+#     行为一致，理论上不需要额外patch，但尚未跑一次仿真实测确认）。
+#     - fast_lio_hw_launch.patch（2026-09-08新增）：新增
+#       launch/fast_lio_hw.launch.py，DEPLOY_TARGET=hw专用，跟仿真版
+#       共享命名空间/frame_id/下游接口remap逻辑，但不搬仿真那5项密度
+#       调参（point_filter_num/filter_size_surf/filter_size_map/
+#       mapping.det_range/cube_side_length，全部保留upstream默认值），
+#       理由是真实Mid-360点云密度比这套仿真高20~30倍，仿真那套调参
+#       明确不适合直接照搬，详见该文件头docstring。同一天配合
+#       flight-stack-entrypoint.sh去掉了DEPLOY_TARGET=hw+
+#       SLAM_BACKEND=fast_lio的fail fast——去掉guard只代表"技术上接通
+#       了"，不代表这条链路已经过真机验证。
+# ============================================================
+COPY staging/pointlio_ws_src/FAST_LIO_official_ros2 /opt/fastlio_ws/src/fast_lio
+COPY patches/fast_lio_namespace.patch patches/fast_lio_docker_sim_launch.patch patches/fast_lio_hw_launch.patch patches/fast_lio_pointcloud_qos.patch patches/fast_lio_imu_last_lidar_end_time_init.patch patches/fast_lio_arm_openmp.patch /tmp/
+RUN cd /opt/fastlio_ws/src/fast_lio \
+    && (git apply --check /tmp/fast_lio_namespace.patch && git apply /tmp/fast_lio_namespace.patch \
+        || echo "!! fast_lio_namespace.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp !!") \
+    && (git apply --check /tmp/fast_lio_docker_sim_launch.patch && git apply /tmp/fast_lio_docker_sim_launch.patch \
+        || echo "!! fast_lio_docker_sim_launch.patch 未能自动应用，需人工核对后手动新增 launch/fast_lio_docker_sim.launch.py !!") \
+    && (git apply --check /tmp/fast_lio_hw_launch.patch && git apply /tmp/fast_lio_hw_launch.patch \
+        || echo "!! fast_lio_hw_launch.patch 未能自动应用，需人工核对后手动新增 launch/fast_lio_hw.launch.py（2026-09-08新增，DEPLOY_TARGET=hw时fast_lio的launch文件，点云密度调参未验证，见该文件头docstring） !!") \
+    && (git apply --check /tmp/fast_lio_pointcloud_qos.patch && git apply /tmp/fast_lio_pointcloud_qos.patch \
+        || echo "!! fast_lio_pointcloud_qos.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp（Livox CustomMsg订阅改用rclcpp::SensorDataQoS()，否则收不到Gazebo发布的点云） !!") \
+    && (git apply --check /tmp/fast_lio_imu_last_lidar_end_time_init.patch && git apply /tmp/fast_lio_imu_last_lidar_end_time_init.patch \
+        || echo "!! fast_lio_imu_last_lidar_end_time_init.patch 未能自动应用，需人工核对后手动改 src/IMU_Processing.hpp（last_lidar_end_time_成员变量补上初始值-1，避免读到未初始化堆内存） !!") \
+    && (git apply --check /tmp/fast_lio_arm_openmp.patch && git apply /tmp/fast_lio_arm_openmp.patch \
+        || echo "!! fast_lio_arm_openmp.patch 未能自动应用，需人工核对后手动改 CMakeLists.txt（架构判断加上aarch64/arm64匹配，Jetson Orin NX Super真机实测确认CPU占用/稳定性良好后新增，2026-09-08，原版这个判断只认x86/amd64，Jetson走else分支导致laserMapping.cpp里唯一那处#pragma omp parallel for热点循环从未真正开启过、全程单线程，见该patch注释里的完整根因分析） !!")
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    apt-get update \
+    && apt-get install -y --no-install-recommends python3-dev ros-humble-rclcpp-components ros-humble-std-srvs ros-humble-visualization-msgs \
+    && source /opt/ros/humble/setup.bash \
+    && source /opt/livox_ws/install/setup.bash \
+    && cd /opt/fastlio_ws \
+    && rosdep update \
+    && rosdep install --from-paths src --ignore-src -r -y || true \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 8. 真实UWB驱动（nooploop LinkTrack，nlink_parser2官方仓库 + 本项目自己写的
+#    nlink_uwb_bridge桥接包，2026-08-13新增）——sim-world的uwb_sim是仿真替身
+#    （拿Gazebo真值伪造/{ns}/uwb/pose_abs），真机这里换成真实驱动：
+#    linktrack_node订阅串口数据、按上位机NAssistant配置好的协议帧类型发布
+#    nlink_linktrack_nodeframe2等相对话题（LinktrackNodeframe2消息里的pos_3d/
+#    quaternion是标签在UWB基站坐标系下解出的绝对位姿）；nlink_uwb_bridge订阅
+#    这个话题转发成uwb_origin_bridge已经认的标准接口geometry_msgs/PoseStamped
+#    on uwb/pose_abs，下游uwb_origin_bridge不用改一行代码。
+#    多机命名空间：launch/linktrack.launch.py原生没有namespace参数，但
+#    linktrackinit.cpp里全部topic都用的是相对话题名（create_publisher没带
+#    前导斜杠），补上namespace launch参数即可让NX01/NX02自动分流到
+#    /NX01/nlink_linktrack_nodeframe2、/NX02/nlink_linktrack_nodeframe2，
+#    不需要改C++源码，见nlink_parser2_namespace.patch。
+#    跟livox驱动一样：仅编译进镜像，不在entrypoint里无条件启动——具体哪个
+#    LOCALIZATION_SOURCE模式下启动、串口设备名怎么配，留到真机联调阶段再定。
+# ============================================================
+COPY staging/nlink_ws_src /opt/nlink_ws/src
+COPY patches/nlink_parser2_namespace.patch /tmp/
+RUN cd /opt/nlink_ws/src/nlink_parser2 \
+    && (git apply --check /tmp/nlink_parser2_namespace.patch && git apply /tmp/nlink_parser2_namespace.patch \
+        || echo "!! nlink_parser2_namespace.patch 未能自动应用，需人工核对后手动改 launch/linktrack.launch.py !!")
+COPY src/nlink_uwb_bridge /opt/nlink_ws/src/nlink_uwb_bridge
+RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
+    source /opt/ros/humble/setup.bash \
+    && cd /opt/nlink_ws \
+    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================
+# 9. 统一飞机物理参数配置（对应《专项报告：飞机物理参数配置问题》里的建议——
 #    mass/f_min/f_max/drone_bbox 等不再分散硬编码，容器启动时用同一份yaml覆盖）
 # ============================================================
 COPY config/vehicle_profile.yaml /opt/config/vehicle_profile.yaml
@@ -682,6 +1259,12 @@ COPY config/vehicle_profile.yaml /opt/config/vehicle_profile.yaml
 ENV http_proxy= \
     https_proxy=
 
+COPY docker/entrypoints/source_all.sh /opt/source_all.sh
+# hw_launch/（2026-08-14新增）：真机部署专用launch文件（目前只有
+# mid360_real.launch.py），DEPLOY_TARGET=hw时entrypoint用绝对路径
+# `ros2 launch /opt/hw_launch/xxx.launch.py`调用，不属于任何colcon
+# workspace，纯粹是镜像里的固定路径，不需要colcon build。
+COPY docker/entrypoints/hw_launch /opt/hw_launch
 COPY docker/entrypoints/flight-stack-entrypoint.sh /opt/entrypoint.sh
 RUN chmod +x /opt/entrypoint.sh
 

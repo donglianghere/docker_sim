@@ -24,6 +24,9 @@ setup(
     license='GPLv3',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'rviz_goal_bridge_node = ego_planner_bridge.rviz_goal_bridge_node:main',
+            'poscmd_to_goal_node = ego_planner_bridge.poscmd_to_goal_node:main',
+        ],
     },
 )

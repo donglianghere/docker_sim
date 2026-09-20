@@ -45,6 +45,7 @@ void Parameter_t::config_from_ros_handle(rclcpp::Node *node)
 	read_essential_param(node, "max_manual_vel", max_manual_vel);
 	read_essential_param(node, "max_angle", max_angle);
 	read_essential_param(node, "low_voltage", low_voltage);
+	read_essential_param(node, "yaw_lock_enabled", yaw_lock_enabled);
 
 	read_essential_param(node, "rc_reverse.roll", rc_reverse.roll);
 	read_essential_param(node, "rc_reverse.pitch", rc_reverse.pitch);

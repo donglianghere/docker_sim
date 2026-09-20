@@ -75,6 +75,13 @@ public:
 	bool use_bodyrate_ctrl;
 	// bool print_dbg;
 
+	// 2026-09-07新增：yaw锁定开关，静态参数(启动时定死，不支持飞行中
+	// 动态切换)，PX4CTRL_YAW_LOCK_ENABLED环境变量控制，默认false(行为
+	// 不变)。开启后CMD_CTRL态忽略规划器算出来的行进方向朝向，改成锁定在
+	// 起飞瞬间的实际朝向，见PX4CtrlFSM.cpp::get_cmd_des()和
+	// docker_sim/DEBUG_JOURNAL.md 2026-09-07相关记录。
+	bool yaw_lock_enabled;
+
 	Parameter_t();
 	// ROS1原版签名是 config_from_ros_handle(const ros::NodeHandle &nh)，
 	// ROS2下参数declare/get都挂在rclcpp::Node本身，改成传Node指针，

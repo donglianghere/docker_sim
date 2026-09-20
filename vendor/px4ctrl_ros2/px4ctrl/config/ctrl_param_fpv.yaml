@@ -18,6 +18,10 @@
     max_manual_vel: 1.0
     max_angle: 30.0  # Attitude angle limit in degree. A negative value means no limit.
     low_voltage: 13.2 # 4S battery
+    yaw_lock_enabled: false # 2026-09-07新增：开启后CMD_CTRL态忽略规划器算出来的
+                             # 行进方向朝向，锁定在起飞瞬间的实际朝向。启动时静态
+                             # 参数，PX4CTRL_YAW_LOCK_ENABLED环境变量覆盖，见
+                             # docker_sim/DEBUG_JOURNAL.md 2026-09-07相关记录。
 
     rc_reverse: # *
       roll: false

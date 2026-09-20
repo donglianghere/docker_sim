@@ -21,7 +21,7 @@ index 340ac19..0693542 100644
  
      # Define arguments
      declare_rviz_arg = DeclareLaunchArgument(
-@@ -39,6 +40,25 @@ def generate_launch_description():
+@@ -39,6 +40,36 @@ def generate_launch_description():
          default_value=imu_topic,
          description='IMU topic name'
      )
@@ -42,7 +42,18 @@ index 340ac19..0693542 100644
 +        )
 +    odom_frame = _ns_frame('odom')
 +    baselink_frame = _ns_frame('base_link')
-+    lidar_frame = _ns_frame('lidar')
++    # docker_sim: 不能用_ns_frame('lidar')生成的通用"<ns>/lidar"——Gazebo
++    # livox插件(gen_iris_mid360_sdf.py里<sensor type='ray' name='{ns}_livox'>)
++    # 发布的原始点云header.frame_id实际是"<ns>/<ns>_livox"（livox_points_
++    # plugin.cpp里ns_+"/"+raySensor->Name()拼出来的，raySensor->Name()是
++    # 传感器名"{ns}_livox"，不是link名），两个字符串对不上导致RViz/tf2永远
++    # 找不到这个frame的变换、原始点云Display渲染不出来——2026-08-08实测
++    # 复现：tf2_echo确认TF树里只有"<ns>/lidar"（DLIO自己发布的），
++    # "<ns>/<ns>_livox"从未出现过。这里直接拼成跟Gazebo插件一致的名字，
++    # 没有namespace时保留原来的通用"lidar"（非docker_sim场景不受影响）。
++    lidar_frame = PythonExpression(
++        ["'", namespace, "/", namespace, "_livox' if '", namespace, "' else 'lidar'"]
++    )
 +    imu_frame = _ns_frame('imu')
  
      # Load parameters

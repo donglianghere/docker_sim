@@ -46,7 +46,7 @@ def generate_launch_description():
     )
     declare_planner = DeclareLaunchArgument(
         'planner',
-        default_value=EnvironmentVariable('PLANNER', default_value='mighty'),
+        default_value=EnvironmentVariable('PLANNER', default_value='ego_planner'),
         description='mighty/ego_planner——决定px4ctrl的cmd话题接goal_to_poscmd还是position_cmd',
     )
     is_ego_planner = PythonExpression(["'", planner, "' == 'ego_planner'"])
@@ -66,6 +66,45 @@ def generate_launch_description():
                     EnvironmentVariable('VEHICLE_MASS_KG', default_value='1.2'), value_type=float),
                 'thrust_model.hover_percentage': ParameterValue(
                     EnvironmentVariable('VEHICLE_HOVER_THRUST', default_value='0.30'), value_type=float),
+                # 2026-08-27新增：跟px4ctrl_hw.launch.py同步的一批外置参数，
+                # 完整说明见那份文件同一处注释——姿态角限幅/手动模式限速/
+                # 低电压阈值/精确推力模型标定系数(K1/K2/K3)/级联PID增益
+                # (Kp/Kv/KAng三组，Kvi*/Kvd*两组yaml标注"No use now"没有外置)。
+                'max_angle': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_MAX_ANGLE_DEG', default_value='30.0'), value_type=float),
+                'max_manual_vel': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_MAX_MANUAL_VEL', default_value='1.0'), value_type=float),
+                'low_voltage': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_LOW_VOLTAGE', default_value='13.2'), value_type=float),
+                'thrust_model.K1': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_THRUST_K1', default_value='0.7583'), value_type=float),
+                'thrust_model.K2': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_THRUST_K2', default_value='1.6942'), value_type=float),
+                'thrust_model.K3': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_THRUST_K3', default_value='0.6786'), value_type=float),
+                'gain.Kp0': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KP0', default_value='1.5'), value_type=float),
+                'gain.Kp1': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KP1', default_value='1.5'), value_type=float),
+                'gain.Kp2': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KP2', default_value='1.5'), value_type=float),
+                'gain.Kv0': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KV0', default_value='1.5'), value_type=float),
+                'gain.Kv1': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KV1', default_value='1.5'), value_type=float),
+                'gain.Kv2': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KV2', default_value='1.5'), value_type=float),
+                'gain.KAngR': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KANGR', default_value='20.0'), value_type=float),
+                'gain.KAngP': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KANGP', default_value='20.0'), value_type=float),
+                'gain.KAngY': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_GAIN_KANGY', default_value='20.0'), value_type=float),
+                # 2026-09-07新增：yaw锁定开关，见docker_sim/DEBUG_JOURNAL.md
+                # 同日期条目完整设计讨论。默认false(行为不变)，仿真里先验证
+                # 再决定要不要在真机上开。
+                'yaw_lock_enabled': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_YAW_LOCK_ENABLED', default_value='false'), value_type=bool),
                 # docker_sim容器里没有真遥控器，用px4ctrl自带的no_RC模式（等价于
                 # RC永远处于"hover挡+command挡+摇杆居中"状态），配合
                 # takeoff_gate节点手动触发起飞、cmd话题持续喂目标点
@@ -93,7 +132,13 @@ def generate_launch_description():
         **px4ctrl_base_kwargs,
         remappings=[
             ('odom', 'dlio/odom_node/odom'),
-            ('cmd', 'position_cmd'),
+            # 2026大赛任务系统阶段3：不再直接接traj_server的'position_cmd'，
+            # 改接position_cmd_relay_node（contest_mission包）的中继输出
+            # 'position_cmd_relayed'——traj_server/px4ctrl_node本身都没有
+            # 改一行代码，只是这里的remap目标换了个名字，中继节点默认
+            # relay_mode=normal时原样透传，行为跟改造前完全一致。见
+            # contest_mission/position_cmd_relay_node.py文件头的拓扑说明。
+            ('cmd', 'position_cmd_relayed'),
         ],
         condition=IfCondition(is_ego_planner),
     )
