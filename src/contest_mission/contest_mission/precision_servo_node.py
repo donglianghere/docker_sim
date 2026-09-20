@@ -352,6 +352,10 @@ class PrecisionServoNode(Node):
                 f"选择，这里故意不给一个可能选错的隐含默认值。"
             )
 
+        #: "待命"提示是否已经打过（2026-09-20）：servo_mode为空是预期状态，
+        #: 只在第一次进入时提示一次，拿到合法模式后复位，避免刷屏。
+        self._standby_logged = False
+
         self._odom_xy_z_yaw: Optional[Tuple[float, float, float, float]] = None
         self._last_world_offset: Optional[Tuple[float, float]] = None
         self._last_detection_time: Optional[float] = None
@@ -548,15 +552,33 @@ class PrecisionServoNode(Node):
 
         servo_mode = self.get_parameter('servo_mode').value
         if servo_mode not in VALID_SERVO_MODES:
-            # 正常情况下走不到这里（构造时已经校验过），但servo_mode是运行时
-            # 可改的ROS2参数，理论上可以被重新set_parameters成非法值——防御
-            # 一下，不让非法值继续往下跑控制逻辑。
+            # 2026-09-20清理日志噪音：这里要分两种情况，原来混在一起按
+            # ERROR每5秒刷一条，空闲时会持续刷屏（实测日志里满屏都是它）。
+            #
+            # ① 空字符串 = 刻意设计的"待命"状态，不是错误。这个节点是
+            #    entrypoint每架飞机常驻拉起的，容器启动那一刻不可能知道该
+            #    是center_only还是precision_land，就是要等SDK显式设置
+            #    （见文件头"2026-09-13补充"+构造函数里那段warn）。待命是
+            #    预期行为，只在第一次进入时补一条info，之后静默跳过。
+            # ② 非空但不合法 = 真的设错了，保留ERROR。
+            if not servo_mode:
+                if not self._standby_logged:
+                    self._standby_logged = True
+                    self.get_logger().info(
+                        'servo_mode尚未设置，节点保持待命、不发布precision_land_cmd'
+                        '（等SDK的center_on_target()/precision_land_and_confirm()等'
+                        '方法显式设置模式后自动生效，这是预期状态，不是故障）'
+                    )
+                return
             self.get_logger().error(
                 f'servo_mode参数当前值{servo_mode!r}不合法（应为{VALID_SERVO_MODES}之一），'
                 f'本周期跳过、不发布precision_land_cmd',
                 throttle_duration_sec=5.0,
             )
             return
+        # 拿到合法模式了：复位待命标志，这样将来模式被清回空字符串时，
+        # 还会再提示一次"进入待命"，不会因为标志一直是True而静默掉。
+        self._standby_logged = False
 
         # 2026-09-14新增：`coordinate_land`/`coordinate_goto`都不看
         # 视觉，没有"检测超时"这个概念——目标坐标是提前给定的常量，
