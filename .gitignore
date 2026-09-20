@@ -9,3 +9,51 @@ log/
 # 不进版本控制，只保留目录结构（.gitkeep）
 runtime_logs/*
 !runtime_logs/.gitkeep
+
+# volume调试模式的个人配置（2026-08-14新增）——每个人正在调试的模块不一样，
+# 不应该进版本控制影响别人；docker-compose.override.yml.example是模板，
+# 有.example后缀，不受这条规则影响，正常进git。
+docker-compose.override.yml
+
+# GCS侧CycloneDDS配置含站点专属IP（2026-08-14新增），不进git；
+# gcs/cyclonedds_gcs.xml.example是模板，有.example后缀，正常进git。
+gcs/cyclonedds_gcs.xml
+
+# 固定GCS_BACKEND_TOKEN用的.env（2026-08-21新增，见gcs/.env文件头说明），
+# 含鉴权密钥，不进git。
+gcs/.env
+
+# 真机集群远程控制每架飞机的X-Control-Token配置（2026-08-24新增，见
+# gcs/backend/app.py"7. 真机集群远程控制"一节），含各飞机密钥，不进git；
+# gcs/hw_fleet_tokens.json.example是模板，有.example后缀，正常进git。
+gcs/hw_fleet_tokens.json
+
+# GCS真机网络参数持久化快照（2026-08-30新增，见gcs/backend/app.py"1. GCS
+# 自己的网络配置"一节），含站点专属IP，不进git；
+# gcs/gcs_network_state.json.example是模板，有.example后缀，正常进git。
+gcs/gcs_network_state.json
+
+# gcs/backend构建时要用的docker CLI静态二进制+docker-compose插件
+# （2026-08-25新增，见gcs/backend/vendor/fetch.sh）——预下载到本地避免
+# 每次build重新下载，但这两个文件本身是几十MB的第三方二进制，不是
+# 这个项目自己的源码，不进git，跟根目录staging/同样的"本地预取、不进
+# 版本控制"思路；每台开发机第一次用之前跑一次fetch.sh。
+gcs/backend/vendor/*.tgz
+gcs/backend/vendor/docker-compose-linux-x86_64
+
+# vendor/下第三方控制器源码（2026-09-20新增）——调研其它控制器方案时clone
+# 下来的上游代码，当前没有任何Dockerfile引用、也没有一个文件被git跟踪，
+# 合计约88MB，跟staging/同样的"第三方代码、本地保留、不进版本控制"思路。
+# 注意：vendor/px4ctrl_ros2 是例外，**必须留在git里**——它是这个项目自己
+# 移植/维护的ROS2版px4ctrl+quadrotor_msgs+uav_utils，没有公开上游可以重新
+# clone，而且Dockerfile.flight-stack有`COPY vendor/px4ctrl_ros2`，删了就
+# build不出flight-stack镜像（.env里CONTROLLER=pt4ctrl用的就是它）。
+# 所以这里逐个列出要忽略的目录，而不是一句`vendor/`全忽略。
+vendor/agilicious/
+vendor/mav_control_rw/
+vendor/px4-mpc/
+vendor/rpg_mpc/
+vendor/rpg_quadrotor_common/
+vendor/rpg_quadrotor_control/
+vendor/rpg_single_board_io/
+vendor/se3_controller/
