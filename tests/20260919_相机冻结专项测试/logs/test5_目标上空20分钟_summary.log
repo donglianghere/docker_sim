@@ -1,0 +1,28 @@
+[08:55:41] == down/up (dual camera) ==
+[08:55:53] logger started +1s
+[08:56:17] PX4x2 ready +25s; settle 20s
+[08:57:09] 两机就位 +77s: NX01 world(0.0,-2.0,1.5) -> local(-1.54,8.01,1.41) NX02 world(-4.0,-6.0,1.5) -> local(-2.46,3.98,1.45) 
+[08:57:10] == 检测节点测试开始（1200s）：NX01在地面着火点(tag2)上空，NX02在物资点(tag0)上空 ==
+[08:58:11] test+62s   | 
+
+[08:59:37] == 检测节点测试开始（1200s）：NX01在地面着火点(tag2)上空，NX02在物资点(tag0)上空 ==
+[09:00:38] test+61s NX01(cam=33 det=33 dbg_age=0s) NX02(cam=33 det=33 dbg_age=0s)
+[09:01:40] test+123s NX01(cam=33 det=34 dbg_age=0s) NX02(cam=34 det=34 dbg_age=0s)
+[09:02:41] test+184s NX01(cam=34 det=33 dbg_age=0s) NX02(cam=33 det=33 dbg_age=0s)
+[09:03:38] test+241s NX01(cam=35 det=34 dbg_age=1s) NX02(cam=34 det=34 dbg_age=1s)
+[09:04:39] test+302s NX01(cam=34 det=34 dbg_age=1s) NX02(cam=34 det=34 dbg_age=1s)
+[09:05:41] test+364s NX01(cam=34 det=34 dbg_age=1s) NX02(cam=34 det=34 dbg_age=1s)
+[09:06:37] test+420s NX01(cam=42 det=42 dbg_age=0s) NX02(cam=33 det=33 dbg_age=0s)
+[09:07:38] test+481s NX01(cam=33 det=34 dbg_age=0s) NX02(cam=34 det=34 dbg_age=0s)
+[09:08:40] test+543s NX01(cam=33 det=31 dbg_age=1s) NX02(cam=33 det=33 dbg_age=1s)
+[09:09:41] test+604s NX01(cam=33 det=33 dbg_age=0s) NX02(cam=33 det=33 dbg_age=0s)
+[09:10:38] test+661s NX01(cam=33 det=33 dbg_age=1s) NX02(cam=33 det=34 dbg_age=1s)
+[09:11:39] test+722s NX01(cam=33 det=33 dbg_age=1s) NX02(cam=35 det=35 dbg_age=1s)
+[09:12:41] test+784s NX01(cam=33 det=33 dbg_age=1s) NX02(cam=45 det=43 dbg_age=1s)
+[09:13:37] test+840s NX01(cam=33 det=33 dbg_age=1s) NX02(cam=34 det=34 dbg_age=0s)
+[09:14:38] test+901s NX01(cam=36 det=35 dbg_age=0s) NX02(cam=36 det=36 dbg_age=1s)
+[09:15:40] test+963s NX01(cam=35 det=35 dbg_age=1s) NX02(cam=33 det=32 dbg_age=1s)
+[09:16:41] test+1024s NX01(cam=34 det=34 dbg_age=0s) NX02(cam=33 det=33 dbg_age=0s)
+[09:17:38] test+1081s NX01(cam=33 det=33 dbg_age=1s) NX02(cam=34 det=34 dbg_age=1s)
+[09:18:39] test+1142s NX01(cam=34 det=34 dbg_age=0s) NX02(cam=34 det=34 dbg_age=0s)
+[09:19:41] == 20分钟测试结束：相机无断档，检测节点持续输出 ==

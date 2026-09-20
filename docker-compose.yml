@@ -42,18 +42,144 @@ services:
                 # 发现了对方、topic info也显示QoS匹配，但数据一条都收不到"。三个
                 # 容器都要加，只加一边没用（发布/订阅双方的SHM都得能互相看见）。
     environment:
-      - ROS_DOMAIN_ID=20
-      - WORLD_ENV=simple_room      # 按需切换: simple_room/hard_forest/easy_forest/hospital/office/tunnel/...
-                                    # simple_room是20x20x5米室内房间+4根柱子，比森林场景
-                                    # 简单得多，先用它把MAVROS/DLIO/规划全流程跑通，
-                                    # 森林场景的gzserver崩溃(exit -6)暂不深挖
-      - NUM_AGENTS=2
-      - PLANNER=${PLANNER:-mighty}  # 跟flight-stack两边选的PLANNER保持一致，
+      - ROS_DOMAIN_ID=21   # 2026-08-30改：仿真专用域，跟真机(docker-compose.hw.yml，
+                           # 固定20)刻意不同——选手自己写的ROS2代码不显式设置
+                           # ROS_DOMAIN_ID时，默认连不上仿真（也连不上真机，除非
+                           # 就在真机的ROS_DOMAIN_ID=20默认值上），必须主动选择才
+                           # 能连到仿真，防止比赛时命名空间(NX01/NX02两边同名)
+                           # 撞车导致指令发错目标。GCS网页"仿真模式"按钮切换时
+                           # 会让GCS自己的容器也临时切到这个值，见gcs/docker-
+                           # compose.yml的GCS_ROS_DOMAIN_ID。
+      - WORLD_ENV=${WORLD_ENV:-fire_drill_room}
+                                    # 2026-08-21修复：之前这里是硬编码字面量`WORLD_ENV=
+                                    # simple_room`，不是`${WORLD_ENV:-simple_room}`——
+                                    # 跟LOCALIZATION_SOURCE/PLANNER/CONTROLLER等其它同类
+                                    # 开关的写法不一致，导致README.md里文档的用法
+                                    # `WORLD_ENV=hard_forest ./start.sh`实际上完全不生效
+                                    # （宿主机环境变量传不进来，永远用的是simple_room）。
+                                    # 按需切换: simple_room/hard_forest/easy_forest/
+                                    # hospital/office/tunnel/fire_drill_room/...。
+                                    # 2026-09-09改默认值simple_room→fire_drill_room：
+                                    # fire_drill_room是《2026大赛任务系统开发执行方案.md》
+                                    # 阶段1起就在建的正式比赛场景（contest_mission整个包+
+                                    # mission_judge_node+scenario_reset_node都是围绕它写的），
+                                    # 不显式传WORLD_ENV时应该默认就是这个，不是早期占位用的
+                                    # simple_room——之前一次手动`docker compose up -d`（没有
+                                    # 带WORLD_ENV环境变量，宿主机也没有.env文件兜底）就实测
+                                    # 踩到过"容器悄悄回退成simple_room"这个坑：spawn朝向变成
+                                    # 通用公式算出来的30°/-45°（不是fire_drill_room专属分支的
+                                    # 90°），三个立柱/物资点/火情标识等contest_mission相关模型
+                                    # 全部不存在，看似启动正常（没有任何ERROR）但整个任务场景
+                                    # 是错的，很隐蔽。simple_room仍然保留（4根柱子的早期占位
+                                    # 场景，其它森林/建筑类world_env默认值不变），只是不再是
+                                    # 缺省选项——需要跑simple_room测试时显式传
+                                    # `WORLD_ENV=simple_room`。
+      - NUM_AGENTS=${NUM_AGENTS:-2}  # 2026-08-13改成可覆盖（原来硬编码字面量2）
+                                  # ——单机仿真彩排（LOCALIZATION_SOURCE=
+                                  # single_slam_only/single_uwb_imu/
+                                  # single_uwb_slam三个新值，见flight-stack-
+                                  # entrypoint.sh）需要传NUM_AGENTS=1，
+                                  # 三个服务（sim-world+两个flight-stack）
+                                  # 都要保持一致，只起`docker compose up
+                                  # sim-world flight-stack-nx01`两个服务
+                                  # （不起flight-stack-nx02），见README
+                                  # 单机启动一节。不传时默认2，行为不变。
+      # 2026-09-18：NX02重新挂真实相机——单相机+可动关节两档预设视角方案
+      # （见gen_iris_mid360_sdf.py::merge_switchable_camera()说明），这个
+      # 方案下全局任意时刻只有1个真实image传感器在渲染（每架飞机各1个，
+      # 不是2个），彻底避开Gazebo Classic多相机共享渲染队列这个联网核实
+      # 过的架构限制，不需要再靠"NX02不挂相机"这种回避手段（之前"NX02
+      # 完全不带相机"/"NX02换成logical_camera"两版过渡方案的完整踩坑
+      # 过程见DEBUG_JOURNAL.md 2026-09-17/09-18记录）。
+      #
+      # 2026-09-20改回前视+下视双相机（下面4个变量）。理由见DEBUG_JOURNAL.md
+      # 2026-09-19/09-20两条记录：当初改成switchable单相机的前提是"多相机
+      # 渲染争抢导致相机冻结"，但09-19专项测试证明那个"冻结"其实是
+      # qr_apriltag_detect_node接收端的问题、相机发布端一直正常；09-20又用
+      # 双相机做了30分钟悬停+20分钟真实目标上空两轮长测，四路相机全程
+      # 10Hz（仿真时间）零断档、画面正确、检测识别率99%以上，那个前提不成立。
+      # 改的是compose的environment，`docker compose up -d`重建容器即可生效，
+      # 不需要重新build镜像——entrypoint里的镜像级默认值仍是switchable，
+      # 没有动（要回到单相机方案，把下面4行注释掉即可）。
+      - CAMERA_TYPE_NX01=${CAMERA_TYPE_NX01:-camera}   # camera=前视/下视两个
+      - CAMERA_TYPE_NX02=${CAMERA_TYPE_NX02:-camera}   # 独立传感器各自渲染
+      - CAMERAS_NX01=${CAMERAS_NX01:-front,down}
+      - CAMERAS_NX02=${CAMERAS_NX02:-front,down}
+      - CAMERA_INITIAL_VIEW_NX02=${CAMERA_INITIAL_VIEW_NX02:-front}  # 用户
+                                  # 明确要求：NX01初始化为下视（sim-world-
+                                  # entrypoint.sh里按NS硬编码的默认值已经是
+                                  # down，这里不用重复设），NX02初始化为
+                                  # 前视——这个环境变量是留给需要覆盖默认值
+                                  # 时用的，不传也能拿到正确的front默认值，
+                                  # 显式写出来纯粹是为了这份配置一目了然。
+      - PUBLISH_FRAME_ALIGN=${PUBLISH_FRAME_ALIGN:-true}  # 2026-08-12：原来
+                                  # 从LOCALIZATION_SOURCE=uwb_slam自动推导
+                                  # （那会儿sim-world这边为此专门加了
+                                  # LOCALIZATION_SOURCE环境变量），现在
+                                  # LOCALIZATION_SOURCE的"dlio"/"uwb_slam"
+                                  # 两个值合并了（两者在flight-stack那边本来
+                                  # 就是完全一样的行为，见DEBUG_JOURNAL.md
+                                  # "评估LOCALIZATION_SOURCE功能重复"那条），
+                                  # "要不要用仿真真值做frame_align"这个正交
+                                  # 维度改成这个独立变量单独控制——sim-world
+                                  # 不再需要读LOCALIZATION_SOURCE本身。设false
+                                  # 时只有frame_align_bridge_node的真实标定
+                                  # 结果参与跨机对齐，专门用于验证"不靠仿真
+                                  # 真值也能对齐"。
+      # ---- 2026-09-03 SE(2)标定论文补充实验用的一批开关（见
+      # `docker_sim/实验方案_SE2在线标定论文补充实验.md` L2层改动(a)(b)，
+      # 以及`src/uwb_sim/uwb_sim/uwb_ground_truth_node.py`文件头说明）。
+      # 默认值全部等于"改动之前的行为"，平时不用管；只有跑论文实验时才在
+      # 命令行/.env里显式赋值，例如：
+      #   UWB_OUTLIER_PROB=0.1 UWB_OUTLIER_MAG_M=2.0 docker compose up -d
+      #   SPAWN_YAW_DEG_NX01=90 SPAWN_YAW_DEG_NX02=180 docker compose up -d
+      - UWB_NOISE_STD=${UWB_NOISE_STD:-0.05}        # 绝对观测噪声σ[m]
+      - UWB_BIAS_X=${UWB_BIAS_X:-0.0}               # 恒定偏置[m]，验证2.4节
+      - UWB_BIAS_Y=${UWB_BIAS_Y:-0.0}
+      - UWB_BIAS_DRIFT_X=${UWB_BIAS_DRIFT_X:-0.0}   # 偏置漂移率[m/s]，6.2节
+      - UWB_BIAS_DRIFT_Y=${UWB_BIAS_DRIFT_Y:-0.0}
+      - UWB_OUTLIER_PROB=${UWB_OUTLIER_PROB:-0.0}   # 野值概率，验证2.7节
+      - UWB_OUTLIER_MAG_M=${UWB_OUTLIER_MAG_M:-0.0} # 野值幅度[m]
+      - UWB_ABS_RATE_HZ=${UWB_ABS_RATE_HZ:-0.0}     # 观测发布率上限，0=不限速
+      - UWB_ABS_LATENCY_MS=${UWB_ABS_LATENCY_MS:-0.0}  # 观测时延，0=不延迟
+      - UWB_PUBLISH_TRUTH=${UWB_PUBLISH_TRUTH:-true}   # 真值旁路(评估专用)
+      - SPAWN_YAW_DEG_NX01=${SPAWN_YAW_DEG_NX01:-30}   # 两机spawn朝向[度]，
+      - SPAWN_YAW_DEG_NX02=${SPAWN_YAW_DEG_NX02:--45}  # E12真值全域扫描用
+      - PLANNER=${PLANNER:-ego_planner}  # 跟flight-stack两边选的PLANNER保持一致，
                                   # 纯粹用来给sim-world-entrypoint.sh选对应的
                                   # rviz配置（multi_mighty.rviz/
                                   # multi_ego_planner.rviz），sim-world本身
                                   # 不跑规划器、不受这个值影响别的行为。
-      - USE_GAZEBO_GUI=true
+                                  # 2026-08-10默认改成ego_planner（原默认mighty，
+                                  # 显式传PLANNER=mighty可恢复旧默认）。
+      - USE_GAZEBO_GUI=${USE_GAZEBO_GUI:-false}  # 2026-08-21改回参数化默认值——
+                                  # 之前写死`true`是TODO.md#11那次排查GUI崩溃
+                                  # (OGRE渲染资源路径没source导致的空指针assert)
+                                  # 验证用的，问题（sim-world-entrypoint.sh缺
+                                  # `source /usr/share/gazebo/setup.sh`）已经在
+                                  # 那次会话里修好、验证过GUI能正常弹出窗口，
+                                  # 写死`true`是验证完忘了改回来的残留，不是
+                                  # 故意要求"必须默认开GUI"——entrypoint脚本
+                                  # 自己的默认值本来就是false(容器里没有桌面
+                                  # 转发X11时不该强行开)，这次恢复用
+                                  # `${VAR:-default}`这个跟文件里其它开关一致
+                                  # 的写法，需要看GUI画面时显式传
+                                  # `USE_GAZEBO_GUI=true`即可，网页上也新增了
+                                  # 按需启动gzclient的按钮（不用整个重启容器），
+                                  # 见gcs/backend/app.py的launch_gazebo_gui()。
+      - USE_RVIZ=${USE_RVIZ:-false}  # 同上改成默认关——sim-world-entrypoint.sh
+                                  # 自己的默认值是true，这里在compose层面覆盖成
+                                  # false，跟gzclient一样改成网页按需启动
+                                  # （见gcs/backend/app.py的launch_rviz()，
+                                  # 走的是gcs-gcs-1容器现成的rviz2+/opt/rviz/
+                                  # 配置，不需要重启sim-world）。
+      - LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-0}  # 2026-09-03：跑论文
+                                  # 实验时连续重建容器十几次之后，gzserver开始
+                                  # 稳定地在X_GLXCreateContext上报BadValue、
+                                  # gazebo_ros_factory没起来、spawn_entity等30秒
+                                  # 超时退出（整个sim-world容器随之exit 1）。
+                                  # 设成1强制走软件渲染、绕开GPU的GLX路径。
+                                  # 默认0=保持原有行为（走GPU），不影响平时使用。
       - DISPLAY=${DISPLAY}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all   # 默认只给utility,compute，OpenGL渲染需要的
@@ -109,41 +235,140 @@ services:
     network_mode: host
     ipc: host   # 跟sim-world下面那条注释同理——Fast-DDS SHM传输要求容器间共享
                 # /dev/shm，不然discovery能跨容器工作、但实际数据传输会静默丢包。
+    cap_add:
+      - SYS_PTRACE   # 2026-09-16临时加：排查qr_apriltag_detect_node的down相机
+                     # 检测回调收不到数据这个问题，需要用py-spy attach到活着的
+                     # 进程上直接看Python调用栈卡在哪一行——Docker默认seccomp
+                     # 禁ptrace系统调用，哪怕容器内是root也attach不了，加这个
+                     # capability只放开ptrace这一项，纯调试用途，不影响正常
+                     # 功能。排查完如果不再需要py-spy，可以考虑撤掉。
     depends_on:
       - sim-world
     environment:
-      - ROS_DOMAIN_ID=20
+      - ROS_DOMAIN_ID=21   # 必须跟sim-world保持一致，见上面sim-world那条的完整注释
       - NAMESPACE=NX01
       - AGENT_INDEX=1
-      - NUM_AGENTS=2
-      - LOCALIZATION_SOURCE=dlio  # dlio=真实DLIO SLAM(默认，三个模块一起测)；
-                                  # gt=跳过SLAM、直接用Gazebo真值(只测规划+控制)
-      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # trajectory=位置/速度/加速度轨迹，
-                                  # PX4自己的位置环闭环，唯一实测飞过、确认安全的模式。
-                                  # 2026-08-06一度改成默认attitude（微分平坦姿态直控），
-                                  # 实测第一次真给目标点就炸机——现场日志抓到
-                                  # get_angular()里body_rate的yaw分量钉在
-                                  # -3.49rad/s（约-200°/s，远超w_max=0.8/omega_max=0.1
-                                  # 这些配置好的限制），且同一个函数里`m/u1`没有加零值
-                                  # 保护，是跟mighty的C++侧get_drone_frame()同一类曾经
-                                  # 修过3次的数值不稳定bug，只是ros2_px4_stack这边的
-                                  # Python实现从没被审查过——已改回trajectory，attitude
-                                  # 模式在这个bug修好、重新验证之前不要再当默认用，
-                                  # 见README"CONTROL_LAW=attitude模式排查"一节。仅在
-                                  # CONTROLLER=ros2_px4_stack时生效。
-      - CONTROLLER=${CONTROLLER:-ros2_px4_stack}  # ros2_px4_stack=现状不变，唯一
-                                  # 经过仿真验证的板外控制器。px4ctrl=2026-08-07刚
-                                  # 完成的ROS2(Humble)移植版，只做过编译+启动冒烟
-                                  # 测试，还没接真实MAVROS/PX4跑完整流程，先当实验性
-                                  # 选项，见README"px4ctrl ROS2(Humble)移植完成"一节。
-                                  # 两架飞机必须给一样的值。
-      - PLANNER=${PLANNER:-mighty}  # mighty=现状不变。ego_planner=集成
-                                  # ego-planner-swarm的规划器核心，只设计成配合
-                                  # CONTROLLER=px4ctrl（没有对接ros2_px4_stack的
-                                  # 桥接逻辑），还没实测飞过，见README"ego-planner-swarm
-                                  # 集成方案"一节。两架飞机必须给一样的值，不然
-                                  # 一台mighty一台ego_planner会导致/broadcast_bspline
+      # 2026-09-20：跟sim-world那边CAMERA_TYPE_NX01=camera配套——检测节点
+      # 要按"front,down"两路各起一个订阅+各一个MJPEG端口，见
+      # flight-stack-entrypoint.sh的CAMERAS说明。两处必须一致，改一处必须
+      # 同步改另一处，否则检测节点会订阅一个不存在的话题名。
+      - CAMERAS=${CAMERAS:-front,down}
+      - NUM_AGENTS=${NUM_AGENTS:-2}  # 2026-08-13改成可覆盖，单机模式传1，
+                                  # 必须跟sim-world/flight-stack-nx02三处
+                                  # 保持一致，见sim-world那边的完整注释
+      # ---- 2026-09-03 SE(2)标定论文补充实验用（见
+      # `docker_sim/实验方案_SE2在线标定论文补充实验.md` L2层改动(c)）。
+      # 默认值等于改动之前的行为，平时不用管。
+      - ROTATION_ROBUST=${ROTATION_ROBUST:-false}   # θ*的Huber抗差开关(2.7节)
+      - ROTATION_SEG_MIN_DISP_M=${ROTATION_SEG_MIN_DISP_M:-0.5}  # 论文表1的d_min
+      - ROTATION_WINDOW_SIZE=${ROTATION_WINDOW_SIZE:-50}         # 论文表1的W
+      - GOAL_RETRANSFORM=${GOAL_RETRANSFORM:-true}  # 论文3.2节的目标点持续
+                                  # 重变换修复；设false=退回修复前行为，
+                                  # 是E13"修复前/后"对照实验的开关
+      - LOCALIZATION_SOURCE=${LOCALIZATION_SOURCE:-uwb_slam}  # 2026-09-07
+                                  # 默认从gt改成uwb_slam——配合下面SLAM_BACKEND
+                                  # 默认fast_lio，日常仿真默认就跑真实SLAM
+                                  # 链路（不再默认跳过SLAM测规划+控制），
+                                  # 显式传LOCALIZATION_SOURCE=gt可恢复旧默认。
+                                  # uwb_slam=真实DLIO
+                                  # SLAM(三个模块一起测)，配合origin_setter_
+                                  # node无条件常驻的在线SE(2)旋转估计(θ*)
+                                  # 对齐局部/全局坐标系；gt=跳过SLAM、直接用
+                                  # Gazebo真值(只测规划+控制)；uwb_imu=情景一
+                                  # (SLAM完全失效，UWB+IMU替代)，见docker_sim/
+                                  # 多机空间坐标对齐问题_设计讨论纪要.docx第
+                                  # 8.1/8.2节。三选一，PLANNER=mighty/
+                                  # ego_planner都支持，见README。
+                                  # 2026-08-12："dlio"和"uwb_slam"原来是两个
+                                  # 独立的值，在flight-stack这边行为完全一样
+                                  # （拆开纯粹是历史包袱），合并成"uwb_slam"
+                                  # 一个值，"dlio"不再是合法取值——如果你的
+                                  # 脚本/笔记里还留着`LOCALIZATION_SOURCE=dlio`
+                                  # 这种写法，改成`uwb_slam`，见DEBUG_JOURNAL.md
+                                  # "评估LOCALIZATION_SOURCE功能重复"那条。
+                                  # 之前这里写死成字面量"dlio"，没有用
+                                  # ${VAR:-default}这个compose插值写法，导致
+                                  # `LOCALIZATION_SOURCE=gt ./start.sh`这样
+                                  # 传参完全不生效——跟CONTROLLER/PLANNER两行
+                                  # 的写法不一致，是个真实存在过的配置bug，
+                                  # 已经在2026-08-10修过。2026-08-10默认改成
+                                  # gt（原默认dlio，现在的等价写法是显式传
+                                  # LOCALIZATION_SOURCE=uwb_slam恢复旧默认；
+                                  # gt模式排除了DLIO SLAM本身收敛/漂移的影响，
+                                  # 规划+控制链路问题更容易定位，但也意味着
+                                  # 默认组合下不再覆盖DLIO这一段，真机部署前
+                                  # 需要单独切回uwb_slam验证）。
+                                  # 2026-08-13新增三个单机彩排值：
+                                  # single_slam_only/single_uwb_imu/
+                                  # single_uwb_slam，行为分别跟uwb_slam(不起
+                                  # uwb_origin_bridge)/uwb_imu/uwb_slam完全
+                                  # 一致，只是强制要求上面NUM_AGENTS=1（不等
+                                  # 于1直接报错退出），配合只起`docker compose
+                                  # up sim-world flight-stack-nx01`两个服务
+                                  # 使用，详见flight-stack-entrypoint.sh文件头
+                                  # 和README"单机仿真彩排"一节。
+      - SLAM_BACKEND=${SLAM_BACKEND:-fast_lio}  # 只在LOCALIZATION_SOURCE=uwb_slam/
+                                  # single_uwb_slam/single_slam_only（即"真的
+                                  # 起SLAM"这几个值）下生效，dlio=原默认，
+                                  # point_lio=2026-08-14新增的可选SLAM后端
+                                  # （point_lio_ros2，已补全Livox CustomMsg
+                                  # 支持+命名空间/接口映射到dlio/odom_node/odom
+                                  # 等跟DLIO完全一致的话题名，mighty/
+                                  # ego_planner_bridge/gt_odom_bridge/
+                                  # ros2_px4_stack不用感知切的是哪个后端），
+                                  # fast_lio=2026-09-07新增的第三个可选后端
+                                  # （hku-mars/FAST_LIO官方ROS2分支，同一套
+                                  # 接口映射约定，仅sim——DEPLOY_TARGET=hw下
+                                  # 这个值会fail fast，真机接入是后续独立
+                                  # 任务），point_lio/fast_lio均尚未实机/仿真
+                                  # 长时间验证过，见README已知待办
+      - POINT_LIO_CPU_CORES=${POINT_LIO_CPU_CORES:-4}  # 只在SLAM_BACKEND=
+                                  # point_lio时生效，taskset把pointlio_mapping
+                                  # 钉死在固定CPU核范围内（按AGENT_INDEX错开，
+                                  # 两机不抢同一批核），同时封顶OMP_NUM_THREADS
+                                  # ——2026-08-14实测不限制的话单进程能冲到
+                                  # 11+核，双机场景host load average冲到52
+                                  # （32核机器），点云/里程计速率被拖到个位数
+                                  # Hz，见flight-stack-entrypoint.sh文件头和
+                                  # DEBUG_JOURNAL.md相关记录。这个值*双机数量
+                                  # 不能超过宿主机实际核数
+      - CONTROLLER=${CONTROLLER:-px4ctrl}  # ros2_px4_stack=原默认，唯一经过仿真
+                                  # 验证的板外控制器（完整起飞-跟踪-降落流程实测过），
+                                  # 架构上只支持起飞一次，降落后无法用launch控制台
+                                  # 再次起飞。px4ctrl=2026-08-07完成的ROS2(Humble)
+                                  # 移植版，2026-08-13确认：LOCALIZATION_SOURCE=
+                                  # uwb_slam下已实测完整起飞-跟踪-降落验证通过，
+                                  # 不再是"仅冒烟测试"级别，且支持反复起降；
+                                  # LOCALIZATION_SOURCE=uwb_imu时仍然禁止使用
+                                  # （2026-08-12实测炸机）。so3ctrl=复用px4ctrl的
+                                  # 飞行状态机(逐字未改)+kr_mav_control的SO3几何
+                                  # 位置环控制律，2026-08-13同样确认uwb_slam下
+                                  # 实测验证通过，见vendor/px4ctrl_ros2/so3ctrl/
+                                  # NOTICE.md。pt4ctrl（2026-08-13新增）=复用
+                                  # px4ctrl的飞行状态机、砍掉控制律、改发轨迹
+                                  # setpoint给PX4自己的位置控制环（仿ros2_px4_stack
+                                  # 的转发方式），目的是同时具备"能反复起降"+
+                                  # "对uwb_imu这类低更新率场景不敏感"，但这是全新
+                                  # 代码、完全没有飞行验证，见DEBUG_JOURNAL.md。
+                                  # 四者两架飞机必须给一样的值。2026-08-10默认改成
+                                  # px4ctrl（原默认ros2_px4_stack，显式传
+                                  # CONTROLLER=ros2_px4_stack可恢复旧默认）。
+      - PLANNER=${PLANNER:-ego_planner}  # mighty=原默认。ego_planner=集成
+                                  # ego-planner-swarm的规划器核心，三种CONTROLLER都
+                                  # 支持（ros2_px4_stack靠poscmd_to_goal_node桥接），
+                                  # 还没实测飞过，见README"ego-planner-swarm集成
+                                  # 方案"一节。两架飞机必须给一样的值，不然一台
+                                  # mighty一台ego_planner会导致/broadcast_bspline
                                   # 那套机间防撞互相看不到对方轨迹。
+      # 2026-09-07新增：yaw锁定开关，px4ctrl/so3ctrl/pt4ctrl三个控制器
+      # 共用（同一套PX4CtrlFSM状态机），静态参数（启动时定死，不支持飞行
+      # 中动态切换）。开启后CMD_CTRL态忽略规划器(ego_planner的
+      # calculate_yaw())算出来的行进方向朝向，改成锁定在起飞瞬间的实际
+      # 朝向——四旋翼平动加速度只由roll/pitch倾角决定、跟yaw无关，锁定
+      # 朝向不影响位置/轨迹跟踪，只是前视相机不再跟随飞行方向，具体见
+      # docker_sim/DEBUG_JOURNAL.md 2026-09-07相关记录。默认false(行为
+      # 不变)，两架飞机必须给一样的值。
+      - PX4CTRL_YAW_LOCK_ENABLED=${PX4CTRL_YAW_LOCK_ENABLED:-false}
       # ------ 规划/避障/控制重要参数（flight-stack-entrypoint.sh 现算一份
       # vehicle_profile覆盖yaml传给mighty，改这里数字不用重新build镜像，改完
       # 重新up容器就生效）。默认值等于当前hw_mighty.yaml里实际生效的数字，不设
@@ -163,6 +388,100 @@ services:
       - PLANNER_CW=${PLANNER_CW:-3.0}                     # [-] 动态避障安全间距阈值
       - DYN_CONSTR_THRUST_WEIGHT=${DYN_CONSTR_THRUST_WEIGHT:-1e+3}  # [-] 推力约束
                                   # 违反的惩罚权重，0=关闭推力限制
+      # ------ 以下几个只在PLANNER=ego_planner时生效（ego_planner_docker_
+      # sim.launch.py读），mighty不用这几个环境变量。2026-08-08用户实测
+      # 反馈之后加的，同样是"改这里数字不用重新build镜像"的约定。 ------
+      - EGO_PLANNING_HORIZON=${EGO_PLANNING_HORIZON:-15.0}   # [m] 单次规划前瞻距离，
+                                  # 原来7.5米太近，遇到障碍物反应距离不够
+      - EGO_OBSTACLES_INFLATION=${EGO_OBSTACLES_INFLATION:-0.6}  # [m] 障碍物膨胀半径，
+                                  # 原来0.35（飞机半宽0.235+0.115余量）只够理论值，
+                                  # 没给跟踪误差留余量，实测"轨迹绕障、机身贴着
+                                  # 撞上"；0.6留了接近双倍余量
+      - EGO_REPLAN_THRESH=${EGO_REPLAN_THRESH:-0.1}          # [s] 重规划最小间隔，
+                                  # 原来1.0秒把重规划频率锁在1Hz，跟mighty
+                                  # 的timer_replanning_每10ms检查一次差太多；
+                                  # 0.1是折中值，CPU余量够可以继续往下调
+      - EGO_LAMBDA_COLLISION=${EGO_LAMBDA_COLLISION:-1.0}    # [-] 避障代价权重，
+                                  # 原来0.5相对lambda_smooth(=1.0)偏低
+      - EGO_LAMBDA_FEASIBILITY=${EGO_LAMBDA_FEASIBILITY:-0.3}  # [-] 动力学可行性
+                                  # 代价权重，原来0.1偏低
+      - EGO_YAW_DOT_MAX=${EGO_YAW_DOT_MAX:-0.8}              # [rad/s] 最大偏航角速度
+                                  # (约45.8°/s)。上一轮误用了mighty的omega_max
+                                  # (=0.10472rad/s/6°/s，那其实是轨迹优化器内部
+                                  # 的机体角速度约束，不是yaw朝向变化速率)，真正
+                                  # 对应的是mighty.cpp里限制next_goal.dyaw用的
+                                  # w_max参数，patches/mighty_avoidance_tuning.
+                                  # patch里调到了0.8——这个数字也跟PX4固件本身
+                                  # MPC_YAWRAUTO_MAX=45°/s的硬顶吻合(见patches/
+                                  # px4_iris_mpc_yawrate_max.patch的历史注释)
+      - EGO_LOCAL_UPDATE_RANGE_XY=${EGO_LOCAL_UPDATE_RANGE_XY:-15.0}  # [m] 局部
+                                  # 占据地图X/Y半径。原来5.5米是upstream demo给
+                                  # 短量程深度相机留的默认值，跟上一轮改的
+                                  # planning_horizon=15米不匹配——B样条优化只信
+                                  # 这个范围内的占据数据，超出就是盲飞，实测反馈
+                                  # "目标7-8米远只规划出一米多""终点差三四米"
+                                  # 跟这个不匹配直接对得上。**代价**：局部地图
+                                  # 缓冲区体积明显变大，这套仿真实时因子本来就
+                                  # 只有0.44(算力紧张)，可能进一步拖慢，需要
+                                  # 实测CPU/RTF有没有明显恶化
+      - EGO_MAX_RAY_LENGTH=${EGO_MAX_RAY_LENGTH:-15.0}  # [m] 单帧点云raycasting
+                                  # 有效标记距离，原来4.5米同样是深度相机遗留
+                                  # 默认值，远小于mid-360实际探测距离，理由同上
+      - EGO_DIST0=${EGO_DIST0:-1.0}  # [m] 障碍物安全距离阈值。calcDistanceCost
+                                  # Rebound的代价是"够远就归零"的硬截断（不是
+                                  # 越远越好的连续势场），原来0.5米配合0.6米的
+                                  # obstacles_inflation実測仍然"贴着膨胀边缘飞"，
+                                  # 2026-08-09用户反馈"经常擦着障碍物柱子边飞过"
+                                  # 后调到1.0——注意调大之后轨迹依然会贴着这个
+                                  # 新阈值走，这是代价函数结构决定的，不会消失，
+                                  # 只是贴的位置离障碍物更远了
+      - EGO_SWARM_CLEARANCE=${EGO_SWARM_CLEARANCE:-1.0}  # [m] 同伴间隔安全距离
+                                  # 阈值。calcSwarmCost用各向异性椭球
+                                  # （bspline_optimizer.cpp硬编码a=2.0/b=1.0，
+                                  # Z方向半轴是XY方向2倍），零代价所需的纯Z向
+                                  # 间隔=4*本参数、纯XY向间隔=2*本参数——原来
+                                  # 0.5米时纯Z方向2.0米就判定"安全"，2026-08-09
+                                  # 用户反馈"两机相遇，一机从另一机头顶飞过"后
+                                  # 调到1.0（纯Z向阈值升到4.0米）。这个2:1的
+                                  # 各向异性比例是C++硬编码常量，没暴露成参数，
+                                  # 如果调大这个之后"头顶飞过"还是频繁，说明
+                                  # 问题在这个比例本身，需要另外写patch
+      - EGO_NO_REPLAN_THRESH=${EGO_NO_REPLAN_THRESH:-1.0}  # [m] 离目标点还剩
+                                  # 多远时"停止重规划、把当前这条轨迹飞完"
+                                  # （ego_replan_fsm.cpp的EXEC_TRAJ状态处理，
+                                  # 对应fsm/thresh_no_replan_meter参数）。原来
+                                  # 1.0米时用户反馈"抵达目标一米多位置时飞机
+                                  # 明显停一下，而后再飞向终点"（接近过程中
+                                  # 一直在重规划，每条轨迹"减速到静止"的收尾段
+                                  # 没机会真正飞完就被换掉；一进这个半径重规划
+                                  # 停止，飞机被迫飞完当时唯一那条轨迹，"停顿"
+                                  # 正是这段收尾第一次真正执行的表现）。
+                                  # ⚠️ 2026-08-13曾经调小到0.2试图缓解这个停顿，
+                                  # 但排查另一次"the drone is in obstacle"炸机
+                                  # 时发现`planner_manager.cpp::reboundReplan()`
+                                  # 自己写死了一个`(start_pt-local_target_pt).
+                                  # norm() < 0.2`的"离目标太近直接放弃"分支，
+                                  # 失败重试路径里有一处对趋近零向量的叉积做
+                                  # `.normalized()`，数值上不稳定（Eigen对零
+                                  # 向量单位化会产出NaN），很可能是这次复发的
+                                  # 根因（未100%实锤，见DEBUG_JOURNAL.md）。
+                                  # 已改回1.0，避开这个ego-planner-swarm上游
+                                  # 代码本身就有数值稳定性问题的距离区间——
+                                  # "停一下再飞向终点"这个视觉观感问题会重新
+                                  # 出现，但比炸机安全，两害相权取其轻。
+      - EGO_USE_FRAME_ALIGNMENT=${EGO_USE_FRAME_ALIGNMENT:-true}  # [-] calcSwarmCost/
+                                  # checkCollision原来直接比较两机各自DLIO局部odom
+                                  # 坐标，没考虑两机spawn点本身有偏移——照mighty的
+                                  # /frame_align模式补的坐标对齐，开启后
+                                  # BroadcastBsplineCallback/swarmTrajsCallback会先
+                                  # 用/frame_align/<own_ns>/<other_ns>（UWB真值，
+                                  # uwb_ground_truth_node.py发布）把对方广播的控制点
+                                  # 变换到本机局部系再用，具体分析见README"ego_planner
+                                  # 的机间避障直接比较两架飞机各自局部里程计坐标"
+                                  # 那次记录。默认开，跟这套仿真实际用的hw_mighty.yaml
+                                  # 一致；在没有UWB真值/两机odom本来就共享同一个全局系
+                                  # 的场景下应设为false，否则收到对方轨迹时会因为一直
+                                  # 等不到frame_align而被丢弃、退化成完全不避让
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:
@@ -176,21 +495,47 @@ services:
     image: flight-stack:latest   # 复用同一份镜像，不用单独build
     network_mode: host
     ipc: host   # 同上，Fast-DDS SHM传输要求容器间共享/dev/shm。
+    cap_add:
+      - SYS_PTRACE   # 2026-09-16临时加，跟flight-stack-nx01那条同一个原因
+                     # （py-spy调试用），两机保持一致写法。
     depends_on:
       - sim-world
       - flight-stack-nx01
     environment:
-      - ROS_DOMAIN_ID=20
+      - ROS_DOMAIN_ID=21   # 必须跟sim-world保持一致，见上面sim-world那条的完整注释
       - NAMESPACE=NX02
       - AGENT_INDEX=2
-      - NUM_AGENTS=2
-      - LOCALIZATION_SOURCE=dlio  # 两架飞机要保持一致，别一个dlio一个gt
-      - CONTROL_LAW=${CONTROL_LAW:-trajectory}  # 同上，两架飞机必须保持一致，
+      # 2026-09-20：跟NX01同一套配置（前视+下视双相机），不按机区分，
+      # 见上面sim-world服务块的完整说明。
+      - CAMERAS=${CAMERAS:-front,down}
+      - NUM_AGENTS=${NUM_AGENTS:-2}  # 2026-08-13改成可覆盖，同上，见
+                                  # sim-world那边的完整注释；单机彩排模式下
+                                  # 这个服务根本不会被启动（只起sim-world+
+                                  # flight-stack-nx01），这里改成可覆盖纯粹是
+                                  # 保持三处写法一致，不留字面量硬编码
+      # ---- 2026-09-03 SE(2)标定论文补充实验用（见
+      # `docker_sim/实验方案_SE2在线标定论文补充实验.md` L2层改动(c)）。
+      # 默认值等于改动之前的行为，平时不用管。
+      - ROTATION_ROBUST=${ROTATION_ROBUST:-false}   # θ*的Huber抗差开关(2.7节)
+      - ROTATION_SEG_MIN_DISP_M=${ROTATION_SEG_MIN_DISP_M:-0.5}  # 论文表1的d_min
+      - ROTATION_WINDOW_SIZE=${ROTATION_WINDOW_SIZE:-50}         # 论文表1的W
+      - GOAL_RETRANSFORM=${GOAL_RETRANSFORM:-true}  # 论文3.2节的目标点持续
+                                  # 重变换修复；设false=退回修复前行为，
+                                  # 是E13"修复前/后"对照实验的开关
+      - LOCALIZATION_SOURCE=${LOCALIZATION_SOURCE:-uwb_slam}  # 两架飞机要
+                                  # 保持一致；默认值2026-09-07从gt改成
+                                  # uwb_slam，之前写死字面量"dlio"是个真实
+                                  # bug，均见flight-stack-nx01那边的完整注释
+      - SLAM_BACKEND=${SLAM_BACKEND:-fast_lio}  # 两架飞机必须保持一致，见
+                                  # flight-stack-nx01那边的完整注释
+      - POINT_LIO_CPU_CORES=${POINT_LIO_CPU_CORES:-4}  # 同上，见
+                                  # flight-stack-nx01那边的完整注释
+      - CONTROLLER=${CONTROLLER:-px4ctrl}  # 同上，两架飞机必须保持一致，
                                   # 见flight-stack-nx01那边的完整注释
-      - CONTROLLER=${CONTROLLER:-ros2_px4_stack}  # 同上，两架飞机必须保持一致，
-                                  # 见flight-stack-nx01那边的完整注释
-      - PLANNER=${PLANNER:-mighty}  # 同上，两架飞机必须保持一致，见flight-stack-nx01
+      - PLANNER=${PLANNER:-ego_planner}  # 同上，两架飞机必须保持一致，见flight-stack-nx01
                                   # 那边的完整注释
+      - PX4CTRL_YAW_LOCK_ENABLED=${PX4CTRL_YAW_LOCK_ENABLED:-false}  # 同上，两架飞机
+                                  # 必须保持一致，见flight-stack-nx01那边的完整注释
       # 规划/避障/控制参数——必须跟flight-stack-nx01那边给一样的值，见那边的完整注释
       - V_MAX=${V_MAX:-1.0}
       - A_MAX=${A_MAX:-3.0}
@@ -202,6 +547,21 @@ services:
       - DYNAMIC_WEIGHT=${DYNAMIC_WEIGHT:-1e+2}
       - PLANNER_CW=${PLANNER_CW:-3.0}
       - DYN_CONSTR_THRUST_WEIGHT=${DYN_CONSTR_THRUST_WEIGHT:-1e+3}
+      # ego_planner专用，必须跟flight-stack-nx01那边给一样的值
+      - EGO_PLANNING_HORIZON=${EGO_PLANNING_HORIZON:-15.0}
+      - EGO_OBSTACLES_INFLATION=${EGO_OBSTACLES_INFLATION:-0.6}
+      - EGO_REPLAN_THRESH=${EGO_REPLAN_THRESH:-0.1}
+      - EGO_LAMBDA_COLLISION=${EGO_LAMBDA_COLLISION:-1.0}
+      - EGO_LAMBDA_FEASIBILITY=${EGO_LAMBDA_FEASIBILITY:-0.3}
+      - EGO_YAW_DOT_MAX=${EGO_YAW_DOT_MAX:-0.8}
+      - EGO_LOCAL_UPDATE_RANGE_XY=${EGO_LOCAL_UPDATE_RANGE_XY:-15.0}
+      - EGO_MAX_RAY_LENGTH=${EGO_MAX_RAY_LENGTH:-15.0}
+      - EGO_DIST0=${EGO_DIST0:-1.0}
+      - EGO_SWARM_CLEARANCE=${EGO_SWARM_CLEARANCE:-1.0}
+      - EGO_NO_REPLAN_THRESH=${EGO_NO_REPLAN_THRESH:-1.0}  # 同上，两架飞机必须保持一致，
+                                  # 见flight-stack-nx01那边的完整注释
+      - EGO_USE_FRAME_ALIGNMENT=${EGO_USE_FRAME_ALIGNMENT:-true}  # 同上，两架飞机必须
+                                  # 保持一致，见flight-stack-nx01那边的完整注释
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
     logging:

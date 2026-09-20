@@ -1,0 +1,14 @@
+# 临时测试用：恢复每机前视+下视两个独立相机（camera模式），不改仓库
+services:
+  sim-world:
+    environment:
+      - CAMERA_TYPE_NX01=camera
+      - CAMERA_TYPE_NX02=camera
+      - CAMERAS_NX01=front,down
+      - CAMERAS_NX02=front,down
+  flight-stack-nx01:
+    environment:
+      - CAMERAS=front,down
+  flight-stack-nx02:
+    environment:
+      - CAMERAS=front,down

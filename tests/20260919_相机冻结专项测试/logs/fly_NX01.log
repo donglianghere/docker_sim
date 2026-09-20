@@ -1,0 +1,24 @@
+== [contestant-sdk] ROS_DOMAIN_ID=21 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp（CycloneDDS锁lo回环，跟仿真栈同机发现；这几个值在镜像构建时已经写死为ENV，此处只是回显确认）==
+[NX01] DroneSDK就绪（role=camtest，teammate=NX02）
+[NX01] 起飞前置检查…等待PX4飞控连接，当前connected=None
+[NX01] 起飞前置检查：PX4飞控已连接
+[NX01] 起飞前置检查：UWB/里程计定位数据已就绪
+[NX01] 声光反馈板不可用，跳过（不影响起飞）：声光反馈板串口访问失败（port=/dev/ttyUSB0）：SerialException(2, "could not open port /dev/ttyUSB0: [Errno 2] No such file or directory: '/dev/ttyUSB0'")。可能原因：①USB转串口设备是否已经插好、系统里是否真的存在这个设备节点（`ls -l /dev/ttyUSB0`确认）；②当前用户是否在`dialout`组里、对该设备节点有没有读写权限；③端口是否已经被别的进程占用（比如另一个SDK实例、`minicom`/`screen`等调试工具还开着没关）；④`port`路径是否配对（多台USB转串口设备时`/dev/ttyUSB*`编号可能跟预期不一致，必要时改用`/dev/serial/by-id/...`稳定路径）。
+[NX01] 朝向模式 -> 固定角度(90°)
+[NX01] 起飞中…当前高度0.05m，armed=False
+[NX01] 起飞已解锁，等待爬升到位+状态转换稳定…当前高度0.06m
+[NX01] 起飞已解锁，等待爬升到位+状态转换稳定…当前高度0.03m
+[NX01] 起飞已解锁，等待爬升到位+状态转换稳定…当前高度0.12m
+[NX01] 起飞已解锁，等待爬升到位+状态转换稳定…当前高度1.13m
+[NX01] 起飞完成，armed=True，位置已稳定
+[NX01] 起飞后额外悬停5秒，稳定后再出发…
+[NX01] 悬停确认稳定，可以出发
+NX01 world(0.0,-2.0,1.5) -> local(-1.54,8.01,1.41)
+[NX01] 飞往(-1.54, 8.01, 1.41)中…当前位置(-0.05, 0.11, 0.90)，waypoint_state='executing'
+[NX01] 飞往(-1.54, 8.01, 1.41)中…当前位置(-0.09, 1.67, 1.01)，waypoint_state='executing'
+[NX01] 飞往(-1.54, 8.01, 1.41)中…当前位置(-0.33, 2.96, 1.13)，waypoint_state='executing'
+[NX01] 飞往(-1.54, 8.01, 1.41)中…当前位置(-0.90, 4.66, 1.31)，waypoint_state='executing'
+[NX01] 飞往(-1.54, 8.01, 1.41)中…当前位置(-1.29, 6.26, 1.34)，waypoint_state='executing'
+[NX01] 飞往(-1.54, 8.01, 1.41)中…当前位置(-1.42, 7.22, 1.39)，waypoint_state='executing'
+[NX01] 已到达(-1.54, 8.01, 1.41)
+ARRIVED NX01

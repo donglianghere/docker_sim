@@ -1,0 +1,40 @@
+[09:29:30] ===== round 1: down/up =====
+[09:29:43] probes started +2s
+[09:29:43] +2s detect_age=2s |  | 
+[09:29:53] +12s detect_age=12s | probe=A qos=best t+5s n5=0 total=0 last_frame=never drops=- | probe=B qos=reliable t+5s n5=0 total=0 last_frame=never drops=AD3A:45
+[09:30:44] +63s detect_age=1s | probe=A qos=best t+60s n5=34 total=326 last_frame=0s drops=316B:44 | probe=B qos=reliable t+60s n5=34 total=327 last_frame=0s drops=AD3A:45
+[09:30:54] +73s detect_age=1s | probe=A qos=best t+70s n5=34 total=393 last_frame=0s drops=316B:44 | probe=B qos=reliable t+70s n5=34 total=394 last_frame=0s drops=AD3A:45
+[09:31:44] +123s detect_age=0s | probe=A qos=best t+120s n5=34 total=734 last_frame=0s drops=316B:44 | probe=B qos=reliable t+120s n5=34 total=735 last_frame=0s drops=AD3A:45,316B:19
+[09:31:55] +133s detect_age=0s | probe=A qos=best t+130s n5=34 total=802 last_frame=0s drops=316B:44 | probe=B qos=reliable t+130s n5=34 total=803 last_frame=0s drops=AD3A:45,316B:19
+[09:32:45] +184s detect_age=1s | probe=A qos=best t+180s n5=35 total=1142 last_frame=0s drops=316B:57 | probe=B qos=reliable t+180s n5=35 total=1145 last_frame=0s drops=AD3A:45,316B:35
+[09:32:55] +194s detect_age=0s | probe=A qos=best t+190s n5=34 total=1211 last_frame=0s drops=316B:57 | probe=B qos=reliable t+190s n5=34 total=1214 last_frame=0s drops=AD3A:45,316B:35
+[09:33:46] +245s detect_age=0s | probe=A qos=best t+240s n5=34 total=1557 last_frame=0s drops=316B:57 | probe=B qos=reliable t+240s n5=34 total=1560 last_frame=0s drops=AD3A:45,316B:35
+[09:34:46] +305s detect_age=0s | probe=A qos=best t+300s n5=35 total=1972 last_frame=0s drops=316B:61 | probe=B qos=reliable t+300s n5=35 total=1977 last_frame=0s drops=AD3A:45,316B:35
+[09:35:47] +366s detect_age=0s | probe=A qos=best t+360s n5=35 total=2386 last_frame=0s drops=316B:74 | probe=B qos=reliable t+360s n5=35 total=2393 last_frame=0s drops=AD3A:45,316B:45
+[09:36:48] round 1: no freeze in 420s
+[09:36:48] ===== round 2: down/up =====
+[09:37:01] probes started +2s
+[09:37:01] +2s detect_age=2s |  | 
+[09:37:11] +12s detect_age=12s | probe=A qos=best t+5s n5=0 total=0 last_frame=never drops=- | probe=B qos=reliable t+5s n5=0 total=0 last_frame=never drops=-
+[09:38:02] +62s detect_age=1s | probe=A qos=best t+60s n5=34 total=327 last_frame=0s drops=316B:14 | probe=B qos=reliable t+60s n5=34 total=329 last_frame=0s drops=-
+[09:38:12] +73s detect_age=1s | probe=A qos=best t+70s n5=35 total=396 last_frame=0s drops=316B:14 | probe=B qos=reliable t+70s n5=35 total=398 last_frame=0s drops=316B:18
+[09:39:02] +123s detect_age=1s | probe=A qos=best t+120s n5=34 total=739 last_frame=0s drops=316B:14 | probe=B qos=reliable t+120s n5=34 total=741 last_frame=0s drops=316B:23
+[09:39:12] +133s detect_age=0s | probe=A qos=best t+130s n5=34 total=808 last_frame=0s drops=316B:14 | probe=B qos=reliable t+130s n5=34 total=810 last_frame=0s drops=316B:23
+[09:40:03] +184s detect_age=0s | probe=A qos=best t+180s n5=34 total=1147 last_frame=0s drops=316B:25 | probe=B qos=reliable t+180s n5=34 total=1153 last_frame=0s drops=316B:23
+[09:40:13] +194s detect_age=0s | probe=A qos=best t+190s n5=34 total=1216 last_frame=0s drops=316B:25 | probe=B qos=reliable t+190s n5=34 total=1222 last_frame=0s drops=316B:23
+[09:41:04] +244s detect_age=0s | probe=A qos=best t+240s n5=35 total=1560 last_frame=0s drops=316B:25 | probe=B qos=reliable t+240s n5=35 total=1566 last_frame=0s drops=316B:29
+[09:42:04] +305s detect_age=1s | probe=A qos=best t+300s n5=34 total=1970 last_frame=0s drops=316B:26 | probe=B qos=reliable t+300s n5=34 total=1978 last_frame=0s drops=316B:29
+[09:43:05] +366s detect_age=0s | probe=A qos=best t+360s n5=35 total=2381 last_frame=0s drops=316B:28 | probe=B qos=reliable t+360s n5=35 total=2391 last_frame=0s drops=316B:29
+[09:44:05] round 2: no freeze in 420s
+[09:44:05] ===== round 3: down/up =====
+[09:44:19] probes started +3s
+[09:44:19] +3s detect_age=3s |  | 
+[09:44:29] +13s detect_age=0s | probe=A qos=best t+5s n5=0 total=0 last_frame=never drops=- | probe=B qos=reliable t+5s n5=0 total=0 last_frame=never drops=-
+[09:45:19] +63s detect_age=0s | probe=A qos=best t+60s n5=34 total=327 last_frame=0s drops=316B:75 | probe=B qos=reliable t+60s n5=34 total=336 last_frame=0s drops=316B:59
+[09:45:29] +73s detect_age=0s | probe=A qos=best t+70s n5=34 total=395 last_frame=0s drops=316B:75 | probe=B qos=reliable t+70s n5=34 total=404 last_frame=0s drops=316B:59
+[09:46:20] +124s detect_age=1s | probe=A qos=best t+120s n5=34 total=736 last_frame=0s drops=316B:75 | probe=B qos=reliable t+120s n5=34 total=745 last_frame=0s drops=316B:59
+[09:46:30] +134s detect_age=0s | probe=A qos=best t+130s n5=34 total=804 last_frame=0s drops=316B:75 | probe=B qos=reliable t+130s n5=34 total=813 last_frame=0s drops=316B:59
+[09:47:21] +185s detect_age=1s | probe=A qos=best t+180s n5=34 total=1143 last_frame=0s drops=316B:77 | probe=B qos=reliable t+180s n5=34 total=1154 last_frame=0s drops=316B:59
+[09:48:21] +245s detect_age=0s | probe=A qos=best t+240s n5=34 total=1547 last_frame=0s drops=316B:139 | probe=B qos=reliable t+240s n5=34 total=1564 last_frame=0s drops=316B:59
+[09:49:22] +306s detect_age=0s | probe=A qos=best t+300s n5=34 total=1948 last_frame=0s drops=316B:170 | probe=B qos=reliable t+300s n5=34 total=1971 last_frame=0s drops=316B:59
+[09:50:23] +367s detect_age=1s | probe=A qos=best t+360s n5=34 total=2358 last_frame=0s drops=316B:170 | probe=B qos=reliable t+360s n5=34 total=2381 last_frame=0s drops=316B:89
