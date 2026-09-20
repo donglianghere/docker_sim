@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>contest_mission</name>
+  <version>0.0.1</version>
+  <description>
+    2026大赛任务系统：仿真侧感知/任务状态机/裁判/场景重置等节点的
+    统一归属包（对应《2026大赛任务系统开发执行方案.md》阶段2~7）。
+  </description>
+  <maintainer email="todo@todo.todo">todo</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>cv_bridge</depend>
+  <depend>quadrotor_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>sensor_msgs_py</depend>
+  <depend>gazebo_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-pyzbar</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

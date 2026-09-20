@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mpcctrl</name>
+  <version>0.0.0</version>
+  <description>
+    ROS2(Jazzy)版多旋翼MPC控制器。求解器核心(model/quadrotor_mpc_codegen的
+    ACADO生成代码+externals/qpoases)和mpc_wrapper/mpc_controller的控制算法
+    逐行移植自uzh-rpg/rpg_mpc（GPLv3）；PX4CtrlFSM/input/PX4CtrlParam逐字
+    复制自同目录px4ctrl（跟so3ctrl同一个套路：状态机/RC/超时保护完全复用，
+    只换掉controller.h/.cpp这一处控制律实现）；ROS胶水层(mpcctrl_node.cpp)、
+    controller.h/.cpp、独立于ROS的状态/轨迹/指令类型(types.h)是本项目新写的，
+    加速度-油门自适应估计(thr2acc_递归最小二乘)照搬px4ctrl controller.cpp
+    里的算法。详见NOTICE.md逐文件版权来源说明。
+  </description>
+  <maintainer email="iszhouxin@zju.edu.cn">uav</maintainer>
+  <license>GPLv3</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <depend>quadrotor_msgs</depend>
+  <depend>uav_utils</depend>
+  <depend>Eigen3</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

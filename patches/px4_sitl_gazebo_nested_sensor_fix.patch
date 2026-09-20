@@ -1,0 +1,50 @@
+diff --git a/src/gazebo_mavlink_interface.cpp b/src/gazebo_mavlink_interface.cpp
+index f4750f9..a2e69e0 100644
+--- a/src/gazebo_mavlink_interface.cpp
++++ b/src/gazebo_mavlink_interface.cpp
+@@ -70,13 +70,30 @@ void GazeboMavlinkInterface::CreateSensorSubscription(
+     void (GazeboMavlinkInterface::*fp)(const boost::shared_ptr<GazeboMsgT const>&, const int&),
+     GazeboMavlinkInterface* ptr, const physics::Joint_V& joints, physics::ModelPtr& nested_model, const std::regex& model) {
+ 
+-  // Get nested sensors on included models
++  // Get nested sensors on included models.
++  //
++  // contest_mission补丁（2026-09-10）：upstream原来这里只检查调用方传入的
++  // 单个nested_model（Load()里赋值成model_->NestedModels()[0]，该处注释
++  // 自己承认"this will only capture the first nested model found on the
++  // base model...As an improvement, this can be made more generic by
++  // going through all the nested models"——一个从未真正做的已知待办）。
++  // 如果base model上焊了不止一个嵌套子模型（比如iris自带的gps0 + 仿真
++  // 项目额外用<include>model://lidar</include>焊上去的对地测距雷达），
++  // 排在NestedModels()[0]后面的那些永远匹配不到对应正则，传感器订阅
++  // 根本不会被创建——实测确认这正是"GPS正常、激光雷达的MAVLink
++  // DISTANCE_SENSOR消息却永远到不了mavros"的根因，不是仿真侧SDF/mavros
++  // 配置的问题。改成遍历model_的全部嵌套子模型，不再只看调用方传进来的
++  // 单个nested_model——nested_model这个形参保留但不再使用，不改函数
++  // 签名，避免牵动下面4处调用点。
+   std::string nested_sensor_name;
+-  if (nested_model != nullptr && std::regex_match(nested_model->GetName(), model)) {
++  for (const auto &candidate_model : model_->NestedModels()) {
++    if (candidate_model == nullptr || !std::regex_match(candidate_model->GetName(), model)) {
++      continue;
++    }
+     const std::string model_name = model_->GetName();
+ 
+     // Get the nested model sensor name
+-    std::string nested_sensor_name = nested_model->GetName();
++    nested_sensor_name = candidate_model->GetName();
+     std::size_t found = nested_sensor_name.find_last_of("::");
+     if (found) {
+       nested_sensor_name = nested_sensor_name.substr(found + 1);
+@@ -93,9 +110,9 @@ void GazeboMavlinkInterface::CreateSensorSubscription(
+ 
+     // Get the sensor link orientation with respect to the base_link
+ #if GAZEBO_MAJOR_VERSION >= 9
+-    const auto sensor_orientation = nested_model->RelativePose().Rot();
++    const auto sensor_orientation = candidate_model->RelativePose().Rot();
+ #else
+-    const auto sensor_orientation = nested_model->GetChild()->GetRelativePose().Rot();
++    const auto sensor_orientation = candidate_model->GetChild()->GetRelativePose().Rot();
+ #endif
+ 
+     // One map will be created for each Gazebo message type

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+contestant-sdk镜像专用的CycloneDDS静态配置：网卡范围锁定成lo（本机回环接口）。
+
+这份文件在Dockerfile.contestant-sdk里被COPY进镜像固定路径
+/opt/contest_sdk_cyclonedds.xml，配合同一个Dockerfile里烘进镜像的
+CYCLONEDDS_URI这个ENV一起生效——不像flight-stack-entrypoint.sh那样在容器
+运行时按DEPLOY_TARGET(sim/hw)动态生成不同内容，因为contestant-sdk这个镜像
+目前的唯一使用场景就是跟sim-world/flight-stack-nx01/flight-stack-nx02三个
+仿真栈容器一样，用--network host共享宿主机网络命名空间同机运行，互相发现
+走本地环回(lo)就够用，不需要处理"选手容器部署到真机局域网"这种场景。
+
+内容跟flight-stack-entrypoint.sh里DEPLOY_TARGET=sim分支运行时生成的配置
+等价：只开lo这一张网卡的组播，不去枚举/尝试宿主机上其它跟ROS2通信无关的
+物理/虚拟网卡（docker0/vmnet等），避免CycloneDDS在那些网卡上无谓地组播
+失败拖慢发现和发布。
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain>
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo" priority="default" multicast="true"/>
+      </Interfaces>
+      <AllowMulticast>true</AllowMulticast>
+    </General>
+  </Domain>
+</CycloneDDS>

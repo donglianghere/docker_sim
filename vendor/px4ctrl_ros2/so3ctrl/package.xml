@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>so3ctrl</name>
+  <version>0.0.0</version>
+  <description>
+    docker_sim专属的板外控制器：复用px4ctrl(ZJU-FAST-Lab，GPLv3)的飞行状态
+    机(PX4CtrlFSM，起飞/悬停/降落/RC仲裁，逐字未改)，内部控制律换成
+    KumarRobotics/kr_mav_control（SO3Control，BSD-3-Clause）的SE(3)几何
+    位置环。跟px4ctrl是同源but不同的独立ROS2包，通过CONTROLLER=so3ctrl
+    环境变量在flight-stack-entrypoint.sh里选用，三者(ros2_px4_stack/
+    px4ctrl/so3ctrl)互斥、二选一。
+  </description>
+  <maintainer email="iszhouxin@zju.edu.cn">uav</maintainer>
+  <!-- 混合版权：PX4CtrlFSM/PX4CtrlParam/input/so3ctrl_node这几个文件
+       衍生自px4ctrl(GPLv3)，SO3Control.hpp/cpp原样搬自kr_mav_control
+       (BSD-3-Clause)。GPLv3是copyleft、BSD-3是宽松且兼容GPL的许可，
+       组合作品按更严格的GPLv3分发，两份原始许可证全文见同目录
+       LICENSE-px4ctrl/LICENSE-kr_mav_control。 -->
+  <license>GPLv3</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <depend>quadrotor_msgs</depend>
+  <depend>uav_utils</depend>
+  <depend>Eigen3</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

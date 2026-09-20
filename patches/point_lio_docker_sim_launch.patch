@@ -1,0 +1,208 @@
+diff --git a/launch/mapping_mid360.launch.py b/launch/mapping_mid360.launch.py
+index dbf6ee4..30b07c9 100644
+--- a/launch/mapping_mid360.launch.py
++++ b/launch/mapping_mid360.launch.py
+@@ -1,9 +1,10 @@
+ from launch import LaunchDescription
+ from launch.actions import GroupAction, DeclareLaunchArgument
+ from launch.conditions import IfCondition
+-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
++from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+ from launch_ros.actions import Node
+ from launch_ros.substitutions import FindPackageShare
++from launch_ros.parameter_descriptions import ParameterValue
+ 
+ 
+ def generate_launch_description():
+@@ -12,6 +13,62 @@ def generate_launch_description():
+         'rviz', default_value='true',
+         description='Flag to launch RViz.')
+ 
++    # docker_sim: 双机命名空间 + 跟DLIO一致的下游接口契约（dlio/odom_node/odom、
++    # dlio/odom_node/pointcloud/deskewed这两个固定话题名，{ns}/odom、
++    # {ns}/base_link这两个TF frame名字），让point_lio可以作为
++    # flight-stack-entrypoint.sh里LOCALIZATION_SOURCE的一个可选SLAM后端，跟
++    # DLIO互换而不用改mighty/ego_planner_bridge/gt_odom_bridge/
++    # ros2_px4_stack这些下游消费者一行代码——约定完全照抄
++    # patches/dlio_namespace.patch里的_ns_frame写法，保持两条SLAM链路的
++    # 命名习惯一致。
++    namespace = LaunchConfiguration('namespace', default='')
++    declare_namespace_arg = DeclareLaunchArgument(
++        'namespace', default_value=namespace,
++        description='Vehicle namespace (e.g. NX01). Applied as the ROS node namespace and as '
++                     'a TF frame_id prefix (<ns>/odom, <ns>/base_link) so multiple point_lio '
++                     'instances sharing one ROS graph do not collide, matching DLIO\'s '
++                     'dlio_namespace.patch convention.'
++    )
++
++    def _ns_frame(name):
++        return PythonExpression(
++            ["'", namespace, "/", name, "' if '", namespace, "' else '", name, "'"]
++        )
++    odom_frame = _ns_frame('odom')
++    baselink_frame = _ns_frame('base_link')
++
++    # 2026-08-19新增：common.lid_topic原来写死成'mid360'（仿真Gazebo插件
++    # 并行发布的CustomMsg话题名，见下面laser_mapping_params里的说明）。真机
++    # 只有一个物理驱动、一个话题名（mid360_real.launch.py remap到
++    # 'mid360_PointCloud2'，不管xfer_format是0还是1，话题名不变，只是消息
++    # 类型从PointCloud2变成CustomMsg），仿真那个'mid360'名字在真机上根本
++    # 不存在，point_lio会订阅到空话题、永远收不到点云。改成可覆盖的launch
++    # 参数，默认仍是'mid360'保持仿真行为不变，entrypoint.sh在
++    # DEPLOY_TARGET=hw时传lid_topic:=mid360_PointCloud2。
++    lid_topic = LaunchConfiguration('lid_topic', default='mid360')
++    declare_lid_topic_arg = DeclareLaunchArgument(
++        'lid_topic', default_value=lid_topic,
++        description='point_lio订阅的点云话题名(CustomMsg格式)。仿真默认'
++                     "'mid360'，真机传'mid360_PointCloud2'（话题名跟DLIO"
++                     '共用，区别只在driver的xfer_format参数）。',
++    )
++
++    # 2026-08-19新增：改成launch参数，方便A/B对照测试，不用每次改代码。
++    # 默认false=跟上游mid360.yaml默认值一致（downsample到点云帧率发布，
++    # ~20Hz）。真机实测过true=按IMU频率发布(~190-250Hz)，但10分钟soak
++    # 测出pointlio_mapping自己的常驻内存涨了3.7倍(162MB->599MB)、load
++    # average持续爬升没有平台期——还没查清是这个开关本身导致的，还是
++    # point_lio建图结构本身随时间自然增长，需要关掉这个开关跑同样时长
++    # 的对照实验，见read_hw.md"point_lio真机首次接通"一节的待办#15。
++    high_freq_odom = LaunchConfiguration('high_freq_odom', default='false')
++    declare_high_freq_odom_arg = DeclareLaunchArgument(
++        'high_freq_odom', default_value=high_freq_odom,
++        description='true=按IMU频率发布里程计(~200Hz+，对应odometry.'
++                     'publish_odometry_without_downsample)，false=跟点云'
++                     '帧率一致(~20Hz，上游默认行为)。true这条路径还没有'
++                     '查清内存增长的根因，长时间测试前不要开。',
++    )
++
+     # Node parameters, including those from the YAML configuration file
+     laser_mapping_params = [
+         PathJoinSubstitution([
+@@ -21,14 +78,95 @@ def generate_launch_description():
+         {
+             'use_imu_as_input': False,  # Change to True to use IMU as input of Point-LIO
+             'prop_at_freq_of_imu': True,
++            # mid360.yaml上游默认false，只在prop_at_freq_of_imu内部按IMU
++            # 频率做状态传播、但发布仍然downsample到每帧点云处理完才发
++            # 一次(~20Hz)。true让laserMapping.cpp里publish_odometry()在
++            # IMU传播的每一步都发(见1081/1234行if(publish_odometry_
++            # without_downsample)调用点)，真正做到IMU频率输出。⚠️ 真实
++            # ROS2参数名带"odometry."前缀(parameters.cpp:89
++            # declare_parameter<bool>("odometry.publish_odometry_without_
++            # downsample", false))，第一次漏加前缀导致覆盖没生效过。
++            'odometry.publish_odometry_without_downsample': ParameterValue(high_freq_odom, value_type=bool),
+             'check_satu': True,
+             'init_map_size': 10,
+             'point_filter_num': 3,  # Options: 1, 3
+             'space_down_sample': True,
+             'filter_size_surf': 0.5,  # Options: 0.5, 0.3, 0.2, 0.15, 0.1
+             'filter_size_map': 0.5,  # Options: 0.5, 0.3, 0.15, 0.1
+-            'cube_side_length': 1000.0,  # Option: 1000
++            'cube_side_length': 100.0,  # Option: 1000
+             'runtime_pos_log_enable': False,  # Option: True
++            # docker_sim overrides —— 下面几个mid360.yaml上游默认值不适配本项目：
++            # common.lid_topic用"mid360"（不带_PointCloud2后缀）——这是Gazebo
++            # livox_points_plugin.cpp里custom_pub发布的标准
++            # livox_ros_driver2::msg::CustomMsg话题，走上面
++            # point_lio_avia_custom_msg.patch补全的AVIA/CustomMsg解析路径，
++            # 不是DLIO专用、字段被patches/livox_pointcloud_timestamp.patch
++            # 定制过的那路PointCloud2（"mid360_PointCloud2"）——两路话题由
++            # 同一个Gazebo插件并行发布，互不冲突。common.imu_topic跟
++            # flight-stack-entrypoint.sh传给DLIO的imu_topic:="mid360/imu"
++            # 是同一路雷达自带IMU（不是飞控IMU，见DEBUG_JOURNAL.md"本系统
++            # 飞控和雷达各用自己的IMU"一节）。
++            'common.lid_topic': lid_topic,
++            'common.imu_topic': 'mid360/imu',
++            # mid360.yaml上游mapping.acc_norm默认1.0（假设加速度计以g为单位），
++            # 但本项目仿真的mid360 IMU插件实测直接输出SI单位m/s²（静止时线
++            # 加速度模长≈9.8，不是≈1.0）——DLIO这条线上已经踩过同一个坑（见
++            # DEBUG_JOURNAL.md"Livox IMU读数未按g单位换算"一节），这里直接
++            # 改成9.81，不用再重新踩一次。
++            'mapping.acc_norm': 9.81,
++            # 2026-09-08新增，真机首次实测"移动飞机SLAM里程计完全不变化"
++            # 排查出来的配套bug：mid360.yaml上游mapping.satu_acc默认3.0，
++            # 是按acc_norm=1.0（g单位，静止时加速度模长≈1.0）这个前提设的
++            # "3g"饱和阈值；上面把acc_norm改成9.81(SI单位)之后，
++            # Estimator.cpp的h_model_IMU_output（src/Estimator.cpp:355-398）
++            # 拿来跟satu_acc比较的acc_avr是**原始未换算**的IMU读数（真机
++            # mid360/imu实测静止时z轴≈9.73，见DEBUG_JOURNAL.md同日记录），
++            # 0.99*3.0=2.97远小于静止时的重力分量9.73，导致
++            # check_satu=true（mapping_mid360.launch.py本身就设了这个）
++            # 时，加速度这一路IMU测量**从开机静止那一刻起就永久被判定
++            # "饱和"**（`ekfom_data.z_IMU(axis)=0.0`，见Estimator.cpp:381-397），
++            # 不管飞机是否真的在运动。同一个acc_norm改动、dlio/fast_lio
++            # 完全不受影响（它们各自独立的yaml里没有这个耦合关系），只有
++            # point_lio把两个参数放在同一套换算逻辑里、这次改acc_norm时
++            # 漏改了配套的satu_acc——这正是Dockerfile.flight-stack
++            # "7b. point_lio"节一直标注的"⚠️已知未处理项：mapping.satu_acc/
++            # satu_gyro...真机部署前需要单独核实"里说的那个坑，这次真机
++            # 实测踩上了。修法：按跟acc_norm同样的倍数换算，保持"3g"这个
++            # 饱和阈值的物理含义不变：3.0 * 9.81 ≈ 29.43。satu_gyro不受
++            # 影响——angvel_avr没有被acc_norm这套换算逻辑覆盖，保持35.0
++            # 上游默认值不用改。
++            'mapping.satu_acc': 29.43,
++            # 2026-09-08新增，按比赛场地20×25×6米实测尺寸重新定——排查
++            # lidar_buffer积压问题时顺带查了这两个参数的实际生效值：
++            # mapping.det_range最终生效100.0(来自mid360.yaml)，
++            # cube_side_length最终生效**1000.0**（不是parameters.cpp里
++            # declare_parameter的C++默认值200——这个launch文件本来就有
++            # 一行'cube_side_length': 1000.0覆盖它，yaml里也没有这个key，
++            # 一直用的是这个1000）。lasermap_fov_segment()触发地图裁剪
++            # (`ikdtree.Delete_Point_Boxes()`)的条件是`dist_to_map_edge
++            # <= MOV_THRESHOLD(硬编码1.5)*det_range`；地图刚初始化、飞机
++            # 静止不动时dist_to_map_edge=cube_len/2。旧组合1000/2=500 <=
++            # 1.5*100=150？不成立——要飞机离初始化点500-150=350米才会
++            # 触发第一次裁剪，20×25米场地内不可能达到，**local map从
++            # 起飞到现在从未真正裁剪过、持续无边界累积所有历史点**——
++            # 跟fast_lio真机排查时遇到的问题是同一个方向(cube太大导致
++            # 从不裁剪、地图无限增长)，不是"每帧都在裁剪"那种相反的
++            # 情况(这是本次分析中途一度算错默认值、以为是相反方向后
++            # 又核实纠正过的结论)。地图无边界增长会让ikd-Tree最近邻
++            # 查询/重平衡越跑越慢，是真机CPU紧张(排查lidar_buffer积压
++            # 时发现整机loadavg 9~12/8核)的一个促成因素。
++            # 20×25米场地半对角线√(10²+12.5²)≈16米，det_range=20留够
++            # 余量；cube_side_length=100保证cube_len/2(50) > 1.5*
++            # det_range(30)，飞机要离初始化点20米以上才会第一次触发
++            # 裁剪——覆盖整个场地活动范围，同时地图本体从1000米降到
++            # 100米，大幅减少ikd-Tree存的无效远处空间，降低内存/查询
++            # 开销。DET_RANGE只在lasermap_fov_segment()这一处使用，不
++            # 参与点云本身的距离过滤，调小不会误伤有效点云。sim/hw
++            # 统一生效（不是安装角度那类需要隔离的真机专属参数，是
++            # 双方场地尺寸这个共同事实）。
++            'mapping.det_range': 20.0,
++            'odom_header_frame_id': odom_frame,
++            'odom_child_frame_id': baselink_frame,
+         }
+     ]
+ 
+@@ -37,8 +175,21 @@ def generate_launch_description():
+         package='point_lio',
+         executable='pointlio_mapping',
+         name='laserMapping',
++        namespace=namespace,
+         output='screen',
+         parameters=laser_mapping_params,
++        # docker_sim: point_lio内部发布话题是硬编码的绝对话题名
++        # （/aft_mapped_to_init、/cloud_registered等），remap到跟DLIO完全一样
++        # 的相对话题名，配合上面namespace=namespace自动变成
++        # /<ns>/dlio/odom_node/odom等。/cloud_registered是已变换到
++        # odom_header_frame_id（也就是上面的{ns}/odom）系下的配准点云，跟
++        # DLIO的dlio/odom_node/pointcloud/deskewed语义一致（都是"已去畸变+
++        # 已变换到里程计世界系"的当前帧点云，不是原始机体系点云），
++        # ego_planner_bridge的grid_map/cloud remap就是接的这个话题名。
++        remappings=[
++            ('/aft_mapped_to_init', 'dlio/odom_node/odom'),
++            ('/cloud_registered', 'dlio/odom_node/pointcloud/deskewed'),
++        ],
+         # prefix='gdb -ex run --args'
+     )
+ 
+@@ -58,6 +209,9 @@ def generate_launch_description():
+     # Assemble the launch description
+     ld = LaunchDescription([
+         rviz_arg,
++        declare_namespace_arg,
++        declare_lid_topic_arg,
++        declare_high_freq_odom_arg,
+         laser_mapping_node,
+         GroupAction(
+             actions=[rviz_node],

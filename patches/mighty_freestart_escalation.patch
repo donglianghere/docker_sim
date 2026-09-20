@@ -1,0 +1,51 @@
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index e77e2cf..ad9d94b 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -992,7 +992,45 @@ bool MIGHTY::generateGlobalPath(vec_Vecf<3>& global_path, double current_time,
+   }
+ 
+   // Free start and goal if necessary
+-  if (par_.use_free_start) hgp_manager_.freeStart(local_A.pos, par_.free_start_factor);
++  if (par_.use_free_start) {
++    hgp_manager_.freeStart(local_A.pos, par_.free_start_factor);
++
++    // 2026-08-13：飞机如果紧贴着另一架飞机，对方作为动态障碍物在占据栅格
++    // 里的硬占据膨胀区域经常有1.5米以上半宽（见map_util.hpp的
++    // dyn_base_inflation_m_/obst_max_vel_两层逻辑：当前位置膨胀+未来
++    // 可达范围膨胀），上面这行freeStart()清出来的半径
++    // (free_start_factor×分辨率，通常只有几十厘米)可能完全不够——起点
++    // 自己仍然落在占据格子里。实测确认这正是"两机挤在一起后互锁、
++    // astar_heat打出`priority queue empty after N expansions`"这个死锁
++    // 的根因：A*从起点几乎找不到可扩展的邻居，只能拿到一段退化的"partial
++    // path"，重规划实质失败，两机都拿不到能脱离对方的新轨迹。
++    //
++    // 这里在常规freeStart()不够用时，逐步加大清理半径重试，直到起点真正
++    // 变成非占据、或者到达安全上限为止——不能无限扩大，否则如果起点是
++    // 真的贴着一堵真实的墙（不是被别的agent的动态膨胀盖住），会把这个
++    // 兜底逻辑滥用成"直接清穿真实障碍"，那是更危险的行为，不如老老实实
++    // 让下面的检查按原来的方式失败。上限4米：两机避障用的组合包围盒对角
++    // 线(||drone_bbox||，1.2米盒子约2.08米)+两层动态膨胀(各约1米量级)
++    // 加起来也就3米出头，4米留了余量，但远小于正常房间/走廊尺度。
++    constexpr double kFreeStartEscalationCapM = 4.0;
++    double escalate_factor = par_.free_start_factor;
++    const double factor_step = par_.free_start_factor > 0.0 ? par_.free_start_factor : 1.0;
++    while (hgp_manager_.checkIfPointOccupied(local_A.pos) &&
++           escalate_factor * map_res_ < kFreeStartEscalationCapM) {
++      escalate_factor += factor_step;
++      hgp_manager_.freeStart(local_A.pos, escalate_factor);
++    }
++    if (hgp_manager_.checkIfPointOccupied(local_A.pos)) {
++      printf("[MIGHTY] freeStart: start point still occupied after escalating clearance to "
++             "%.2fm (cap %.2fm) -- likely a real obstacle, not another agent; not clearing "
++             "further.\n",
++             escalate_factor * map_res_, kFreeStartEscalationCapM);
++    } else if (escalate_factor > par_.free_start_factor) {
++      printf("[MIGHTY] freeStart: default clearance wasn't enough, escalated to %.2fm to "
++             "unstick the start point (likely another agent parked nearby).\n",
++             escalate_factor * map_res_);
++    }
++  }
+   if (par_.use_free_goal) hgp_manager_.freeGoal(local_G.pos, par_.free_goal_factor);
+   if (par_.debug_verbose)
+     printf("[TIMING]   HGP setup: %.2f ms\n", timer_setup.getElapsedMicros() / 1000.0);

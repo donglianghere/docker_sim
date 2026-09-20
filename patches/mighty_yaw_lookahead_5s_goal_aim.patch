@@ -1,0 +1,59 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index 0000000..0000000 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -215,13 +215,17 @@ mighty_node:
+         # elsewhere in this patch chain).
+         yaw_spinning_threshold: 10000              # [-] if the planner keeps failing more than this number, we switch to the spinning mode
+         yaw_spinning_dyaw: 1.0                  # [rd/s] Spinning dyaw
+-        yaw_look_ahead_time: 1.0                # [s] How far ahead on the local plan to look
++        yaw_look_ahead_time: 5.0                # [s] How far ahead on the local plan to look
+         # when picking the yaw direction target in TRAVELING/GOAL_SEEN,
+         # instead of the immediate next sample (~dc seconds/centimeters
+         # ahead, noise-sensitive -- this was the main source of frequent
+         # yaw wobble during otherwise-normal flight, e.g. small lateral
+         # position adjustments from swarm avoidance). Mirrors ego_planner's
+         # traj_server.cpp calculate_yaw() time_forward_ (also 1.0s).
++        # 2026-08-13：从1.0秒改成5.0秒——用户直接反馈"轨迹变化太快导致yaw
++        # 突变"，看得更远能把更多短期轨迹形状变化平均掉；同时mighty.cpp
++        # getNextGoal()新增了"5秒内就能跑到plan_末尾就直接瞄准G_term"的
++        # 规则，不是单纯延长look-ahead距离，见那边的注释。
+ 
+         # Replanning reliability
+         max_replan_failure_duration: 30.0       # [s] give up on current terminal goal after this many seconds of
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 0000000..0000000 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -1784,10 +1784,27 @@ bool MIGHTY::getNextGoal(state& next_goal) {
+         // index i == i*dc seconds ahead; look yaw_look_ahead_time seconds
+         // ahead on this same plan, clamped to the last available sample
+         // (mirrors ego's clamp-to-traj_duration_ near the trajectory end).
+-        size_t look_ahead_idx = std::min(
+-            local_plan.size() - 1,
+-            static_cast<size_t>(std::round(par_.yaw_look_ahead_time / par_.dc)));
+-        getDesiredYaw(next_goal, local_plan[look_ahead_idx]);
++        //
++        // 2026-08-13：yaw_look_ahead_time从1.0秒改成5.0秒——看得更远，把
++        // 更多短期轨迹形状变化平均掉。同时补一条明确规则：如果按当前
++        // plan_算，yaw_look_ahead_time秒内就能跑到plan_末尾（意味着按
++        // 现在的速度很快就要到目标附近了），直接瞄准真正的终点G_term，
++        // 不再瞄plan_末尾那个点——plan_末尾在正常TRAVELING阶段可能只是
++        // 被水平线(horizon)截断出来的中间subgoal，不一定是G_term本身
++        // （见computeG()/par_.horizon），瞄中间点会在subgoal本身随着
++        // 每次重规划小幅漂移时带来额外的方向抖动，直接瞄真正的目标点
++        // 更稳定，也更符合"快到目标了就应该开始对准目标方向"这个直觉。
++        const double remaining_duration = (local_plan.size() - 1) * par_.dc;
++        state yaw_look_ahead_goal;
++        if (remaining_duration <= par_.yaw_look_ahead_time) {
++          getGterm(yaw_look_ahead_goal);
++        } else {
++          size_t look_ahead_idx = std::min(
++              local_plan.size() - 1,
++              static_cast<size_t>(std::round(par_.yaw_look_ahead_time / par_.dc)));
++          yaw_look_ahead_goal = local_plan[look_ahead_idx];
++        }
++        getDesiredYaw(next_goal, yaw_look_ahead_goal);
+       }
+     }
+ 

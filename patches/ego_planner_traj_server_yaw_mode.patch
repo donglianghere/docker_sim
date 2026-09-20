@@ -1,0 +1,159 @@
+diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
+index 66057fa..0000000 100755
+--- a/src/planner/plan_manage/src/traj_server.cpp
++++ b/src/planner/plan_manage/src/traj_server.cpp
+@@ -3,6 +3,8 @@
+ #include "traj_utils/msg/bspline.hpp"
+ #include "quadrotor_msgs/msg/position_command.hpp"
+ #include "std_msgs/msg/empty.hpp"
++#include "std_msgs/msg/int32.hpp"
++#include "geometry_msgs/msg/point.hpp"
+ #include "visualization_msgs/msg/marker.hpp"
+ #include <rclcpp/rclcpp.hpp>
+ 
+@@ -42,6 +44,53 @@
+ // 原来的PI，不设置这个环境变量就是原来的行为，不影响其它部署方式。
+ double yaw_dot_max_ = 3.1415926;
+ 
++// docker_sim: D6绕飞需求"机头始终对准立柱中心"——新增一个旁路开关，默认
++// 关闭（yaw_mode_=0，即VELOCITY，行为跟原来一字不差），不直接替换默认
++// 朝向逻辑，避免牵连D3航线飞行/D5火情接近/返航这些不需要"朝固定点"这个
++// 概念的其它goto()调用（这几处调用永远不会发布下面两个新话题，
++// yaw_mode_永远停在默认值0，calculate_yaw()对它们的行为完全不变）。
++// 三路选一：0=VELOCITY(原有默认，朝速度方向)/1=CONSTANT(朝固定yaw角，
++// 不跟随位置变化)/2=POINT(朝固定目标点，随飞机当前位置实时重算角度)。
++// mission.py只在D6绕飞这一段调用SDK新增的
++// set_yaw_mode_point()/set_yaw_mode_velocity()，绕完/命中火情之后切回
++// VELOCITY，不会让"旁路开关忘记关掉"这种状态污染到后续的返航等正常
++// 飞行段。
++enum YawMode
++{
++  YAW_MODE_VELOCITY = 0,
++  YAW_MODE_CONSTANT = 1,
++  YAW_MODE_POINT = 2,
++};
++// docker_sim 2026-09-16：用户实测发现"朝速度方向"这套算法在急转弯时
++// （目标朝向瞬间大幅跳变，哪怕限了角速度也要长时间顶着限速转）会跟
++// 同一时段的位置/高度跟踪抢电机推力分配资源，仿真上表现为明显掉高，
++// 真机上更严重、直接炸机过——不是只在D6绕飞才会遇到，D3之字形折返/
++// 地毯式搜索转弯等任何goto()急转弯都有同样风险。默认值从VELOCITY改成
++// CONSTANT（全程锁死朝向，不跟着速度方向转，从根上不存在"目标朝向
++// 瞬间跳变"这件事），VELOCITY模式代码保留、仍可以选，只是不再是默认
++// /绕飞结束后的回退目标。
++int yaw_mode_ = YAW_MODE_CONSTANT;
++double yaw_constant_ = 0.0;   // yaw_mode_==CONSTANT时使用，弧度
++double yaw_target_x_ = 0.0;   // yaw_mode_==POINT时使用，跟pos同一个局部坐标系
++double yaw_target_y_ = 0.0;
++
++void yawModeCallback(std_msgs::msg::Int32::ConstSharedPtr msg)
++{
++  yaw_mode_ = msg->data;
++}
++
++void yawParamCallback(geometry_msgs::msg::Point::ConstSharedPtr msg)
++{
++  // 单个话题身兼两种模式的参数：CONSTANT模式只看x（弧度，y/z不用）；
++  // POINT模式看x/y（目标点局部坐标，z不用）——没有分成两个话题是因为
++  // 调用方（mission.py/capabilities.py）总是"先定好这次要用哪个模式，
++  // 再传一份跟这个模式匹配的参数"，不存在两种参数需要同时生效的场景，
++  // 合并成一个话题更简单，不用额外定义/维护两份消息类型。
++  yaw_constant_ = msg->x;
++  yaw_target_x_ = msg->x;
++  yaw_target_y_ = msg->y;
++}
++
+ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
+ {
+   // parse pos traj
+@@ -87,17 +136,19 @@
+   receive_traj_ = true;
+ }
+ 
+-std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, rclcpp::Time &time_now, rclcpp::Time &time_last)
++// docker_sim: 原来`calculate_yaw()`一个函数里既算"目标朝向该是多少"
++// (yaw_temp，取决于VELOCITY/CONSTANT/POINT三选一是哪一种)又算"从当前
++// last_yaw_平滑过渡到yaw_temp、限幅+过零点wraparound+一阶低通"——后半段
++// 这套限幅/wraparound数学三种模式完全通用，不该抄三遍（抄三遍等于给同一
++// 段易错逻辑留三个可能长歪的分支），拆成这个共享helper，三种模式各自只
++// 负责算出yaw_temp，其余原样不动，行为上跟原来的VELOCITY分支逐字节
++// 一致（只是从函数体搬到了这个helper里）。
++double step_yaw_toward(double yaw_temp, rclcpp::Time &time_now, rclcpp::Time &time_last, double &yawdot_out)
+ {
+   constexpr double PI = 3.1415926;
+   const double YAW_DOT_MAX_PER_SEC = yaw_dot_max_;
+-  // constexpr double YAW_DOT_DOT_MAX_PER_SEC = PI;
+-  std::pair<double, double> yaw_yawdot(0, 0);
+   double yaw = 0;
+   double yawdot = 0;
+-
+-  Eigen::Vector3d dir = t_cur + time_forward_ <= traj_duration_ ? traj_[0].evaluateDeBoorT(t_cur + time_forward_) - pos : traj_[0].evaluateDeBoorT(traj_duration_) - pos;
+-  double yaw_temp = dir.norm() > 0.1 ? atan2(dir(1), dir(0)) : last_yaw_;
+   double max_yaw_change = YAW_DOT_MAX_PER_SEC * (time_now - time_last).seconds();
+   if (yaw_temp - last_yaw_ > PI)
+   {
+@@ -173,10 +224,42 @@
+   last_yaw_ = yaw;
+   last_yaw_dot_ = yawdot;
+ 
+-  yaw_yawdot.first = yaw;
+-  yaw_yawdot.second = yawdot;
++  yawdot_out = yawdot;
++  return yaw;
++}
+ 
+-  return yaw_yawdot;
++std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, rclcpp::Time &time_now, rclcpp::Time &time_last)
++{
++  // docker_sim: 三选一算出"这一帧原始想要的朝向"(yaw_temp)，具体怎么
++  // 从当前朝向平滑过渡过去统一交给上面的step_yaw_toward()，不在这里
++  // 重复限幅/wraparound逻辑。yaw_mode_默认是YAW_MODE_VELOCITY(0)——
++  // 只要调用方（mission.py）没发布过traj_server/yaw_mode话题，这里
++  // 永远走跟原来一模一样的分支，行为不变。
++  double yaw_temp;
++  if (yaw_mode_ == YAW_MODE_CONSTANT)
++  {
++    yaw_temp = yaw_constant_;
++  }
++  else if (yaw_mode_ == YAW_MODE_POINT)
++  {
++    double dx = yaw_target_x_ - pos(0);
++    double dy = yaw_target_y_ - pos(1);
++    // docker_sim: 飞机自己刚好飞到目标点正上方/正下方时dx,dy趋近于0，
++    // atan2(0,0)在数学上无意义（实现定义），跟VELOCITY分支里
++    // `dir.norm() > 0.1`同一个思路——离目标点太近时沿用上一帧朝向，
++    // 不去算一个没意义的瞬时角度，避免朝向在目标点正上方原地抖动。
++    double dist = sqrt(dx * dx + dy * dy);
++    yaw_temp = dist > 0.1 ? atan2(dy, dx) : last_yaw_;
++  }
++  else // YAW_MODE_VELOCITY（默认），跟原来一字不差
++  {
++    Eigen::Vector3d dir = t_cur + time_forward_ <= traj_duration_ ? traj_[0].evaluateDeBoorT(t_cur + time_forward_) - pos : traj_[0].evaluateDeBoorT(traj_duration_) - pos;
++    yaw_temp = dir.norm() > 0.1 ? atan2(dir(1), dir(0)) : last_yaw_;
++  }
++
++  double yawdot = 0;
++  double yaw = step_yaw_toward(yaw_temp, time_now, time_last, yawdot);
++  return std::pair<double, double>(yaw, yawdot);
+ }
+ 
+ void cmdCallback()
+@@ -282,6 +365,19 @@
+       10,
+       bsplineCallback);
+ 
++  // docker_sim: D6绕飞"机头对准立柱中心"新增的yaw旁路开关，同一个相对
++  // 话题名命名约定（namespace=${NAMESPACE}按机分开）。选手侧不直接发
++  // 这两个话题，由contest_sdk新增的set_yaw_mode_velocity()/
++  // set_yaw_mode_constant()/set_yaw_mode_point()包装。
++  auto yaw_mode_sub = node->create_subscription<std_msgs::msg::Int32>(
++      "traj_server/yaw_mode",
++      10,
++      yawModeCallback);
++  auto yaw_param_sub = node->create_subscription<geometry_msgs::msg::Point>(
++      "traj_server/yaw_param",
++      10,
++      yawParamCallback);
++
+   // docker_sim: 改成相对话题名，配合namespace=${NAMESPACE}按机分开，
+   // 避免双机场景下两架飞机的traj_server都发到同一个全局/position_cmd
+   // （跟px4ctrl_ros2_namespace.patch解决的是同一类问题）

@@ -1,0 +1,49 @@
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -271,17 +271,36 @@
+       have_new_target_ = true;
+ 
+       /*** FSM状态转换 ***/
+-      if (exec_state_ == WAIT_TARGET)
+-        changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
+-      else
+-      {
+-        while (exec_state_ != EXEC_TRAJ)
+-        {
+-          rclcpp::spin_some(node_);
+-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+-        }
++      // docker_sim: 原版这里"else"分支会忙等到exec_state_==EXEC_TRAJ才
++      // 强制切REPLAN_TRAJ，等待过程中反复调用rclcpp::spin_some(node_)——
++      // 但planNextWaypoint()本身是从waypointCallback()（订阅回调）调用的，
++      // 这个callback已经在被main()里的rclcpp::spin(node)这个外层executor
++      // 执行，从回调内部再对同一个node_发起spin_some()是ROS2明确禁止的
++      // 递归spin，会直接抛rclcpp::exceptions等价的std::runtime_error
++      // "Node '...' has already been added to an executor."、
++      // SIGABRT整个进程死掉。
++      // 实测复现：给一个障碍物内的目标点（配合这次的terminal_collision_
++      // check.patch，规划器现在会正确拒绝而不是钻墙），飞机因此卡在
++      // GEN_NEW_TRAJ反复重规划、迟迟到不了EXEC_TRAJ；这时如果紧接着再给
++      // 一个新的合法目标点，waypointCallback()->planNextWaypoint()走进
++      // 这个"else"分支、忙等条件("exec_state_==EXEC_TRAJ")永远等不到，
++      // 每次循环都触发一次递归spin，直接把ego_planner_node打挂。这是
++      // upstream本来就存在的bug，不是这次改碰撞检测引入的——只是这次
++      // 修复让"卡在GEN_NEW_TRAJ"变得远比以前容易触发，原来钻墙那条路会
++      // "成功"绕开这个状态，暴露的概率低很多。
++      // 修法：不忙等、不递归spin，直接按当前状态判断安全的下一步——
++      // EXEC_TRAJ/REPLAN_TRAJ这两个状态意味着已经有一条成功生成过的
++      // 轨迹在飞（REPLAN_TRAJ用到的planFromCurrentTraj()需要
++      // local_data_里有有效轨迹），可以直接触发REPLAN_TRAJ；其余任何
++      // 状态（WAIT_TARGET/GEN_NEW_TRAJ/SEQUENTIAL_START/EMERGENCY_STOP/
++      // INIT）都意味着还没有成功生成过轨迹，只能从头GEN_NEW_TRAJ，不能
++      // 假装有轨迹去"重规划"一个不存在的东西。exec_timer_本来就在
++      // 100Hz跑，不强制等待也会在下一个10ms tick内用刚更新的end_pt_
++      // 重新尝试，不需要在回调里原地等结果。
++      if (exec_state_ == EXEC_TRAJ || exec_state_ == REPLAN_TRAJ)
+         changeFSMExecState(REPLAN_TRAJ, "TRIG");
+-      }
++      else
++        changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
+ 
+       visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
+     }

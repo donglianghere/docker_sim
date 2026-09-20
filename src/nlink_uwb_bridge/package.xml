@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>nlink_uwb_bridge</name>
+  <version>0.0.1</version>
+  <description>
+    真实UWB驱动(nooploop nlink_parser2)到uwb_origin_bridge标准接口的桥接：
+    订阅LinktrackNodeframe2(nlink_linktrack_nodeframe2话题，标签在UWB基站
+    坐标系下解出的绝对位姿)，转发成geometry_msgs/PoseStamped发布到
+    uwb/pose_abs，跟uwb_sim仿真真值替身用的是同一个话题格式，
+    uwb_origin_bridge/origin_setter_node不用区分数据源。
+  </description>
+  <maintainer email="todo@todo.todo">todo</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nlink_parser2</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

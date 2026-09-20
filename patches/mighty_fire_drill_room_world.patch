@@ -1,0 +1,570 @@
+diff --git a/worlds/fire_drill_room.world b/worlds/fire_drill_room.world
+new file mode 100644
+index 0000000..b845baf
+--- /dev/null
++++ b/worlds/fire_drill_room.world
+@@ -0,0 +1,564 @@
++<?xml version="1.0" ?>
++<sdf version='1.7'>
++  <world name='default'>
++    <plugin name='gazebo_ros_state' filename='libgazebo_ros_state.so'>
++      <ros>
++        <namespace>/plug</namespace>
++        <argument>model_states:=model_states_plug</argument>
++        <argument>link_states:=link_states_plug</argument>
++      </ros>
++      <update_rate>100.0</update_rate>
++    </plugin>
++    <light name='sun' type='directional'>
++      <cast_shadows>1</cast_shadows>
++      <pose>0 0 10 0 -0 0</pose>
++      <diffuse>0.8 0.8 0.8 1</diffuse>
++      <specular>0.2 0.2 0.2 1</specular>
++      <attenuation>
++        <range>1000</range>
++        <constant>0.9</constant>
++        <linear>0.01</linear>
++        <quadratic>0.001</quadratic>
++      </attenuation>
++      <direction>-0.5 0.1 -0.9</direction>
++      <spot>
++        <inner_angle>0</inner_angle>
++        <outer_angle>0</outer_angle>
++        <falloff>0</falloff>
++      </spot>
++    </light>
++    <gravity>0 0 -9.8</gravity>
++    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
++    <atmosphere type='adiabatic'/>
++    <!-- 2026-09-15实测：max_step_size改成0.002（不管real_time_update_
++         rate配的是500还是1000，配合island_threads=8也一样）都会让
++         gzserver在NX01刚spawn完、落地瞬间SIGABRT崩溃（exit code -6，
++         不是DDS/网络问题，是真崩溃）——具体是接触力/约束求解在更大
++         步长下数值不稳定，不是"目标倍速"这个节流参数导致的（后者
++         (real_time_update_rate=2000)也复现过同样崩溃，但换回1000后
++         单独把max_step_size改成0.002依然崩，证明真正不兼容的是步长
++         本身）。结论：max_step_size必须保持0.001，不要再试调大这条
++         路——island_threads/关阴影/降低雷达+IMU更新率这几个改动才是
++         真正安全、有实测效果的（RTF从~0.5提升到~0.68），详见DEBUG_
++         JOURNAL.md同日期记录。 -->
++    <physics type='ode'>
++      <max_step_size>0.001</max_step_size>
++      <real_time_factor>1</real_time_factor>
++      <real_time_update_rate>1000</real_time_update_rate>
++      <ode>
++        <solver>
++          <island_threads>8</island_threads>
++          <thread_position_correction>1</thread_position_correction>
++        </solver>
++      </ode>
++    </physics>
++    <scene>
++      <ambient>0.4 0.4 0.4 1</ambient>
++      <background>0.7 0.7 0.7 1</background>
++      <shadows>1</shadows>
++    </scene>
++    <audio>
++      <device>default</device>
++    </audio>
++    <wind/>
++    <spherical_coordinates>
++      <surface_model>EARTH_WGS84</surface_model>
++      <latitude_deg>0</latitude_deg>
++      <longitude_deg>0</longitude_deg>
++      <elevation>0</elevation>
++      <heading_deg>0</heading_deg>
++    </spherical_coordinates>
++
++    <!-- 2026大赛任务场景：20x25米地面，比simple_room(20x20)大，留出足够空间
++         摆3根候选立柱+1根独立障碍物圆柱+起降/物资/着火点标记，同时沿用
++         simple_room验证过的地面/天花板/物理参数结构（不是从零摸索）。
++         道具坐标权威来源见 src/contest_mission/config/
++         fire_drill_room_layout.yaml，这里的<pose>字面量要跟那份yaml手动
++         保持一致。2026-09-09用户重新设计了道具布置坐标，见下面各道具
++         注释里的具体来源。 -->
++    <model name='ground_plane_map'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <plane>
++              <normal>0 0 1</normal>
++              <size>20 25</size>
++            </plane>
++          </geometry>
++          <surface>
++            <contact>
++              <collide_without_contact>0</collide_without_contact>
++              <ode>
++                <kp>1000000.0</kp>
++                <kd>100.0</kd>
++                <max_vel>1.0</max_vel>
++                <min_depth>0.001</min_depth>
++              </ode>
++            </contact>
++            <friction>
++              <ode>
++                <mu>100</mu>
++                <mu2>50</mu2>
++              </ode>
++              <torsional>
++                <ode/>
++              </torsional>
++            </friction>
++            <bounce/>
++          </surface>
++          <max_contacts>10</max_contacts>
++        </collision>
++        <visual name='visual'>
++          <cast_shadows>0</cast_shadows>
++          <geometry>
++            <plane>
++              <normal>0 0 1</normal>
++              <size>20 25</size>
++            </plane>
++          </geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++    </model>
++
++    <!-- 天花板：跟simple_room同样的教训——用有限厚度box（不用<plane>，避免
++         跟地面的<plane>组成"两个无限半空间对撞"，ODE解算容易炸），法线朝下、
++         位于z=6（墙高处），给顶置激光雷达朝上的射线一个真实反射面，避免
++         "打空了"卡在最大量程的假点污染DLIO/SLAM。
++         2026-09-09用户要求"加盖透明房顶，有雷达反射，但是不要视觉效果"——
++         之前用`<transparency>0.9</transparency>`只是接近透明(还留10%
++         可见)，这次改成**整个不要`<visual>`标签**：Gazebo的射线传感器
++         （mid360雷达用的`libros2_livox.so`插件）测的是`<collision>`
++         几何体，不是`<visual>`几何体，两者完全独立——去掉`<visual>`
++         对雷达反射零影响，GUI/RViz里也彻底看不到这个天花板了（不是
++         "看起来很淡"，是真的不渲染）。 -->
++    <model name='ceiling'>
++      <static>1</static>
++      <pose>0 0 6 0 0 0</pose>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry>
++            <box><size>20.3 25.3 0.1</size></box>
++          </geometry>
++          <surface>
++            <contact>
++              <collide_without_contact>0</collide_without_contact>
++              <ode>
++                <kp>1000000.0</kp>
++                <kd>100.0</kd>
++                <max_vel>1.0</max_vel>
++                <min_depth>0.001</min_depth>
++              </ode>
++            </contact>
++            <friction>
++              <ode>
++                <mu>100</mu>
++                <mu2>50</mu2>
++              </ode>
++              <torsional>
++                <ode/>
++              </torsional>
++            </friction>
++            <bounce/>
++          </surface>
++          <max_contacts>10</max_contacts>
++        </collision>
++        <self_collide>0</self_collide>
++        <enable_wind>0</enable_wind>
++        <kinematic>0</kinematic>
++      </link>
++    </model>
++
++    <!-- 四面墙，围成20x25x6米的封闭房间，墙厚0.3米，房间中心在原点。
++         north/south沿x轴（y=±12.5），east/west沿y轴（x=±10）。 -->
++    <model name='room_wall_north'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>20.3 0.3 6</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>20.3 0.3 6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/White</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>0 12.5 3 0 0 0</pose>
++    </model>
++    <model name='room_wall_south'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>20.3 0.3 6</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>20.3 0.3 6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/White</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>0 -12.5 3 0 0 0</pose>
++    </model>
++    <model name='room_wall_east'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>0.3 25.3 6</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>0.3 25.3 6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/White</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>10 0 3 0 0 0</pose>
++    </model>
++    <model name='room_wall_west'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>0.3 25.3 6</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>0.3 25.3 6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/White</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>-10 0 3 0 0 0</pose>
++    </model>
++
++    <!-- 独立障碍物圆柱：直径0.5米(半径0.25米)、高6米，跟下面3根方形立柱
++         区分开（直径/截面尺寸不同、圆形vs方形），用来验证阶段4.1的立柱
++         聚类逻辑能正确把它排除在"候选立柱"之外。2026-09-11用户按等比例
++         布局图重新指定坐标(7,0)（原来是(-2,-6)），pose z=3是6米高圆柱
++         几何中心（底面贴地面z=0），不是用户给的"位置"里那个z=0——z=0在
++         这份布置里统一表示"地面参考点"，具体pose z由物体自身高度换算，
++         跟fire_drill_room_layout.yaml的obstacle_cylinder保持一致换算
++         方式。 -->
++    <model name='obstacle_cylinder'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><cylinder><radius>0.25</radius><length>6</length></cylinder></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><cylinder><radius>0.25</radius><length>6</length></cylinder></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Blue</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>7 0 3 0 0 0</pose>
++    </model>
++
++    <!-- 3根候选立柱，模拟高层建筑（用户编号1#/2#/3#），截面0.6x0.6米，
++         高6米，两两间距均>2米（1#-2#=5.66m，1#-3#=10.20m，2#-3#=8.49m）。
++         2026-09-09用户重新指定坐标：1#(4,4)、2#(0,8)、3#(-5,5)；
++         2026-09-11用户按等比例布局图把3#改成(-6,2)。三根
++         立柱结构完全一样，都不贴tag——AprilTag ID1（"高层着火点标识"）
++         2026-09-09第二版改成独立模型`fire_apriltag_marker`（见下面
++         单独定义），每次重置随机贴到其中一根的某个竖直面上，不再固定
++         贴在某根立柱身上。阶段4.1的立柱检测按点云聚类形状识别所有3根，
++         靠前视相机识别到ID1贴在哪根才能确定"哪根是目标"。**ID1不跟
++         地面火情标识(ID2, 见fire_point_marker)共址**，是两个独立坐标
++         的独立目标，见gen_contest_apriltags.py文件头说明。
++
++         这里3根立柱的<pose>yaw都是静态默认值0度（截面正好跟坐标轴
++         平行）——用户明确要求"立柱的竖直立面不用和坐标轴平行，需要
++         随机旋转"，但SDF是静态文件，没有"每次启动随机"这个机制，跟
++         这份场景其它"随机"需求（撒点位置、贴哪根立柱等）一样的处理
++         方式：默认值是一个确定的具体值，真正的随机旋转/随机选柱在
++         `scenario_reset_node.py`调用reset service时才会发生（3根
++         立柱各自独立给一个0~360度的连续随机yaw，不限于90度倍数；
++         `fire_apriltag_marker`跟着被随机选中的那根立柱的当前朝向
++         一起算出世界坐标，效果上就是"tag随机出现在某根柱子的某个
++         朝向"）。 -->
++    <model name='pillar_1'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>0.6 0.6 6</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>0.6 0.6 6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Orange</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>4 4 3 0 0 0</pose>
++    </model>
++    <!-- 2026-09-09：原来这根立柱叫pillar_2_fire、身上焊死了一块
++         AprilTag贴片（visual_apriltag子视觉体）。用户要求"tag不固定
++         在某根立柱上，随机贴3根立柱中某一根的某一个竖直面"——贴片
++         挪成独立模型`fire_apriltag_marker`（见下面单独定义），这根
++         立柱改名`pillar_2`，结构跟pillar_1/pillar_3完全一样，不再有
++         特殊身份。 -->
++    <model name='pillar_2'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>0.6 0.6 6</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>0.6 0.6 6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Orange</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>0 8 3 0 0 0</pose>
++    </model>
++    <model name='pillar_3'>
++      <static>1</static>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>0.6 0.6 6</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>0.6 0.6 6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Orange</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++      <pose>-5 2 3 0 0 0</pose>
++    </model>
++
++    <!-- 高层着火点标识：独立模型，不再焊死在某根立柱上（2026-09-09
++         从pillar_2_fire身上搬出来，见上面pillar_2那段注释）。
++         `scenario_reset_node`每次重置随机选1根立柱+随机选1个竖直面，
++         把这个模型瞬移到"贴那根立柱那个面"该在的世界坐标——算法是
++         "立柱世界位置 + 沿该面法线方向偏移0.31米(=立柱半宽0.3+0.01
++         避免Z-fighting)"，法线方向=立柱当前随机yaw+所选面的本地朝向。
++         box几何`<size>0.5 0.01 0.5</size>`（厚0.01米的那一维本地对齐
++         法线方向）+ 不叠加多余旋转的写法，跟原来焊在pillar_2_fire上
++         时完全一样（见DEBUG_JOURNAL.md"贴成水平的、还嵌进柱子里"那次
++         bug修复记录，同一个坑不要再踩）。这里的<pose>只是默认初始值，
++         容器启动后5秒scenario_reset_node会自动reset一次，立刻挪到
++         正确位置。
++         2026-09-15：原来用`<static>1</static>`，实测发现gzclient对
++         static模型只在生成那一刻读一次位姿，之后SetEntityState改了
++         真值（/plug/model_states_plug、reset_scenario服务响应都正确）
++         但画面永远停在这里写的初始默认值(0,7.69,3)，不会跟着reset刷新
++         ——不是容器没建干净，是`static`这个SDF属性本身的语义（Gazebo
++         认为static模型位姿生成后不会再变，不会持续同步渲染）。改成
++         `<static>0</static>`+`<kinematic>1</kinematic>`：不参与重力/
++         碰撞动力学（跟static效果一样不会自己掉下去），但走正常的位姿
++         广播管线，gzclient能实时同步。
++         ⚠️踩过一次坑：`<kinematic>`第一次误放在`<model>`下面跟
++         `<static>`当兄弟标签，SDF里`kinematic`其实是**link**级属性，
++         不是model级——放错位置Gazebo不报错但静默不生效，模型变成
++         `is_static:false`+`kinematic:false`的普通刚体，没有
++         `<collision>`也没写`<inertial>`（用了默认mass=1），结果直接在
++         重力下自由落体掉到z=-10万米开外，画面上等于"不见了"。必须放进
++         `<link name='link'>`内部，跟下面`<visual>`同级。 -->
++    <model name='fire_apriltag_marker'>
++      <static>0</static>
++      <pose>0 7.69 3 0 0 0</pose>
++      <link name='link'>
++        <kinematic>1</kinematic>
++        <visual name='visual_apriltag'>
++          <geometry><box><size>0.5 0.01 0.5</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/contest_markers.material</uri>
++              <name>ContestMarkers/AprilTagFirePillar</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++    </model>
++
++    <!-- 地面火情标识：红色底座+朝上AprilTag ID2贴图。2026-09-09用户
++         重新设计：**独立固定坐标，不再跟任何立柱共址**（原设计
++         是贴在火情立柱脚下），下视相机做阶段5弓字形地面搜索时识别。
++         整体贴地放置，不参与碰撞（纯视觉+视觉检测标记，避免干扰飞机
++         降落/悬停在附近时的碰撞检测）。2026-09-11用户按等比例布局图
++         把坐标从(0,0)改成(0,-2)。 -->
++    <model name='fire_point_marker'>
++      <static>1</static>
++      <pose>0 -2 0 0 0 0</pose>
++      <link name='link'>
++        <visual name='visual_base'>
++          <cast_shadows>0</cast_shadows>
++          <pose>0 0 0.01 0 0 0</pose>
++          <geometry><cylinder><radius>0.4</radius><length>0.02</length></cylinder></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Red</name>
++            </script>
++          </material>
++        </visual>
++        <visual name='visual_apriltag'>
++          <cast_shadows>0</cast_shadows>
++          <pose>0 0 0.025 0 0 0</pose>
++          <geometry><box><size>0.5 0.5 0.01</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/contest_markers.material</uri>
++              <name>ContestMarkers/AprilTagGroundFire</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++    </model>
++
++    <!-- 物资点：唯一编码"物资类型"的地面目标(AprilTag ID0)，供阶段6精准
++         降落使用。底座是浅色薄圆盘(贴地，纯视觉)，圆盘上方铺一块朝上
++         的AprilTag贴图片（薄box，法线朝+z，下视相机能直接拍到）。
++         2026-09-09用户重新指定坐标(-6,-3)（原来是(7,-9)）；2026-09-11
++         用户按等比例布局图再改成(-4,-6)。 -->
++    <model name='supply_point_marker'>
++      <static>1</static>
++      <pose>-4 -6 0 0 0 0</pose>
++      <link name='link'>
++        <visual name='visual_base'>
++          <cast_shadows>0</cast_shadows>
++          <pose>0 0 0.01 0 0 0</pose>
++          <geometry><cylinder><radius>0.4</radius><length>0.02</length></cylinder></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Grey</name>
++            </script>
++          </material>
++        </visual>
++        <visual name='visual_apriltag'>
++          <cast_shadows>0</cast_shadows>
++          <pose>0 0 0.025 0 0 0</pose>
++          <geometry><box><size>0.5 0.5 0.01</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/contest_markers.material</uri>
++              <name>ContestMarkers/AprilTagSupply</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++    </model>
++
++    <!-- 黄色仿地模块：3x1x0.5米长方体，2026-09-09用户新增，对应设计
++         方案里"仿地飞行/高度跟随"这项当前完全没有对应能力的任务(赛项
++         任务4明确要求)。z=0是几何中心（不是像其它道具那样按"贴地"
++         换算成height/2）：box从z=-0.25到z=0.25，可见部分是露出地面
++         0.25米高的低矮台面，地面以下的部分跟地面共面/被地面遮挡，
++         视觉上就是一个矮台阶，不是悬空的。带碰撞体（不是纯视觉标记）
++         ——"仿地"场景要真的能影响飞行高度判断才有测试意义。
++         2026-09-11用户按等比例布局图把中心位置从(3,-6,0)改成(7,-6,0)，
++         长边(3米)也从原来平行Y轴改成平行X轴（<size>的x/y互换）。 -->
++    <model name='terrain_module'>
++      <static>1</static>
++      <pose>7 -6 0 0 0 0</pose>
++      <link name='link'>
++        <collision name='collision'>
++          <geometry><box><size>3 1 0.5</size></box></geometry>
++        </collision>
++        <visual name='visual'>
++          <geometry><box><size>3 1 0.5</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Yellow</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++    </model>
++
++    <!-- 起降点标识：50厘米粗体黑色"H"字母+外包围黑色圆图案（经典停机坪
++         标志，见scripts/gen_helipad_marker.py），2026-09-09用户重新
++         设计——**起飞点=降落点合一**（原来是green起飞+yellow降落两个
++         分开的点，现在每架机只有一个起降点），NX01在(1.5,-10)、NX02在
++         (-1.5,-10)，机头方向指向Y轴正方向（这一条影响的是飞机spawn
++         yaw，不是这个标识贴图本身的朝向——H字母上下/左右对称，不需要
++         按机头朝向旋转贴图），见sim-world-entrypoint.sh里fire_drill_room
++         专属的spawn坐标分支。贴图整体是一块0.5x0.5米的薄box，直接铺在
++         地面上（贴图本身自带白底，不需要像AprilTag那样再加一层单独的
++         纯色底座）。 -->
++    <model name='helipad_nx01'>
++      <static>1</static>
++      <!-- yaw=90度(1.5707963弧度)：用户要求把H贴图转90度，直接转整个
++           模型比重新生成贴图省事——贴图是一块正方形box的顶面UV贴图，
++           转模型yaw等效于转贴图本身。 -->
++      <pose>1.5 -10 0.005 0 0 1.5707963</pose>
++      <link name='link'>
++        <visual name='visual'>
++          <cast_shadows>0</cast_shadows>
++          <geometry><box><size>0.5 0.5 0.01</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/contest_markers.material</uri>
++              <name>ContestMarkers/HelipadMarker</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++    </model>
++    <model name='helipad_nx02'>
++      <static>1</static>
++      <pose>-1.5 -10 0.005 0 0 1.5707963</pose>
++      <link name='link'>
++        <visual name='visual'>
++          <cast_shadows>0</cast_shadows>
++          <geometry><box><size>0.5 0.5 0.01</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/contest_markers.material</uri>
++              <name>ContestMarkers/HelipadMarker</name>
++            </script>
++          </material>
++        </visual>
++      </link>
++    </model>
++
++    <gui fullscreen='0'>
++      <camera name='user_camera'>
++        <!-- 俯瞰起降区+房间中部立柱群，位置照抄simple_room camera的取景思路 -->
++        <pose>-2 -18 12 0 0.6 1.4</pose>
++        <view_controller>orbit</view_controller>
++        <projection_type>perspective</projection_type>
++      </camera>
++    </gui>
++
++  </world>
++</sdf>

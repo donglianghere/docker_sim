@@ -1,0 +1,91 @@
+diff --git a/worlds/media/materials/scripts/contest_markers.material b/worlds/media/materials/scripts/contest_markers.material
+new file mode 100644
+index 0000000..459a7ee
+--- /dev/null
++++ b/worlds/media/materials/scripts/contest_markers.material
+@@ -0,0 +1,85 @@
++// 2026大赛任务场景专用材质：物资点/高层着火点/地面火情AprilTag贴图+
++// 起降点H标识。参照上游mighty自带的media/materials/scripts/gazebo.
++// material同款写法（technique/pass/texture_unit三层结构），纹理文件
++// 放在同目录的../textures/下（apriltag_id0.png=物资点ID0、
++// apriltag_id1.png=高层着火点ID1、apriltag_id2.png=地面火情ID2，见
++// scripts/gen_contest_apriltags.py；helipad_marker.png=起降点H标识，
++// 见scripts/gen_helipad_marker.py），Gazebo通过GAZEBO_RESOURCE_PATH
++// 找到这个materials/scripts/所在的media/目录之后，会自动把同级
++// textures/也纳入Ogre的资源搜索路径。
++//
++// 2026-09-09场景重新设计：ID1(高层着火点，贴在2#立柱)和ID2(地面火情)
++// 不再共址——两个独立坐标的独立目标，不是同一物理点的两种接近方式，
++// 见gen_contest_apriltags.py文件头说明。
++
++material ContestMarkers/AprilTagSupply
++{
++  technique
++  {
++    pass
++    {
++      ambient 1.0 1.0 1.0 1.0
++      diffuse 1.0 1.0 1.0 1.0
++      specular 0.1 0.1 0.1 1.0 1.0
++      texture_unit
++      {
++        texture apriltag_id0.png
++        filtering none
++      }
++    }
++  }
++}
++
++material ContestMarkers/AprilTagFirePillar
++{
++  technique
++  {
++    pass
++    {
++      ambient 1.0 1.0 1.0 1.0
++      diffuse 1.0 1.0 1.0 1.0
++      specular 0.1 0.1 0.1 1.0 1.0
++      texture_unit
++      {
++        texture apriltag_id1.png
++        filtering none
++      }
++    }
++  }
++}
++
++material ContestMarkers/AprilTagGroundFire
++{
++  technique
++  {
++    pass
++    {
++      ambient 1.0 1.0 1.0 1.0
++      diffuse 1.0 1.0 1.0 1.0
++      specular 0.1 0.1 0.1 1.0 1.0
++      texture_unit
++      {
++        texture apriltag_id2.png
++        filtering none
++      }
++    }
++  }
++}
++
++material ContestMarkers/HelipadMarker
++{
++  technique
++  {
++    pass
++    {
++      ambient 1.0 1.0 1.0 1.0
++      diffuse 1.0 1.0 1.0 1.0
++      specular 0.1 0.1 0.1 1.0 1.0
++      texture_unit
++      {
++        texture helipad_marker.png
++        filtering none
++      }
++    }
++  }
++}

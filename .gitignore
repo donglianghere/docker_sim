@@ -57,3 +57,10 @@ vendor/rpg_quadrotor_common/
 vendor/rpg_quadrotor_control/
 vendor/rpg_single_board_io/
 vendor/se3_controller/
+
+# 手工快照式备份文件（2026-09-20新增）——改动前顺手`cp xxx xxx.bak-日期-说明`
+# 留的旧版本，git本身就提供历史，不需要再进版本控制；LibreOffice编辑docx时
+# 生成的`.~`锁文件和文件管理器复制出来的`(Copy)`副本同理。
+*.bak-*
+.~*
+*(Copy).*

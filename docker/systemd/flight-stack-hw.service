@@ -1,0 +1,41 @@
+# 真机开机自启模板，2026-08-14新增。
+#
+# ⚠️ 只在裸机联调+单机地面/低空悬停试飞全部验证通过之后再启用（见
+# docker_sim/真机部署操作清单.md"3.7 开机自启"一节）——验证阶段建议保持
+# docker-compose.hw.yml里restart:"no"、手动docker compose up，出问题时
+# 容器不会反复自动重启，排查更清楚。
+#
+# 安装方法（在Jetson上执行，不是这台开发机）：
+#   sudo cp docker/systemd/flight-stack-hw.service /etc/systemd/system/
+#   # 把下面WorkingDirectory改成实际部署路径（这个模板假设rsync到了
+#   # ~/docker_sim，按真实路径改这一行）
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable flight-stack-hw.service
+#   sudo systemctl start flight-stack-hw.service   # 立即测试一次，不用等重启
+#
+# 卸载/临时禁用：
+#   sudo systemctl disable flight-stack-hw.service
+#
+# 这个unit只负责"开机把容器跑起来"，不负责docker compose build（build是
+# 一次性的、耗时可能较长的操作，不应该放进开机流程——镜像应该提前手动build
+# 好，开机只是`up`一个已有镜像，这也是docker-compose.hw.yml里restart策略
+# 之外的另一层"不要在开机这个关键路径上做重活"的考虑）。
+
+[Unit]
+Description=docker_sim flight-stack (real hardware deployment)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# ⚠️ 占位路径，安装前必须改成真实部署路径（这不是systemd模板单元，"%i"
+# 这类实例化写法在这里不生效，改成写死的绝对路径）
+WorkingDirectory=/home/jetson/docker_sim
+ExecStart=/usr/bin/docker compose -f docker-compose.hw.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.hw.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

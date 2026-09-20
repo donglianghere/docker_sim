@@ -1,0 +1,195 @@
+diff --git a/launch/fast_lio_docker_sim.launch.py b/launch/fast_lio_docker_sim.launch.py
+new file mode 100644
+index 0000000..3fac1ba
+--- /dev/null
++++ b/launch/fast_lio_docker_sim.launch.py
+@@ -0,0 +1,189 @@
++"""docker_sim集成专用launch文件：FAST-LIO2（`hku-mars/FAST_LIO`官方ROS2
++分支）作为可选SLAM后端接入本项目，跟DLIO/point_lio同一个模式——双机
++命名空间隔离 + 输出接口对齐到`dlio/odom_node/odom`/`dlio/odom_node/
++pointcloud/deskewed`这两个固定话题名，mighty/ego_planner_bridge/
++gt_odom_bridge/ros2_px4_stack这些下游消费者不用感知SLAM_BACKEND具体是
++哪一个，不用改一行代码。
++
++跟原版`launch/mapping.launch.py`的关系：不修改原文件（保持官方原始launch
++文件可用、便于以后对照上游更新），这是一份新增的、专属本项目集成场景的
++独立launch文件。
++
++命名空间/frame_id：`fast_lio_namespace.patch`（改`src/laserMapping.cpp`）
++新增了两个declare_parameter——`odom_header_frame_id`（默认`camera_init`）、
++`odom_child_frame_id`（默认`body`）——原版这两个frame_id是硬编码在6处
++publish_*函数里的字符串字面量，双实例同跑会互相覆盖发布同名TF。这里
++传参覆盖成`{ns}/odom`/`{ns}/base_link`，约定跟DLIO的`dlio_namespace.patch`
++完全一致。
++
++话题名：FAST-LIO2内部`create_publisher`/`create_subscription`用的话题名
++一部分是绝对路径（`/Odometry`、`/cloud_registered`等，硬编码在源码里，
++未做parameterize），一部分是通过`common.lid_topic`/`common.imu_topic`
++参数传入、天然是相对名。ROS2的remapping机制对绝对话题名同样有效（这是
++本项目在point_lio集成时已经验证过的做法，不需要碰源码）——下面
++remappings把这几个绝对话题名重映射成相对名，配合Node的namespace参数，
++自动解析成`/{ns}/...`，避免双实例互相覆盖。
++
++`lid_topic`默认`mid360`——对应Gazebo仿真插件（`livox_points_plugin.cpp`）
++本来就在并行发布的标准`livox_ros_driver2::msg::CustomMsg`话题（
++`custom_pub`，不带后缀，区别于DLIO专用定制格式的`_PointCloud2`那一路），
++FAST-LIO2的`preprocess.cpp`对Livox(AVIA)类型的雷达原生支持这个消息类型，
++不需要像最初评估point_lio_ros2那样另外开发解析代码。
++"""
++import os
++
++from ament_index_python.packages import get_package_share_directory
++from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument
++from launch.substitutions import LaunchConfiguration, EnvironmentVariable, PythonExpression
++from launch_ros.actions import Node
++
++
++def generate_launch_description():
++    package_path = get_package_share_directory('fast_lio')
++    default_config_path = os.path.join(package_path, 'config')
++
++    namespace = LaunchConfiguration('namespace')
++    lid_topic = LaunchConfiguration('lid_topic')
++
++    declare_namespace_arg = DeclareLaunchArgument(
++        'namespace',
++        default_value=EnvironmentVariable('NAMESPACE', default_value='NX01'),
++        description='NX01/NX02——必须跟MAVROS(namespace=<ns>/mavros)、mighty、DLIO用同一个值',
++    )
++    declare_lid_topic_arg = DeclareLaunchArgument(
++        'lid_topic', default_value='mid360',
++        description="FAST-LIO2订阅的Livox CustomMsg话题名（相对名，会按namespace自动解析）。"
++                     "仿真默认'mid360'，对应Gazebo插件custom_pub发布的标准CustomMsg。",
++    )
++
++    def _ns_frame(name):
++        # 跟dlio_namespace.patch/point_lio_docker_sim_launch.patch的_ns_frame写法
++        # 保持一致：namespace为空时退化成裸帧名（非多机场景兼容），否则加前缀。
++        return PythonExpression(
++            ["'", namespace, "/", name, "' if '", namespace, "' else '", name, "'"]
++        )
++    odom_frame = _ns_frame('odom')
++    baselink_frame = _ns_frame('base_link')
++
++    fast_lio_node = Node(
++        package='fast_lio',
++        executable='fastlio_mapping',
++        name='fast_lio',
++        namespace=namespace,
++        output='screen',
++        parameters=[
++            os.path.join(default_config_path, 'mid360.yaml'),
++            {
++                'use_sim_time': False,  # 本项目Gazebo仿真里传感器时间戳走真实
++                                         # 挂钟(见DLIO/livox驱动那次sim
++                                         # time误判Hesai/Livox格式的坑，
++                                         # 详见DEBUG_JOURNAL.md)，FAST-LIO2
++                                         # 节点自身的时钟源保持一致，不用
++                                         # Gazebo /clock。
++                'common.lid_topic': lid_topic,
++                'common.imu_topic': 'mid360/imu',  # 雷达自带IMU，跟DLIO/
++                                                    # point_lio共用同一路，
++                                                    # 不是飞控IMU。
++                'odom_header_frame_id': odom_frame,
++                'odom_child_frame_id': baselink_frame,
++                # 2026-09-07新增三项调参覆盖——针对这套仿真的点云特征
++                # （Gazebo livox_points_plugin.cpp实测确认每帧固定1000点，
++                # 真实Mid-360单帧通常两三万点，密度只有真实硬件的1/20~
++                # 1/30）、房间尺度（simple_room 20x20x5米）核实过的，跟
++                # point_lio已经验证能用的设置对齐：
++                'point_filter_num': 1,  # 上游默认3——按到达顺序每3个点
++                    # 留1个，是给真实Mid-360那种单帧两三万点密度设计的，
++                    # 丢2/3还剩大几千点；这套仿真单帧本来就只有1000点，
++                    # 再丢2/3只剩300多个参与配准，点到面残差鲁棒性明显
++                    # 下降。改成1（一个不丢）。注意：这是明确针对仿真
++                    # 稀疏点云的调整，以后接真实Mid-360硬件时——真机单帧
++                    # 点数密度是这套仿真的20~30倍——大概率需要改回3甚至
++                    # 更大，不能直接把这份sim专用launch文件的参数照搬到
++                    # hw版launch文件。
++                'mapping.extrinsic_est_en': False,  # 上游默认true（在线
++                    # 估计LiDAR-IMU外参，declare_parameter<bool>("mapping.
++                    # extrinsic_est_en", true)，注意这个参数名带"mapping."
++                    # 前缀，跟filter_size_surf/map、point_filter_num这三个
++                    # 裸参数名不一样——laserMapping.cpp里逐个核实过，不能
++                    # 直接照抄yaml文件的缩进猜前缀）。point_lio的mid360.yaml
++                    # 对同一个外参默认值显式设成false，注释原话"for
++                    # aggressive motion, set this variable false"——正常
++                    # 平稳飞行时角运动激励不够，在线估计这几个自由度容易
++                    # 收敛不稳、引入额外抖动，除非专门做外参标定实验，
++                    # 否则应该关掉。跟point_lio已验证的设置对齐，外参用
++                    # 固定标定值（下面mid360.yaml里的extrinsic_T/R默认值）。
++                'filter_size_surf': 0.3,  # 上游默认0.5，declare_parameter
++                    # <double>("filter_size_surf", 0.5)是裸参数名，不带
++                    # "mapping."前缀——体素降采样边长，对本来就稀疏（大几百
++                    # 到1000点/帧）的点云而言0.5米偏粗，容易把仅有的这些点
++                    # 过度合并、丢失房间内小障碍物/墙面细节；调小到0.3做
++                    # 一次折中，具体数值没有精确推导依据，需要实测验证效果。
++                'filter_size_map': 0.3,  # 同上，地图侧体素降采样边长
++                    # （同样是裸参数名）跟着一起改，保持两者一致（上游
++                    # 默认两者也是同一个值0.5）。
++                'mapping.det_range': 30.0,  # 上游默认100.0（yaml文件里的
++                    # 值，代码内建默认300.0），带"mapping."前缀——这套仿真
++                    # mid360.xacro的laser_max_range只有20米，100米已经是
++                    # 实际量程的5倍。真正的问题不是"量程标错了"，是这个值
++                    # 直接决定laserMapping.cpp里lasermap_fov_segment()那套
++                    # 本地地图box清理逻辑要多远才触发——见下面
++                    # cube_side_length的说明，两个参数是一对，必须一起改。
++                'cube_side_length': 40.0,  # 上游默认200.0（代码内建）/
++                    # yaml文件写的1000.0，裸参数名。2026-09-07第一次实测
++                    # 确认的根因：lasermap_fov_segment()只有当飞机离地图
++                    # 盒子边缘小于1.5×det_range时才会清理旧点（
++                    # ikdtree.Delete_Point_Boxes），cube_side_length=1000+
++                    # det_range=100时这个1.5×100=150米的触发距离，在20米
++                    # 见方的房间里飞机不管怎么飞都够不到——这套仿真从
++                    # 容器启动起ikd-Tree里的点只增不减，几分钟后树体积
++                    # 膨胀到需要靠自身周期性重新平衡机制来维持，直接实测
++                    # 表现是repub_odom.py每隔几分钟报一次"上游odom/pose源
++                    # 已经0.5秒没有新数据了"（fast_lio处理卡顿导致的短暂
++                    # 停更），这个空档期内EKF2会短暂脱离vision修正、纯IMU
++                    # 空转，是"UAV坐标偶发飘一下又自己拉回来"这个现象的
++                    # 直接推手，长时间飞行不处理只会越卡越频繁。第一次改成
++                    # det_range=30(略大于20米实际量程留余量)+
++                    # cube_side_length=100(是1.5×30=45的2倍多)——2026-09-07
++                    # 用重新build过的镜像实测：QoS/No Effective Points两个
++                    # 致命问题确实消失了，但repub_odom.py的>0.5秒空档反而
++                    # 变得更密集（20秒内复现2次，比改之前"几分钟一次"更
++                    # 频繁）。查过host/容器loadavg（32核机器实测只有1.94，
++                    # fastlio_mapping自己开了17个线程，远没把CPU占满），
++                    # 排除了"CPU资源不够、抢不到核"这个解释——说明100这个
++                    # 值本身可能还不够小，或者卡顿的真正瓶颈不(只)是
++                    # ikd-Tree体积本身。这次改成40（比20米见方房间的对角线
++                    # 略大，比100小很多，验证"清理频率更高能否进一步缓解
++                    # 卡顿"这个假设，效果待重新build后实测，不确定比100
++                    # 更好还是更差）。注意cube_side_length=40 <
++                    # 2×1.5×det_range=90，lasermap_fov_segment()里
++                    # `mov_dist`那行公式`(cube_len-2×MOV_THRESHOLD×
++                    # DET_RANGE)×0.5×0.9`会算出负数，退化成用公式里
++                    # max()的第二项`DET_RANGE×(MOV_THRESHOLD-1)`=15——这是
++                    # 上游作者自己写的兜底分支，不是bug，只是意味着地图
++                    # 盒子相对det_range来说偏小、清理会触发得更频繁。
++                    # DET_RANGE只在这段本地地图管理逻辑里用到
++                    # （laserMapping.cpp里grep确认，不参与实际点云配准的
++                    # 距离过滤），改小不会丢弃真实点云数据。
++            },
++        ],
++        remappings=[
++            # 跟DLIO/point_lio统一的下游接口契约——mighty/ego_planner_bridge/
++            # gt_odom_bridge/ros2_px4_stack不用改代码就能切换SLAM_BACKEND。
++            ('/Odometry', 'dlio/odom_node/odom'),
++            ('/cloud_registered', 'dlio/odom_node/pointcloud/deskewed'),
++            # 以下几路本项目目前没有下游消费者，只是重映射成相对名避免
++            # 双实例同跑时绝对路径互相覆盖（不remap的话/cloud_effected等
++            # 绝对名不受namespace影响，两架飞机会撞同一个话题名）。
++            ('/cloud_registered_body', 'fast_lio/cloud_registered_body'),
++            ('/cloud_effected', 'fast_lio/cloud_effected'),
++            ('/Laser_map', 'fast_lio/map'),
++            ('/path', 'fast_lio/path'),
++        ],
++    )
++
++    return LaunchDescription([
++        declare_namespace_arg,
++        declare_lid_topic_arg,
++        fast_lio_node,
++    ])

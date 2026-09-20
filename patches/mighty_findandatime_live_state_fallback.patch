@@ -1,0 +1,50 @@
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 49a9fc4..e77e2cf 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -513,9 +513,42 @@ bool MIGHTY::findAandAtime(state& A, double& A_time, double current_time,
+   }
+
+   // Check if A is within the map (especially for z)
+-  if (A.pos[2] < par_.z_min || A.pos[2] > par_.z_max ||
+-      A.pos[0] < par_.x_min || A.pos[0] > par_.x_max ||
+-      A.pos[1] < par_.y_min || A.pos[1] > par_.y_max) {
++  auto isOutOfMap = [&](const state& s) {
++    return s.pos[2] < par_.z_min || s.pos[2] > par_.z_max || s.pos[0] < par_.x_min ||
++           s.pos[0] > par_.x_max || s.pos[1] < par_.y_min || s.pos[1] > par_.y_max;
++  };
++  if (isOutOfMap(A)) {
++    // Live-state fallback: A above came from plan_, which is only ever refreshed by a
++    // *successful* replan (appendToPlan()) -- and a successful replan is exactly what this
++    // out-of-map check is about to block. Without this fallback that's a permanent deadlock:
++    // plan_ keeps handing back the same invalid point forever, so the drone can never produce
++    // a fresh trajectory again, even once it's physically moved somewhere the check would pass.
++    // Confirmed live: plan_'s very first entry is seeded once, from whatever state the drone
++    // was in the moment it received its first-ever term_goal (updateState(), see
++    // state_initialized_/terminal_goal_initialized_) -- if that first goal arrives before the
++    // vehicle has actually cleared z_min (e.g. still mid-takeoff), this same stale
++    // below-z_min point gets reused by every replan attempt from then on, none of which can
++    // ever succeed to give plan_ a fresh entry. The divergence-based resync above already
++    // covers the *tracking-broke-down* case (A far from where the drone actually is); this
++    // covers the complementary case where A is invalid but not yet far enough from actual_now
++    // to trip that check. Only retry with live state if A didn't already come from live state
++    // (par_.use_state_update == false already means A == getState()); if the live state is
++    // *also* out of map, the drone genuinely hasn't reached a valid region yet and the
++    // original failure stands.
++    if (par_.use_state_update) {
++      state actual_now;
++      getState(actual_now);
++      if (!isOutOfMap(actual_now)) {
++        printf("[MIGHTY] findAandAtime: A (%f, %f, %f) from plan_ is out of the map, but the "
++               "drone's actual state (%f, %f, %f) is valid -- resyncing A to it instead of "
++               "failing, so plan_ can recover on the next successful replan.\n",
++               A.pos[0], A.pos[1], A.pos[2], actual_now.pos[0], actual_now.pos[1],
++               actual_now.pos[2]);
++        A = actual_now;
++        A_time = current_time;
++        return true;
++      }
++    }
+     printf("A (%f, %f, %f) is out of the map\n", A.pos[0], A.pos[1], A.pos[2]);
+     return false;
+   }

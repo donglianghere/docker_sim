@@ -1,0 +1,112 @@
+diff --git a/ros2_px4_stack/transforms/repub_odom.py b/ros2_px4_stack/transforms/repub_odom.py
+index 9ca14bf..f2849bc 100644
+--- a/ros2_px4_stack/transforms/repub_odom.py
++++ b/ros2_px4_stack/transforms/repub_odom.py
+@@ -59,13 +59,28 @@ class OdomRepublisher(Node):
+         self.stale_timeout_sec = self.declare_parameter("~stale_timeout_sec", 0.5).value
+         self._was_stale = False
+ 
+-        # Publish pose and twist with covariance at the specified rate in a separate thread
+-        self._pub_hz = pub_hz
++        # 2026-08-10改动：原来这里是"定时器按pub_hz(100Hz)固定重发_last_*_msg"的
++        # 轮询模式——DLIO实测发布频率在这套仿真里~90-94Hz（callback group调度
++        # 争抢导致，真机上更可能更低，取决于点云配准的实际耗时），100Hz轮询会
++        # 在DLIO两帧真实更新之间至少重发一次内容和header.stamp完全相同的旧消息。
++        # 这不是简单的"没危害的重复"：(1)相同header.stamp的消息在真实MAVLink
++        # 链路（真机上是带宽有限的串口/数传，不是SITL用的本地UDP）上纯粹是白白
++        # 占带宽；(2)更重要的是它会制造"虚假的100Hz心跳"——`ros2 topic hz`或者
++        # 任何监控工具看这个话题会显示健康的100Hz，掩盖了"定位实际只有90多Hz
++        # 甚至更低"这个真实状态，跟上面stale_timeout_sec看门狗要解决的问题
++        # 是同一类风险的两个层次：那个看门狗只兜底"完全断流"这种极端情况，
++        # 兜不住"没断流但已经明显退化、还在用重复数据硬撑高频心跳"这种中间态。
++        # 改成事件驱动：不再用独立线程/定时器重发缓存消息，直接在收到新数据的
++        # 回调里当场发布——发布出去的频率因此如实反映上游DLIO/mocap的真实
++        # 更新频率，不会有任何两条内容/时间戳相同的消息，真机上也不会浪费
++        # 链路带宽。原来的_publish_loop线程降级成纯粹的"看门狗"，只负责按
++        # watchdog_hz轮询判断是否已经陈旧、打日志，不再经手任何实际发布。
++        self.watchdog_hz = pub_hz
+         self._pose_pub = self.create_publisher(PoseWithCovarianceStamped, self.pose_pub_topic_name, 10)
+         self._twist_pub = self.create_publisher(TwistWithCovarianceStamped, self.twist_pub_topic_name, 10)
+-        self._pub_thread = Thread(target=self._publish_loop, args=())
+-        self._pub_thread.daemon = True
+-        self._pub_thread.start()
++        self._watchdog_thread = Thread(target=self._staleness_watchdog_loop, args=())
++        self._watchdog_thread.daemon = True
++        self._watchdog_thread.start()
+ 
+     def _mocap_pose_cb(self, msg):
+         pose_msg = PoseWithCovarianceStamped()
+@@ -83,6 +98,10 @@ class OdomRepublisher(Node):
+         pose_msg.pose.covariance = pose_cov
+         self._last_pose_msg = pose_msg
+         self._last_recv_time = time.monotonic()
++        # mocap模式下pose/twist是两个独立话题、各自独立频率，只发这次真正
++        # 更新的那一路，不捎带另一路的旧缓存——否则又会制造"twist到了，
++        # 把上一帧pose也重复发一遍"这类新的重复。
++        self._pose_pub.publish(pose_msg)
+ 
+     def _mocap_twist_cb(self, msg):
+         twist_msg = TwistWithCovarianceStamped()
+@@ -100,6 +119,7 @@ class OdomRepublisher(Node):
+         twist_msg.twist.covariance = twist_cov
+         self._last_twist_msg = twist_msg
+         self._last_recv_time = time.monotonic()
++        self._twist_pub.publish(twist_msg)
+ 
+     def _livox_odom_cb(self, msg):
+         # Forward raw odom to PX4 (in camera_init frame).
+@@ -138,31 +158,34 @@ class OdomRepublisher(Node):
+         twist_msg.twist.covariance = twist_cov
+         self._last_twist_msg = twist_msg
+         self._last_recv_time = time.monotonic()
+-
+-    def _publish_loop(self):
+-        rate = self.create_rate(self._pub_hz)
++        # livox模式下pose/twist同源自同一帧DLIO odom消息，一起发不会造成
++        # 重复（跟mocap模式两个独立话题、独立频率的情况不同）。
++        self._pose_pub.publish(pose_msg)
++        self._twist_pub.publish(twist_msg)
++
++    def _staleness_watchdog_loop(self):
++        # 只负责监控、打日志，不再经手任何实际发布——发布已经改成上面三个
++        # 回调各自事件驱动直接发。这个线程存在的唯一意义：上游彻底断流超过
++        # stale_timeout_sec时打一条ERROR日志（`_was_stale`从False翻到True
++        # 那一刻），方便运维/监控工具能看到"vision数据源已经僵住"这个状态——
++        # PX4自己的vision timeout保护此时已经在正常工作（事件驱动发布下，
++        # 断流自然就是"没有新消息"，不需要这里再做任何拦截动作），这里的
++        # 日志纯粹是给人看的诊断信息，不是安全机制本身。
++        rate = self.create_rate(self.watchdog_hz)
+         while rclpy.ok():
+             is_stale = (
+                 self._last_recv_time is None
+                 or (time.monotonic() - self._last_recv_time) > self.stale_timeout_sec
+             )
+-            if is_stale:
+-                # 上游（DLIO/mocap）超过stale_timeout_sec没给新数据了——停止转发，
+-                # 而不是继续按pub_hz重发"最后一帧"旧数据。让PX4自己的vision
+-                # timeout保护能正常触发，而不是被这种假心跳绕过去。
+-                if not self._was_stale:
+-                    self.get_logger().error(
+-                        f"上游odom/pose源已经{self.stale_timeout_sec}秒没有新数据了，"
+-                        f"停止向{self.pose_pub_topic_name}转发陈旧数据")
+-                    self._was_stale = True
+-            else:
+-                if self._was_stale:
+-                    self.get_logger().info("上游odom/pose源恢复了，继续转发")
+-                    self._was_stale = False
+-                if self._last_pose_msg:
+-                    self._pose_pub.publish(self._last_pose_msg)
+-                if self._last_twist_msg:
+-                    self._twist_pub.publish(self._last_twist_msg)
++            if is_stale and not self._was_stale:
++                self.get_logger().error(
++                    f"上游odom/pose源已经{self.stale_timeout_sec}秒没有新数据了，"
++                    f"{self.pose_pub_topic_name}不会再收到新数据可转发"
++                    f"（事件驱动发布下不会有陈旧数据被重复发出）")
++                self._was_stale = True
++            elif not is_stale and self._was_stale:
++                self.get_logger().info("上游odom/pose源恢复了")
++                self._was_stale = False
+             rate.sleep()
+ 
+ def main():

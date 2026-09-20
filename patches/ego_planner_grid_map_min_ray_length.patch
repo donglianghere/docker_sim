@@ -1,0 +1,67 @@
+diff --git a/src/planner/plan_env/src/grid_map.cpp b/src/planner/plan_env/src/grid_map.cpp
+index 6576dff..9caf23d 100755
+--- a/src/planner/plan_env/src/grid_map.cpp
++++ b/src/planner/plan_env/src/grid_map.cpp
+@@ -33,7 +33,11 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
+   node_->declare_parameter("grid_map/p_min", 0.12);
+   node_->declare_parameter("grid_map/p_max", 0.97);
+   node_->declare_parameter("grid_map/p_occ", 0.80);
+-  node_->declare_parameter("grid_map/min_ray_length", -0.1);
++  // docker_sim 2026-08-11: 默认值原来是-0.1（任何真实测距都不可能小于它，
++  // 等于形同虚设），改成机身中心到桨叶尖端的物理半径(0.4m，见launch文件
++  // ego_planner_docker_sim.launch.py里min_ray_length的推导注释)——这个
++  // 参数正常由launch文件传入覆盖，这里的默认值只在没有launch覆盖时兜底。
++  node_->declare_parameter("grid_map/min_ray_length", 0.4);
+   node_->declare_parameter("grid_map/max_ray_length", -0.1);
+   node_->declare_parameter("grid_map/visualization_truncate_height", -0.1);
+   node_->declare_parameter("grid_map/virtual_ceil_height", -0.1);
+@@ -421,6 +425,18 @@ void GridMap::raycastProcess()
+   {
+     pt_w = md_.proj_points_[i];
+ 
++    // docker_sim 2026-08-11: 命中点本身在下面(!isInMap分支之外)无条件按
++    // setCacheOccupancy(pt_w, 1)标占据，不受下面raycast循环里那个
++    // min_ray_length判断影响(那个判断只管中间穿越的空闲格子，不管命中点
++    // 本身)——这个函数(raycastProcess/depthPoseCallback深度相机路径)这套
++    // 集成实际没在用(use_depth_filter=false)，真正生效的自扫描过滤在
++    // cloudCallback()里，这里加上是为了以后万一切回深度相机路径时同样有效，
++    // 不是这次bug的实际修复点。
++    if ((pt_w - md_.camera_pos_).norm() < mp_.min_ray_length_)
++    {
++      continue;
++    }
++
+     // set flag for projected point
+ 
+     if (!isInMap(pt_w))
+@@ -478,7 +494,10 @@ void GridMap::raycastProcess()
+       Eigen::Vector3d tmp = (ray_pt + half) * mp_.resolution_;
+       length = (tmp - md_.camera_pos_).norm();
+ 
+-      // if (length < mp_.min_ray_length_) break;
++      // docker_sim 2026-08-11: 取消注释，配合上面的continue双重保险
++      // （这个while循环管的是命中点之前中间穿越格子的free标记，跟命中点
++      // 本身是否被跳过是两回事，两处都要处理，见上面注释）。
++      if (length < mp_.min_ray_length_) break;
+ 
+       vox_idx = setCacheOccupancy(tmp, 0);
+ 
+@@ -866,6 +885,18 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstPtr &img)
+     Eigen::Vector3d devi = p3d - md_.camera_pos_;
+     Eigen::Vector3i inf_pt;
+ 
++    // docker_sim 2026-08-11: 自扫描伪点过滤——这套集成实际走的是这个函数
++    // (grid_map/cloud remap到dlio/odom_node/pointcloud/deskewed)，不是
++    // raycastProcess()/depthPoseCallback那条深度相机路径(use_depth_filter=
++    // false，那条路径没在跑)。第一版修复只改了raycastProcess()，实测对
++    // 这套集成完全没用——cloudCallback原来对每个点毫无距离过滤，直接
++    // 膨胀写进occupancy_buffer_inflate_，mid360扫到飞机自己机身/桨叶的
++    // 近距离伪点(实测2500/20000点、最近4厘米)因此全部被当障碍物，飞机
++    // 自己所在位置被判定"起点在障碍物里"。用跟raycastProcess同一个
++    // min_ray_length参数在这里也挡一道。
++    if (devi.norm() < mp_.min_ray_length_)
++      continue;
++
+     if (fabs(devi(0)) < mp_.local_update_range_(0) && fabs(devi(1)) < mp_.local_update_range_(1) &&
+         fabs(devi(2)) < mp_.local_update_range_(2))
+     {

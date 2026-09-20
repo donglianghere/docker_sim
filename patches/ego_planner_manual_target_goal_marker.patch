@@ -1,0 +1,19 @@
+diff --git a/src/planner/plan_manage/src/ego_replan_fsm.cpp b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+index 78d5eee..4ec809a 100755
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -243,6 +243,14 @@ namespace ego_planner
+ 
+     Eigen::Vector3d end_wp(msg->pose.position.x, msg->pose.position.y, 1.0);
+ 
++    // docker_sim: upstream demo只在PRESET_TARGET模式的readGivenWps()里调用
++    // displayGoalPoint()，MANUAL_TARGET模式（这套集成fsm/flight_type=1用的
++    // 就是这个）从waypointCallback进来的目标点从来没有对应的可视化——2026-
++    // 08-08用户反馈"目标点没有显著标出来"，读代码确认不是"marker太小/太暗"
++    // 这种视觉问题，是这条路径根本没有发布goal_point这个话题。缩放/颜色
++    // 照抄readGivenWps()那边的调用参数。
++    visualization_->displayGoalPoint(end_wp, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
++
+     planNextWaypoint(end_wp);
+   }
+ 

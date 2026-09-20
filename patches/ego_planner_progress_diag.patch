@@ -1,0 +1,24 @@
+diff --git a/src/planner/plan_manage/src/ego_replan_fsm.cpp b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+index 0000000..0000000 100755
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -916,6 +916,19 @@
+     start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
+     start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
+ 
++    // docker_sim 2026-09-16临时诊断（不改行为，只加日志）：查"为什么几十次
++    // 成功重规划没能让飞机真正往前推进"——对比"虚拟起点start_pt_"(按轨迹
++    // 时间推算，可能跟真实位置有落差)、真实里程计odom_pos_、上一轮的
++    // local_target_pt_（这次getLocalTarget()还没跑，打印的是上一轮的值，
++    // 用来看它是不是在往前挪）、以及t_cur/duration_这对判断"轨迹是否已经
++    // '跑完'"的值。
++    RCLCPP_WARN(rclcpp::get_logger("ego_planner_diag2"),
++                "[diag2] start_pt_=(%.2f,%.2f,%.2f) odom_pos_=(%.2f,%.2f,%.2f) prev_local_target_pt_=(%.2f,%.2f,%.2f) t_cur=%f duration_=%f",
++                start_pt_(0), start_pt_(1), start_pt_(2),
++                odom_pos_(0), odom_pos_(1), odom_pos_(2),
++                local_target_pt_(0), local_target_pt_(1), local_target_pt_(2),
++                t_cur, info->duration_);
++
+     bool success = callReboundReplan(false, false);
+ 
+     if (!success)

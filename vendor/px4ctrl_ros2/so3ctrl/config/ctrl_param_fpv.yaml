@@ -1,0 +1,93 @@
+#########################################################################
+# ⭐⭐⭐  Set parameters carefully for satisfied performance!   ⭐⭐⭐ #
+#########################################################################
+#
+# 从px4ctrl的config/ctrl_param_fpv.yaml搬过来，唯一改动是gain下新增
+# Ki0-2/Kib0-2六个字段（SO3Control的位置积分增益，默认0.0=禁用，需要时
+# 手动调大，参考kr_mav_control原版kr_mav_launch/config/qudarotor_gains.yaml
+# 同样是0.0起步，没有现成经验值可抄）。max_angle在px4ctrl原版里声明了但
+# 从未被控制律真正使用过，这一版接上了SO3Control的最大倾角限幅，调这个
+# 值现在是有实际效果的。
+#
+# ROS1原版用"/"分层参数名(如gain/Kp0)，ROS2标准做法是yaml里嵌套map，
+# 加载时被自动拍平成"."分层的参数名(如gain.Kp0)，跟
+# PX4CtrlParam.cpp里read_essential_param()用的名字一一对应。
+# 用通配符"/**"而不是写死节点名"/so3ctrl"，这样不管以后用什么node名/
+# namespace启动都能吃到这份参数，不用跟着改这个文件。
+
+/**:
+  ros__parameters:
+    mass: 1.2 # kg
+    gra: 9.81
+    pose_solver: 1     # 0:From ZhepeiWang (drag & less singular) 1:From ZhepeiWang, 2:From rotor-drag
+    ctrl_freq_max: 100.0
+    use_bodyrate_ctrl: false
+    max_manual_vel: 1.0
+    max_angle: 30.0  # Attitude angle limit in degree. 由SO3Control::setMaxTiltAngle()真正生效(限幅)，不再是px4ctrl原版那个声明了但没人用的死参数。
+    low_voltage: 13.2 # 4S battery
+    yaw_lock_enabled: false # 2026-09-07新增：开启后CMD_CTRL态忽略规划器算出来的
+                             # 行进方向朝向，锁定在起飞瞬间的实际朝向。启动时静态
+                             # 参数，PX4CTRL_YAW_LOCK_ENABLED环境变量覆盖，见
+                             # docker_sim/DEBUG_JOURNAL.md 2026-09-07相关记录。
+
+    rc_reverse: # *
+      roll: false
+      pitch: false
+      yaw: false
+      throttle: false
+
+    auto_takeoff_land:
+      enable: true
+      enable_auto_arm: true
+      no_RC: false
+      takeoff_height: 1.0 # m
+      takeoff_land_speed: 0.3 # m/s
+
+    thrust_model: # 这份配置本身没有被so3ctrl使用(推力换算走的是thr2acc_在线自标定，见controller.cpp)，保留只是跟px4ctrl保持字段对齐、declare_parameter不缺参数报错。
+      print_value: false # display the value of "thr_scale_compensate" or "hover_percentage" during thrust model estimating.
+      accurate_thrust_model: false
+      K1: 0.7583
+      K2: 1.6942
+      K3: 0.6786
+      hover_percentage: 0.30  # thr2acc_在线自标定的初值：重力/这个百分比，见controller.cpp::resetThrustMapping() # *
+
+    gain:
+      # 位置环P+D+积分(世界系/机体系两路)，喂给kr_mav_control的SO3Control。
+      # Kp0-2/Kv0-2是P/D，含义跟px4ctrl原版一致；Ki0-2/Kib0-2是这一版新增的
+      # 积分项，默认0.0(禁用)。
+      Kp0: 1.5
+      Kp1: 1.5
+      Kp2: 1.5
+      Kv0: 1.5
+      Kv1: 1.5
+      Kv2: 1.5
+      Ki0: 0.0
+      Ki1: 0.0
+      Ki2: 0.0
+      Kib0: 0.0
+      Kib1: 0.0
+      Kib2: 0.0
+      # ↓↓↓ 声明了但so3ctrl这版没有实际使用(保留跟px4ctrl字段对齐) --
+      Kvi0: 0.0
+      Kvi1: 0.0
+      Kvi2: 0.0
+      Kvd0: 0.0
+      Kvd1: 0.0
+      Kvd2: 0.0
+      # ↓↓↓ Only used in rate control mode(use_bodyrate_ctrl=true时)，这版没启用bodyrate模式，同样未使用。
+      KAngR: 20.0
+      KAngP: 20.0
+      KAngY: 20.0
+
+    rotor_drag:
+      x: 0.0  # The reduced acceleration on each axis caused by rotor drag. Unit:(m*s^-2)/(m*s^-1).
+      y: 0.0  # Same as above
+      z: 0.0  # Same as above
+      k_thrust_horz: 0.0 # Set to 0 recommended... --
+
+    msg_timeout:
+      odom: 0.5
+      rc: 0.5
+      cmd: 0.5
+      imu: 0.5
+      bat: 0.5

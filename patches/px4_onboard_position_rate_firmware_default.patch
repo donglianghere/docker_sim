@@ -1,0 +1,33 @@
+diff --git a/src/modules/mavlink/mavlink_main.cpp b/src/modules/mavlink/mavlink_main.cpp
+index 1337067ab0..386db12e4b 100644
+--- a/src/modules/mavlink/mavlink_main.cpp
++++ b/src/modules/mavlink/mavlink_main.cpp
+@@ -1494,7 +1494,18 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
+ 		// >=100Hz，50Hz这个原始默认值天然就不够，跟docker_sim这套仿真的
+ 		// 负载/DDS实现无关。
+ 		configure_stream_local("HIGHRES_IMU", 200.0f);
+-		configure_stream_local("LOCAL_POSITION_NED", 30.0f);
++		// docker_sim 2026-08-12: 原来30Hz——跟上面HIGHRES_IMU/ATTITUDE_QUATERNION
++		// 是同一类问题，但之前没跟着一起改。这条链路(LOCAL_POSITION_NED/
++		// ODOMETRY)是LOCALIZATION_SOURCE=uwb_imu模式下px4ctrl拿位置/速度反馈的
++		// 唯一来源(local_position_readback_node纯透传mavros/local_position/
++		// odom，不像dlio模式那样能绕开PX4直接吃DLIO自己的原生速率)——30Hz配置
++		// 实测只有~17Hz实际到达，px4ctrl一直报"ODOM frequency seems lower than
++		// 100Hz"，2026-08-12实测一次uwb_imu模式规划成功后轨迹跟踪速度持续
++		// 增大直至失控炸机，跟这个反馈速率不足的时间关联对得上。改成100Hz——
++		// 不保证实测到达值也能跟上（HIGHRES_IMU配置200Hz实测也只有~57Hz，
++		// 配置值和实测值本来就有落差，这次改动后需要重新live测一次实际速率，
++		// 不能只看配置值就当作已经解决）。
++		configure_stream_local("LOCAL_POSITION_NED", 100.0f);
+ 		configure_stream_local("ATTITUDE", 100.0f);
+ 		configure_stream_local("ALTITUDE", 10.0f);
+ 		configure_stream_local("DISTANCE_SENSOR", 10.0f);
+@@ -1502,7 +1513,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
+ 		configure_stream_local("ESC_STATUS", 10.0f);
+ 		configure_stream_local("MOUNT_ORIENTATION", 10.0f);
+ 		configure_stream_local("OBSTACLE_DISTANCE", 10.0f);
+-		configure_stream_local("ODOMETRY", 30.0f);
++		configure_stream_local("ODOMETRY", 100.0f); // docker_sim: 原30Hz，见上面LOCAL_POSITION_NED那条注释
+ 
+ 		configure_stream_local("ADSB_VEHICLE", unlimited_rate);
+ 		configure_stream_local("ATTITUDE_QUATERNION", 100.0f); // docker_sim: 原50Hz，见上面HIGHRES_IMU那条注释

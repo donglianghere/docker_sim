@@ -1,0 +1,17 @@
+diff --git a/cfg/dlio.yaml b/cfg/dlio.yaml
+index dd7251c..f755db3 100755
+--- a/cfg/dlio.yaml
++++ b/cfg/dlio.yaml
+@@ -27,7 +27,11 @@
+                                  0.,  0.,  1. ]
+     imu/intrinsics/gyro/bias: [ 0.0, 0.0, 0.0 ]
+ 
+-    extrinsics/baselink2imu/t: [ 0.006253, -0.011775, 0.007645 ] 
++    # 2026-09-10改：DLIO改用飞控IMU(mavros/imu/data_raw，见flight-stack-
++    # entrypoint.sh的DLIO_IMU_TOPIC)——mid360自带IMU实测零偏/噪声(尤其Y轴
++    # 陀螺)明显偏大，飞控IMU零偏干净。飞控IMU比雷达(=base_link，
++    # LIDAR_MOUNT_T默认0,0,0时)低14cm，其余方向无偏差，旋转视为一致。
++    extrinsics/baselink2imu/t: [ 0., 0., -0.14 ]
+     extrinsics/baselink2imu/R: [ 1.,  0.,  0.,
+                                  0.,  1.,  0.,
+                                  0.,  0.,  1. ]

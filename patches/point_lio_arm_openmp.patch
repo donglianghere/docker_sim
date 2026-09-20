@@ -1,0 +1,23 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 41feb8e..51523ec 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -31,6 +31,18 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)" )
+   else()
+     add_definitions(-DMP_PROC_NUM=1)
+   endif()
++elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "(aarch64)|(AARCH64)|(arm64)|(ARM64)")
++  # 2026-09-08新增：Jetson Orin NX真机(aarch64)原来落到最下面的else()，
++  # 从未定义MP_EN，laserMapping.cpp里的#pragma omp parallel for全程
++  # 单线程跑（跟fast_lio在ARM上的同类gap一样）。这里不套用上面x86
++  # 分支"按核心数放大到3/4线程"的公式，而是固定给3个线程：point_lio
++  # 自己在x86仿真机上出过并行失控冲到1150% CPU的事故（用
++  # POINT_LIO_CPU_CORES+taskset限流过），跟fast_lio"完全没并行"是相反
++  # 的风险方向，所以选保守固定值，而不是照抄fast_lio那套随核心数扩展
++  # 的逻辑，给同容器里的mavros/ego_planner/pt4ctrl/vision-stack留余量。
++  add_definitions(-DMP_EN)
++  add_definitions(-DMP_PROC_NUM=3)
++  message(STATUS "core for MP (ARM, 固定保守值): 3")
+ else()
+   add_definitions(-DMP_PROC_NUM=1)
+ endif()

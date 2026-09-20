@@ -1,0 +1,154 @@
+diff --git a/launch/fast_lio_hw.launch.py b/launch/fast_lio_hw.launch.py
+new file mode 100644
+index 0000000..4a1dbbd
+--- /dev/null
++++ b/launch/fast_lio_hw.launch.py
+@@ -0,0 +1,148 @@
++"""真机部署专用launch文件：FAST-LIO2（`hku-mars/FAST_LIO`官方ROS2分支）
++作为可选SLAM后端接入真机（`DEPLOY_TARGET=hw`）。
++
++这是`launch/fast_lio_docker_sim.launch.py`（仿真专用版）的真机对应版本，
++两份文件互相参照——命名空间隔离、frame_id覆盖、下游接口remap这几块
++逻辑完全一致（都已经在仿真里跑通验证过），唯独下面列的这几项因为
++"仿真点云稀疏、真机点云密集"这个本质差异，故意不照搬：
++
++现状（2026-09-08新增本文件时）：接口/命名空间逻辑因为跟仿真版共享
++同一套约定，可以认为是"已验证"（仿真那边已经跑通）；但点云密度相关的
++调参项完全没有验证过，本文件新增之前，SLAM_BACKEND=fast_lio在
++DEPLOY_TARGET=hw下是被flight-stack-entrypoint.sh无条件fail fast拒绝的
++（"仅完成仿真侧集成"）——这次改动把guard去掉、把这条链路真正接通，但
++接通不等于验证过，只是变成"技术上可以跑、第一次真机实测还没做过"。
++
++⚠️ 已知的一处本地/真机不一致，未在这次改动里处理：`docker/entrypoints/
++hw_launch/mid360_real.launch.py`本地这份文件的`xfer_format`目前仍是
++硬编码的Python字面量`0`（不是可覆盖的launch参数），
++flight-stack-entrypoint.sh传的`xfer_format:="${_mid360_xfer_format}"`
++对这份本地文件不会生效，驱动实际上会一直发`xfer_format=0`
++（PointCloud2），不是这个fast_lio需要的CustomMsg——这个限制对
++point_lio在本地这份`mid360_real.launch.py`上同样成立，不是fast_lio
++独有的新问题。这次任务没有改动`mid360_real.launch.py`本身（不在这次
++授权范围内），只是如实记录：本地这个文件要先具备一个真正可覆盖的
++`xfer_format`参数，fast_lio/point_lio在真机上才可能真正吃到CustomMsg
++格式的点云。
++
++跟仿真版的具体差异：
++1. `lid_topic`默认值改成`'mid360_PointCloud2'`——这是真实Mid-360驱动
++   （`docker/entrypoints/hw_launch/mid360_real.launch.py`）remap之后
++   使用的话题名（仿真版默认的`'mid360'`是Gazebo插件专属名字，真机根本
++   不存在这个话题）。
++2. 不搬仿真版那5项密度相关调参（`point_filter_num`/`filter_size_surf`/
++   `filter_size_map`/`mapping.det_range`/`cube_side_length`）——这几项
++   在仿真版里明确是针对"每帧固定1000点、20米见方房间"这个仿真专属场景
++   调的，注释里已经写清楚"以后接真实Mid-360硬件时（点数密度是这套仿真
++   的20~30倍）大概率需要改回3甚至更大，不能直接把这份sim专用launch
++   文件的参数照搬到hw版"——现在真的在写hw版了，遵守这句话：这里不加
++   任何覆盖，全部沿用`config/mid360.yaml`的上游默认值
++   （`point_filter_num=3`/`filter_size_surf=filter_size_map=0.5`/
++   `det_range=100.0`/`cube_side_length=1000.0`）。⚠️ 但这不代表上游
++   默认值就是对的——这几项需要真机第一次飞行拿到实际点云密度/CPU负载
++   数据之后单独做一轮真机专属调参，既不能假设仿真那套参数直接适用，
++   也不能假设upstream默认值就适合这个平台，这是一个已知的、未验证的
++   缺口，不是遗漏。
++3. `mapping.extrinsic_est_en: False`——保留（不是仿真专属选择）。跟
++   point_lio真机已验证的设置对齐，理由是"正常飞行角运动激励不够，在线
++   估计LiDAR-IMU外参容易收敛不稳"，这个理由在真机上同样成立，甚至
++   更重要（真机没有仿真那种可以随意调试重来的容错度）。
++4. `use_sim_time: False`——保留，真机场景下这个选择更是不言自明（压根
++   没有sim time这个概念）。
++
++命名空间/frame_id/接口remap三块，逐字照抄仿真版，见
++`fast_lio_docker_sim.launch.py`文件头的完整说明，这里不重复。
++"""
++import os
++
++from ament_index_python.packages import get_package_share_directory
++from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument
++from launch.substitutions import LaunchConfiguration, EnvironmentVariable, PythonExpression
++from launch_ros.actions import Node
++
++
++def generate_launch_description():
++    package_path = get_package_share_directory('fast_lio')
++    default_config_path = os.path.join(package_path, 'config')
++
++    namespace = LaunchConfiguration('namespace')
++    lid_topic = LaunchConfiguration('lid_topic')
++
++    declare_namespace_arg = DeclareLaunchArgument(
++        'namespace',
++        default_value=EnvironmentVariable('NAMESPACE', default_value='NX01'),
++        description='NX01/NX02——必须跟MAVROS(namespace=<ns>/mavros)、mighty、DLIO用同一个值',
++    )
++    declare_lid_topic_arg = DeclareLaunchArgument(
++        'lid_topic', default_value='mid360_PointCloud2',
++        description="FAST-LIO2订阅的Livox CustomMsg话题名（相对名，会按namespace自动解析）。"
++                     "真机默认'mid360_PointCloud2'——真实Mid-360驱动"
++                     "（hw_launch/mid360_real.launch.py）remap之后统一用这个名字。"
++                     "⚠️ 消息类型（CustomMsg vs PointCloud2）取决于驱动的xfer_format，"
++                     "本地这份mid360_real.launch.py目前xfer_format是硬编码的0"
++                     "（PointCloud2），不是可覆盖参数，entrypoint.sh传的"
++                     "xfer_format:=1对本地这份文件不生效，见本文件头docstring的说明。",
++    )
++
++    def _ns_frame(name):
++        # 跟dlio_namespace.patch/point_lio_docker_sim_launch.patch/
++        # fast_lio_docker_sim.launch.py的_ns_frame写法保持一致：namespace
++        # 为空时退化成裸帧名（非多机场景兼容），否则加前缀。
++        return PythonExpression(
++            ["'", namespace, "/", name, "' if '", namespace, "' else '", name, "'"]
++        )
++    odom_frame = _ns_frame('odom')
++    baselink_frame = _ns_frame('base_link')
++
++    fast_lio_node = Node(
++        package='fast_lio',
++        executable='fastlio_mapping',
++        name='fast_lio',
++        namespace=namespace,
++        output='screen',
++        parameters=[
++            os.path.join(default_config_path, 'mid360.yaml'),
++            {
++                'use_sim_time': False,
++                'common.lid_topic': lid_topic,
++                'common.imu_topic': 'mid360/imu',  # 雷达自带IMU，跟DLIO/
++                                                    # point_lio共用同一路，
++                                                    # 不是飞控IMU，真机/仿真
++                                                    # 话题名一致。
++                'odom_header_frame_id': odom_frame,
++                'odom_child_frame_id': baselink_frame,
++                'mapping.extrinsic_est_en': False,  # 跟point_lio真机已验证
++                    # 的设置对齐——正常飞行角运动激励不够，在线估计
++                    # LiDAR-IMU外参容易收敛不稳，这个理由不分仿真/真机。
++                    # 外参用mid360.yaml里的固定标定值（hku-mars官方硬件
++                    # 标定值，这台设备是否严格一致未核实，是已知待办）。
++                # 故意不覆盖point_filter_num/filter_size_surf/
++                # filter_size_map/mapping.det_range/cube_side_length这五项
++                # ——全部沿用config/mid360.yaml的上游默认值，见本文件头
++                # docstring"跟仿真版的具体差异"第2条的完整说明：这几项是
++                # 仿真稀疏点云专属调参，不能照搬到真机，但也没有对应的
++                # 真机专属调参（还没有真机飞行数据可以据此调参），这是一个
++                # 已知的、待第一次真机实测后补上的缺口。
++            },
++        ],
++        remappings=[
++            # 跟DLIO/point_lio统一的下游接口契约——mighty/ego_planner_bridge/
++            # gt_odom_bridge/ros2_px4_stack不用改代码就能切换SLAM_BACKEND，
++            # 逐字照抄仿真版的remap关系。
++            ('/Odometry', 'dlio/odom_node/odom'),
++            ('/cloud_registered', 'dlio/odom_node/pointcloud/deskewed'),
++            # 以下几路本项目目前没有下游消费者，只是重映射成相对名避免
++            # 双实例同跑时绝对路径互相覆盖。
++            ('/cloud_registered_body', 'fast_lio/cloud_registered_body'),
++            ('/cloud_effected', 'fast_lio/cloud_effected'),
++            ('/Laser_map', 'fast_lio/map'),
++            ('/path', 'fast_lio/path'),
++        ],
++    )
++
++    return LaunchDescription([
++        declare_namespace_arg,
++        declare_lid_topic_arg,
++        fast_lio_node,
++    ])

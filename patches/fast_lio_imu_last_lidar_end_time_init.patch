@@ -1,0 +1,41 @@
+diff --git a/src/IMU_Processing.hpp b/src/IMU_Processing.hpp
+index f35378f..7ab1a0c 100644
+--- a/src/IMU_Processing.hpp
++++ b/src/IMU_Processing.hpp
+@@ -81,8 +81,27 @@ class ImuProcess
+   bool   imu_need_init_ = true;
+ };
+ 
++// docker_sim: last_lidar_end_time_（78行声明）原版既没有类内默认值，也不在
++// 这个初始化列表或Reset()里赋初值——`new ImuProcess()`构造出来之后这是一个
++// 未初始化的堆内存值，第一次被真正使用是UndistortPcl()里的
++// `if (tail_stamp < last_lidar_end_time_) continue;`（249行），这时它已经
++// 该被当成"上一帧点云结束时刻"的哨兵值来比较，但从来没人写过它。这是跟
++// 本项目DLIO那个`prev_imu_stamp`初始化成0.、标定结束那一刻算出天文数字级
++// dt（`patches/dlio_prev_imu_stamp_fix.patch`修的那个bug）同一类"标定/初始化
++// 阶段结束后，第一次用到的'上一次时间戳'引用是没被正确设置过的哨兵值"的
++// 问题，只是具体后果不同：DLIO是直接拿这个值做减法算dt、必然产生epoch量级
++// 的天文数字；这里则是先用来做比较(`<`)，多数情况下未初始化内存恰好是0
++// （epoch时间戳远大于0，比较结果安全）时不会触发异常分支，但这是纯粹侥幸
++// 、不是保证——C++标准里读取未初始化的非静态成员本身就是未定义行为，理论上
++// 编译器在更激进的优化级别下可以对着这个UB做任何事。改成跟同一个构造函数
++// 里`start_timestamp_(-1)`同样的写法——epoch时间戳不可能是负数，用-1当"还
++// 没设置过"的哨兵值，让`tail_stamp < last_lidar_end_time_`和
++// `head_stamp < last_lidar_end_time_`这两处比较在IMU标定刚结束、第一次进
++// UndistortPcl()时都稳定地判定为false，走正常的`dt = tail_stamp - head_stamp`
++// 分支，不依赖堆内存里恰好是什么垃圾值。2026-09-07加，Reset()里同步加
++// 一行，见下面。
+ ImuProcess::ImuProcess()
+-    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1)
++    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), last_lidar_end_time_(-1)
+ {
+   init_iter_num = 1;
+   Q = process_noise_cov();
+@@ -108,6 +127,7 @@ void ImuProcess::Reset()
+   angvel_last       = Zero3d;
+   imu_need_init_    = true;
+   start_timestamp_  = -1;
++  last_lidar_end_time_ = -1;  // docker_sim: 见构造函数处的完整说明
+   init_iter_num     = 1;
+   v_imu_.clear();
+   IMUpose.clear();

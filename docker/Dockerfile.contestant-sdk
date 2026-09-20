@@ -1,0 +1,177 @@
+# ----------------------------------------------------------------------------
+# contestant-sdk：选手开发/运行环境镜像（2026大赛任务系统第三部分，方案①）。
+#
+# 跟flight-stack/sim-world那两个"真正跑仿真栈"的镜像完全独立——故意不
+# `FROM mighty-base:humble`（Dockerfile.base那个公共基础镜像的下游，装了整套
+# Gazebo11编译工具链）也不`FROM sim-world:latest`/`flight-stack:latest`，这些
+# 全是给DLIO/mighty/PX4那些重依赖用的，选手容器根本不需要，白白拖体积、拖
+# build时间。这里直接从跟Dockerfile.base第一层完全一样的官方基础镜像另起一份
+# ——只共享"ROS2 Humble ros-base"这一层最基础的东西，不继承Dockerfile.base
+# 后面Gazebo编译工具链那几层。
+#
+# 隔离设计（跟方案3.1节对应）：这个镜像里只有三样东西——ROS2 Humble运行时 +
+# contest_sdk这个纯Python包 + contest_sdk依赖的几个消息类型包（见下面
+# quadrotor_msgs那段说明）。**不COPY**任何sim-world/flight-stack的源码、
+# mighty/ego_planner/PX4固件、world/launch文件、contest_mission/uwb_sim/
+# uwb_origin_bridge——选手拿到的只是一个"能看懂仿真栈话题、但改不了仿真栈
+# 代码"的旁观者+指挥者容器，这是3.1节"选手拿不到能改基础设施的文件"这条防线
+# 唯一依赖的事实，靠文件系统隔离本身生效，不靠自觉/权限管理。
+#
+# ⚠️ 2026-09-13 build完之后端到端实测`我的任务.py`时发现的问题，已经修复
+# ——第一版Dockerfile只装了`rmw_cyclonedds_cpp`+`python3-pip`，漏了
+# `capabilities.py`实际用到的几个消息类型包：`mavros_msgs`（`takeoff()`/
+# `land()`订阅`mavros/state`确认armed）、`vision_msgs`（`wait_for_detection()`
+# 订阅`vision/detections`）、`quadrotor_msgs`（`takeoff()`/`land()`发布
+# `TakeoffLand`）。前两个是ROS2官方发布的标准包，apt能直接装；`quadrotor_msgs`
+# 是这个项目自己的自定义消息包（`vendor/px4ctrl_ros2`），**没有发布在任何公开
+# apt/pip源上**，只能从已经colcon build过的`flight-stack:latest`镜像里直接
+# 拿编译产物——这意味着`contestant-sdk`镜像**必须在`flight-stack:latest`已经
+# build好之后才能build**（用`COPY --from=flight-stack:latest`，见下面），
+# 这一条顺序依赖是`quadrotor_msgs`这个自定义消息类型本身决定的，不是这次故意
+# 引入的架构耦合，其它两个镜像（sim-world/flight-stack）互相独立这条既有原则
+# 不受影响。
+#
+# 构建（docker compose build用的context是docker-compose.yml所在的repo根目录，
+# 即docker_sim/，跟Dockerfile.sim-world/Dockerfile.flight-stack两个现有服务
+# `context: .`的写法保持一致——所以下面COPY的`src/contest_sdk`是相对
+# docker_sim/根目录的路径，不是相对这个Dockerfile自己的路径）：
+#   docker build -f docker/Dockerfile.contestant-sdk -t contestant-sdk:latest .
+# 或者收进docker-compose.yml后 `docker compose build contestant-sdk`
+# （这次没有往docker-compose.yml加这个服务定义，见文件末尾说明）。
+# ⚠️ **必须先build过`flight-stack:latest`，这个镜像才能build成功**——见下面
+# `COPY --from=flight-stack:latest ...`那一行，本地找不到这个镜像名会直接
+# 报错（`quadrotor_msgs`自定义消息包的来源，见下方详细说明），这是本地开发
+# 环境下的顺序要求，不是选手需要关心的事（选手拿到的是已经build好的成品
+# 镜像，不需要自己build任何东西）。
+# ----------------------------------------------------------------------------
+FROM ros:humble-ros-base-jammy
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    ROS_DISTRO=humble
+
+# ---- DDS配置：直接烘进镜像的ENV，不放到entrypoint脚本里运行时export ----
+# flight-stack-entrypoint.sh是在entrypoint脚本里运行时export这几个变量+生成
+# 配置文件的，因为它要按PLANNER/DEPLOY_TARGET两个运行时开关动态决定值。这个
+# 镜像不需要那种动态性（固定就是cyclonedds+锁lo+域21），但如果照抄那种"entrypoint
+# 里export"的写法，会踩到这次实测过的一个更深的坑：`docker run`的PID1（entrypoint
+# 脚本）里export的环境变量，只在这个PID1自己的进程树里可见——后续任何`docker exec
+# -it <container> bash`开的新会话（VS Code Dev Containers的集成终端就是这么进
+# 容器的）**不会**继承entrypoint脚本运行时export的值，只会看到镜像构建时
+# ENV定的值+容器创建时`docker run -e`传的值这两层。也就是说，如果只在
+# entrypoint脚本里export，`docker run ... python3 我的任务.py`这种一次性用法能
+# 生效，但选手用VS Code Dev Containers打开同一个镜像、在集成终端里手动敲
+# `ros2 topic list`调试时会看到空列表（环境变量在这条`docker exec`路径上没
+# 生效）——这正是这次会话实测踩过的坑（`docker exec`进容器不正确设置这两个
+# 环境变量+对应CycloneDDS配置，`ros2 topic list`一直是空的），所以这里改成
+# 在Dockerfile里直接烘成ENV+COPY一份写死的配置文件，`docker run`的PID1和后续
+# 所有`docker exec`会话都从同一份容器级环境配置继承到，两条路径都不会漏。
+# ROS_DOMAIN_ID默认21（跟docker-compose.yml里sim-world/flight-stack-*三个
+# 容器保持一致，仿真专用域，见docker-compose.yml里sim-world那条环境变量的
+# 完整注释）——ENV定的默认值，选手需要连别的域时可以`docker run -e
+# ROS_DOMAIN_ID=xx`覆盖，跟三个仿真栈容器在docker-compose.yml里的写法是同一
+# 优先级关系（运行时-e覆盖镜像ENV默认值）。
+# RMW_IMPLEMENTATION固定rmw_cyclonedds_cpp——跟仿真栈PLANNER=ego_planner时
+# 切换到的RMW实现保持一致，同一个ROS_DOMAIN_ID下所有参与者必须用同一个RMW
+# 实现才能互相发现（DDS发现协议本身不跨实现互通）。这个容器不区分PLANNER，
+# 直接固定成cyclonedds——选手容器只是"多一个旁观者/指挥者"，不需要复刻仿真栈
+# 那边FastDDS/CycloneDDS二选一的逻辑，只要跟仿真栈实际在跑的那个对齐即可。
+ENV ROS_DOMAIN_ID=21 \
+    RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+    CYCLONEDDS_URI="file:///opt/contest_sdk_cyclonedds.xml"
+
+# CycloneDDS网卡范围锁定成lo（回环接口）：contestant-sdk容器和仿真栈三个容器
+# 一样是network_mode host（共享宿主机网络命名空间），互相发现走本地环回完全
+# 够用，不需要真的组播到宿主机的物理/虚拟网卡上（宿主机上除了真正上网的那块
+# 网卡，往往还挂着docker0/vmnet等跟ROS2通信无关的虚拟网卡，CycloneDDS默认会
+# 全部枚举尝试组播，注定失败、只会拖慢发现和发布）。跟
+# flight-stack-entrypoint.sh里DEPLOY_TARGET=sim分支生成的配置等价——这里不
+# 区分sim/hw，因为contestant-sdk这个容器目前的唯一使用场景就是跟仿真栈同机
+# host网络跑，没有"选手容器部署到真机局域网"这种用法，所以直接写死成静态
+# 文件COPY进镜像，不需要entrypoint运行时按DEPLOY_TARGET生成不同内容。
+COPY docker/dds/contest_sdk_cyclonedds.xml /opt/contest_sdk_cyclonedds.xml
+
+# ros-humble-rmw-cyclonedds-cpp：上面ENV里RMW_IMPLEMENTATION指定的这个RMW
+# 实现，装的是它对应的apt包本身（ENV只是告诉ROS2运行时用哪个RMW，具体的
+# librmw_cyclonedds_cpp.so还是要靠这个包装进来）。
+# ros-humble-mavros-msgs/ros-humble-vision-msgs：2026-09-13端到端实测发现
+# 漏装的两个标准消息包（见上面文件头"实测发现的问题"说明），`apt-cache
+# policy`确认过这两个包确实存在于packages.ros.org的jammy源里，直接装。
+# python3-pip：contest_sdk是纯setuptools包（见src/contest_sdk/setup.py顶部
+# 注释——不是ROS2功能包，不需要colcon/ament），装进镜像用pip install，不用
+# rosdep/colcon那一套。
+# python3-serial：2026-09-16新增`DroneSDK.play_sound_light()`（机载声光反馈板
+# 串口SDK）依赖的`pyserial`——不是ROS2标准包，`ros-base`基础镜像不会带，
+# 用apt的Debian打包（jammy源里现成有）装，理由跟下面`pip3 install --no-deps`
+# 那段注释里`rclpy`的处理方式一致：`setup.py`的`install_requires=['pyserial']`
+# 只是声明性依赖，真正让`import serial`能工作的是这里apt装的这份，不能只改
+# `setup.py`就以为够了（`--no-deps`会跳过pip自己的依赖解析，不会去装它）。
+# 拆两层小RUN + apt自身重试参数，风格跟Dockerfile.base一致（应对代理长下载
+# 偶发502的问题，见那边的详细注释）——这里包不多，没有Dockerfile.base那么
+# 迫切，但保持同样的写法习惯，方便以后这个镜像也要加包时照抄。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        ros-humble-rmw-cyclonedds-cpp \
+        ros-humble-mavros-msgs \
+        ros-humble-vision-msgs \
+        python3-serial
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# quadrotor_msgs：这个项目自己的自定义消息包（TakeoffLand），不在任何公开
+# apt/pip源上，直接从已经build好的flight-stack:latest镜像里拿colcon编译
+# 产物——`COPY --from=<镜像名>`这个语法不需要flight-stack是这次构建的一个
+# 阶段(stage)，指向任意本机已存在的镜像名就能跨镜像COPY文件，跟"多阶段构建"
+# 是同一个底层机制，只是源头不是当前Dockerfile自己定义的某个FROM阶段。
+# px4ctrl_ws/mighty_ws两边都编译了一份quadrotor_msgs（内容一致，随便选一个，
+# 这里选px4ctrl_ws，因为`TakeoffLand`这个消息本来就是px4ctrl_ros2那个fork
+# 定义的，路径上更"名正言顺"）。
+COPY --from=flight-stack:latest /opt/px4ctrl_ws/install/quadrotor_msgs /opt/quadrotor_msgs_install
+
+# 让Python/动态链接器/ament index都能找到上面COPY进来的quadrotor_msgs——这
+# 三个变量的值是照抄`quadrotor_msgs`包自己的colcon环境hook脚本（`/opt/
+# px4ctrl_ws/install/quadrotor_msgs/share/quadrotor_msgs/environment/*.sh`）
+# 会设置的内容，只是这里换成直接烘成Dockerfile ENV（不是entrypoint运行时
+# `source local_setup.bash`）——原因跟上面DDS配置那段一致：这样`docker run`
+# 和之后任意`docker exec`会话（含VS Code Dev Containers集成终端）都能拿到
+# 同一份环境，不会有一条路径漏掉。rosidl生成的消息包不是纯Python——Python
+# 绑定（`quadrotor_msgs.msg`）在import时要dlopen同目录`lib/`下的几个
+# `librosidl_typesupport*.so`做序列化，所以除了PYTHONPATH，LD_LIBRARY_PATH
+# 也必须包含进去，缺了会在import成功但实际构造/发布消息时才报错，比import
+# 直接失败更隐蔽，这里两个都设置好。
+ENV PYTHONPATH=/opt/quadrotor_msgs_install/local/lib/python3.10/dist-packages:${PYTHONPATH} \
+    LD_LIBRARY_PATH=/opt/quadrotor_msgs_install/lib:${LD_LIBRARY_PATH} \
+    AMENT_PREFIX_PATH=/opt/quadrotor_msgs_install:${AMENT_PREFIX_PATH}
+
+# 只COPY contest_sdk这一个包本身——**不要**在这一步顺手把src/整个目录都
+# COPY进来，src/下面contest_mission/uwb_sim/uwb_origin_bridge几个都是飞行栈
+# /仿真栈内部用的包，选手镜像不能带（3.1节隔离设计，见文件头注释）。
+COPY src/contest_sdk /opt/contest_sdk_src
+
+# rclpy已经由上面ros:humble-ros-base-jammy基础镜像通过apt装好（ros-base本身
+# 就含rclpy），setup.py里`install_requires=['rclpy']`只是声明性依赖、不是真的
+# 要pip去装一份——PyPI上没有能独立工作的rclpy包，pip如果真去装反而会失败/
+# 装出一个跟apt那份冲突的东西。用--no-deps跳过依赖解析，只装contest_sdk这个
+# 包本身进Python环境，rclpy这个依赖直接吃apt那份现成的。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-deps /opt/contest_sdk_src \
+    && rm -rf /opt/contest_sdk_src
+
+COPY docker/entrypoints/contestant-sdk-entrypoint.sh /opt/entrypoint.sh
+RUN chmod +x /opt/entrypoint.sh
+
+# 选手工作目录约定用/workspace（跟方案①`-v "$(pwd)":/workspace`挂载点对齐），
+# WORKDIR只是给个默认落脚点，实际内容由选手run时挂载卷决定。
+WORKDIR /workspace
+
+# ENTRYPOINT只做两件事——回显一下上面已经烘进ENV的DDS配置方便选手确认、
+# source一下ROS2环境，然后把容器启动命令原样exec出去（DDS配置本身在镜像
+# 构建时就已经通过ENV+COPY写死，不需要entrypoint运行时再计算，见上面ENV
+# 块的详细注释）。选手最终这样用：
+#   docker run --rm --network host -v "$(pwd)":/workspace contestant-sdk:latest \
+#       python3 /workspace/我的任务.py
+ENTRYPOINT ["/opt/entrypoint.sh"]

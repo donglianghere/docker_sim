@@ -1,0 +1,44 @@
+diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
+index 66057fa..b617acc 100755
+--- a/src/planner/plan_manage/src/traj_server.cpp
++++ b/src/planner/plan_manage/src/traj_server.cpp
+@@ -23,6 +23,20 @@
+ // yaw control
+ double last_yaw_, last_yaw_dot_;
+ double time_forward_;
++// docker_sim: 原来是函数内constexpr PI(约180°/s)。第一版这里的注释错把
++// mighty的omega_max(=0.10472rad/s/6°/s)当成对应的yaw限速参数——读代码
++// 确认omega_max其实是lbfgs_solver.cpp轨迹优化器内部的机体角速度可行性
++// 约束，不是"最终发给px4ctrl的yaw朝向变化速率"，真正对应的是mighty.cpp
++// 里clamp next_goal.dyaw用的w_max参数(patches/mighty_avoidance_tuning.
++// patch调到了0.8rad/s≈45.8°/s，跟PX4固件MPC_YAWRAUTO_MAX=45°/s的硬顶
++// 吻合，见patches/px4_iris_mpc_yawrate_max.patch的历史注释)。px4ctrl/PX4
++// 实际能跟上的姿态变化速率是有限的，命令端要的yaw变化速率远超物理可行值
++// 时，姿态控制会在"跟yaw"和"跟位置"之间抢资源，位置跟踪精度下降，是
++// "轨迹看着完美绕开障碍物、飞机却贴着侧面撞上"的一个具体候选解释。改成
++// 运行时可配置的参数（对接ego_planner_docker_sim.launch.py的traj_server/
++// yaw_dot_max，读专用的EGO_YAW_DOT_MAX环境变量，默认0.8），默认值保留
++// 原来的PI，不设置这个环境变量就是原来的行为，不影响其它部署方式。
++double yaw_dot_max_ = 3.1415926;
+ 
+ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
+ {
+@@ -72,7 +83,7 @@
+ std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, rclcpp::Time &time_now, rclcpp::Time &time_last)
+ {
+   constexpr double PI = 3.1415926;
+-  constexpr double YAW_DOT_MAX_PER_SEC = PI;
++  const double YAW_DOT_MAX_PER_SEC = yaw_dot_max_;
+   // constexpr double YAW_DOT_DOT_MAX_PER_SEC = PI;
+   std::pair<double, double> yaw_yawdot(0, 0);
+   double yaw = 0;
+@@ -271,6 +282,9 @@
+   node->declare_parameter("traj_server/time_forward", -1.0);
+   node->get_parameter("traj_server/time_forward", time_forward_);
+ 
++  node->declare_parameter("traj_server/yaw_dot_max", yaw_dot_max_);
++  node->get_parameter("traj_server/yaw_dot_max", yaw_dot_max_);
++
+   last_yaw_ = 0.0;
+   last_yaw_dot_ = 0.0;
+ 

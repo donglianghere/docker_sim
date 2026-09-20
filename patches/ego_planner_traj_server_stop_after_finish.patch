@@ -1,0 +1,38 @@
+diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
+index a32026d..8a3f61b 100755
+--- a/src/planner/plan_manage/src/traj_server.cpp
++++ b/src/planner/plan_manage/src/traj_server.cpp
+@@ -20,6 +20,10 @@ double traj_duration_;
+ rclcpp::Time start_time_;
+ int traj_id_;
+ 
++// docker_sim: 到达终点后还继续发布这么久的"悬停在终点"指令，之后主动
++// 停止发布——见cmdCallback()里的说明。
++constexpr double HOVER_AFTER_FINISH_SEC = 1.0;
++
+ // yaw control
+ double last_yaw_, last_yaw_dot_;
+ double time_forward_;
+@@ -190,6 +194,22 @@ void cmdCallback()
+   }
+   else if (t_cur >= traj_duration_)
+   {
++    // docker_sim: 原版到达终点后无限期继续发布"悬停在终点"的position_cmd，
++    // px4ctrl的CMD_CTRL状态因此永远收不到cmd流中断超过msg_timeout.cmd
++    // （0.5s）这个条件，永远不会按PX4CtrlFSM.cpp里设计好的路径自动回退
++    // AUTO_HOVER——而AUTO_LAND只能从AUTO_HOVER触发，等于飞到终点之后永远
++    // 无法降落。2026-08-19实测"飞到目标点再降落"整套序列时撞上这个真实
++    // bug，见DEBUG_JOURNAL.md。改成到达终点后只再保持发布
++    // HOVER_AFTER_FINISH_SEC（给px4ctrl一点时间平滑收敛到终点，不是必须
++    // 但更稳妥），之后主动停止发布，交还给px4ctrl自己的AUTO_HOVER机制做
++    // 长期悬停（本来就是PX4CtrlFSM设计里CMD_CTRL的默认回退路径，不是新
++    // 发明的机制）。
++    if (t_cur >= traj_duration_ + HOVER_AFTER_FINISH_SEC)
++    {
++      receive_traj_ = false;
++      return;
++    }
++
+     /* hover when finish traj_ */
+     pos = traj_[0].evaluateDeBoorT(traj_duration_);
+     vel.setZero();

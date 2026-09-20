@@ -1,0 +1,211 @@
+# ----------------------------------------------------------------------------
+# 真机部署GCS(地面站)专用compose文件，2026-08-14新增（真机部署第一批骨架
+# 代码）。跟根目录的docker-compose.yml/docker-compose.hw.yml完全独立，只在
+# 这台开发机（GCS）上跑，不涉及Jetson。
+#
+# 用法：
+#   cd gcs
+#   cp cyclonedds_gcs.xml.example cyclonedds_gcs.xml   # 改成真实IP，见
+#                                                        # 该文件内的说明
+#   docker compose build
+#   docker compose up -d
+#   docker exec -it docker_sim-gcs-1 bash   # 进去用ros2 CLI/未来的运维脚本
+#
+# 2026-08-18新增：容器起来后浏览器打开 http://<本机IP>:8080 就是最简网页
+# 地面站（rosbridge在9090，前端动态发现DDS域里的飞机命名空间，展示
+# mavros/state、dlio里程计、uwb/pose_abs这几个实时话题），代码见
+# gcs/frontend/index.html，方案背景见《网页端地面站控制面板方案.md》。
+#
+# 2026-08-19新增：PLANNER环境变量必须跟真机flight-stack-hw那边用的值一致
+# （不传默认ego_planner），决定RMW用cyclonedds还是默认FastDDS，见
+# entrypoint.sh里的注释——两边不一致会导致DDS互相发现不了：
+#   PLANNER=mighty docker compose up -d
+# 镜像里也装了rviz2+gcs/rviz/下两份配置，`docker exec -it docker_sim-gcs-1
+# rviz2 -d /opt/rviz/multi_mighty.rviz`（需要宿主机先`xhost +local:docker`）。
+#
+# 2026-08-20新增：backend服务（容器B，见gcs/backend/app.py）——起飞/降落
+# 这类ROS2话题/service操作前端(gcs/frontend/index.html)直接对rosbridge
+# (9090端口)发起，不经过这个后端；只有"改配置文件+重启"这类浏览器做不到
+# 的操作才用它：改本机GCS的CycloneDDS网络配置(cyclonedds_gcs.xml)+重启
+# gcs容器自己、真机集群远程控制(UDP发现+HTTP直连Jetson上的control_
+# server.py，见app.py第7节)。监听8000端口，`curl localhost:8000/healthz`
+# 确认活着。⚠️这个容器挂了宿主机docker.sock（等于拿到docker daemon
+# 完整控制权），是这套系统权限比较集中的一点，见《网页端地面站控制
+# 面板方案.md》第五章"容器B"那行提醒。2026-08-25更新：原来还挂了宿主机
+# ~/.ssh（给SSH到Jetson改.env/机队启停用），这几个功能当天全部被要求
+# 删除，SSH挂载也跟着一起去掉了，不再是这个容器的一部分。
+# 2026-08-20新增过`/api/*`的Authorization: Bearer <GCS_BACKEND_TOKEN>
+# 共享密钥鉴权，2026-08-25应用户要求删除了——这个内部工具只在受信任
+# 局域网用，这层令牌反而经常跟真机的X-Control-Token搞混（见app.py
+# 文件头说明+DEBUG_JOURNAL.md 2026-08-25记录）。现在`/api/*`对局域网
+# 里任何能连到8000端口的人完全开放，只适合部署在真正受信任的内网。
+# ----------------------------------------------------------------------------
+services:
+
+  gcs:
+    build:
+      context: ..
+      dockerfile: gcs/Dockerfile
+      network: host   # 跟根目录docker-compose.yml同样的理由——build阶段
+                       # 需要代理访问Docker Hub/apt源时，host网络栈才能让
+                       # 代理正确生效
+      args:
+        HTTP_PROXY: ${http_proxy:-}
+        HTTPS_PROXY: ${https_proxy:-}
+    image: docker_sim-gcs:latest
+    network_mode: host   # 必须用宿主机真实网卡才能跟Jetson跨机发现，不能用
+                          # 默认bridge网络（那是仿真里同机多容器发现用的
+                          # 模式，这里GCS和Jetson是两台物理机）
+    ipc: host   # 2026-08-20新增：跟根目录docker-compose.yml里sim-world/
+                # flight-stack保持一致补上（network_mode:host只共享网络
+                # 命名空间，不共享/dev/shm，之前一直漏了）。⚠️记录一下走过
+                # 的弯路：加这行时以为是在修"GCS话题发不到flight-stack"这个
+                # 真实bug，实测发现完全没用——真正的根因是gcs/cyclonedds_gcs.xml
+                # 绑的网卡（下面2026-08-20那次改动之前测过），跟这行ipc:host
+                # 毫无关系，详见DEBUG_JOURNAL.md同日期记录。保留这行是因为
+                # 跟另外两个容器配置一致、真机场景下GCS和Jetson是两台物理机
+                # 本来就不存在"同机共享/dev/shm"这回事，留着没有副作用。
+    environment:
+      - ROS_DOMAIN_ID=${GCS_ROS_DOMAIN_ID:-20}   # 2026-08-30改：默认20=跟
+                          # docker-compose.hw.yml（真机，固定20）一致，未做
+                          # 任何选择时GCS天然处于"连真机"的默认姿态。仿真模式
+                          # 用的21（对应根目录docker-compose.yml的ROS_DOMAIN_ID）
+                          # 由backend在"仿真模式"按钮触发的POST /api/gcs-network/
+                          # mode里写进这份.env文件再`docker compose up
+                          # --force-recreate`——ROS_DOMAIN_ID是容器创建时读的
+                          # 变量，`docker restart`不会应用新值，必须重建才行；
+                          # 必须真的落盘.env（不能只当subprocess临时环境变量），
+                          # 否则以后谁手动跑一次`docker compose up -d`（不经过
+                          # 这条切换接口）会让compose读回这里的默认值20，把
+                          # 域悄悄改回真机，见backend/app.py _write_env_var()
+                          # 的完整说明（这是实测踩过的真实坑）。
+      - PLANNER=${PLANNER:-ego_planner}   # 2026-08-19修复：跟flight-stack-hw
+                          # 那边保持一致——RMW_IMPLEMENTATION不再在这里写死，
+                          # 改成entrypoint.sh里按这个变量联动切换（原因见
+                          # entrypoint.sh里的注释：写死cyclonedds只在PLANNER=
+                          # ego_planner时成立，PLANNER=mighty会导致跟Jetson
+                          # 用不同RMW、DDS互相发现不了）
+      - CYCLONEDDS_URI=file:///opt/cyclonedds_gcs.xml   # 只有PLANNER=
+                          # ego_planner切到cyclonedds时这个文件才会真正被
+                          # 读取；PLANNER=mighty走默认FastDDS时这个变量
+                          # 对FastDDS无意义，但留着不影响（entrypoint.sh
+                          # 里没设RMW_IMPLEMENTATION时FastDDS不会去读它）
+      - DISPLAY=${DISPLAY}   # 2026-08-19新增，配合镜像里新装的rviz2——
+                          # 跟根目录docker-compose.yml同样的X11转发做法，
+                          # `docker exec -it <容器名> rviz2 -d
+                          # /opt/rviz/multi_mighty.rviz`需要这个才能弹出窗口
+    volumes:
+      - ./cyclonedds_gcs.xml:/opt/cyclonedds_gcs.xml:ro   # 从cyclonedds_gcs.xml.example
+                          # 复制+改真实IP得到，这个文件本身不进git（含站点
+                          # 专属IP），用之前必须先手动复制一份，见上面用法
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw   # rviz2窗口转发用，2026-08-19新增
+      - ./frontend:/opt/frontend   # 2026-08-25新增：前端是纯静态文件，容器里
+                          # 跑的是python3 -m http.server，每次请求现读文件，
+                          # 挂载宿主机目录后改完index.html直接刷浏览器就生效，
+                          # 不需要重新docker build、容器也不用重启。原来镜像
+                          # build时会把gcs/frontend整个COPY进去，这个卷挂载
+                          # 会盖过那份COPY（运行时以挂载内容为准）——两者内容
+                          # 应该一致，COPY只是保证镜像脱离这份挂载也能独立
+                          # 跑（比如以后要打包镜像单独分发），不是留着两套
+                          # 不同的代码。
+    restart: "no"
+
+  backend:
+    build:
+      context: ..
+      dockerfile: gcs/backend/Dockerfile
+      network: host   # 跟gcs服务同样的理由——build阶段需要代理访问外网时，
+                       # host网络栈才能让代理正确生效
+      args:
+        HTTP_PROXY: ${http_proxy:-}
+        HTTPS_PROXY: ${https_proxy:-}
+    image: docker_sim-gcs-backend:latest
+    network_mode: host   # 8000端口只在本机/内网用，用host模式单纯是跟其它
+                          # 服务保持一致，没有更深的理由
+    environment:
+      - GCS_CONTAINER_NAME=gcs-gcs-1   # 改GCS网络配置后`docker restart`用的
+                          # 容器名，对应本compose文件的项目名(目录名gcs)+
+                          # 服务名(gcs)+序号——改了目录名/compose项目名，
+                          # 这里要跟着改，不然重启会找不到容器
+      # 2026-08-25删除了GCS_BACKEND_TOKEN——`/api/*`鉴权应用户要求去掉了，
+      # 见上面这段服务前的整体说明。
+      - HOST_REPO_PATH=${HOST_REPO_PATH:?请在gcs/.env里设置HOST_REPO_PATH}
+                          # 值是这台机器上docker_sim仓库根目录的宿主机绝对
+                          # 路径，比如`HOST_REPO_PATH=/home/robots/ai_uav/
+                          # docker_sim`。2026-08-21新增："本地仿真"面板改成
+                          # 能选LOCALIZATION_SOURCE/PLANNER/CONTROLLER后用
+                          # `docker compose up -d`动态传参重建容器，不再是
+                          # 单纯`docker start`已建好的容器——这个backend
+                          # 容器里的`docker compose`命令是通过挂进来的
+                          # docker.sock指挥宿主机dockerd干活，dockerd创建
+                          # 新容器时bind mount的源路径必须是它（宿主机）
+                          # 自己认识的真实路径，不能是这个backend容器自己
+                          # 文件系统里的路径，所以必须显式告诉它宿主机那边
+                          # 的绝对路径是什么，没法自动探测。
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # 改GCS自己网络配置后
+                          # 需要重启gcs容器，这是唯一途径——安全边界所在，
+                          # 见上面backend这段服务前的整体说明，后续要单独
+                          # 收紧（比如换成docker socket proxy只放行restart
+                          # 这一个操作，而不是让backend拿到操作整个docker
+                          # daemon的完整权限）
+      - ./cyclonedds_gcs.xml:/opt/gcs_config/cyclonedds_gcs.xml:rw   # 读写，
+                          # 跟上面gcs服务挂载同一份文件但用了不同容器内路径
+                          # +不同权限（gcs服务自己只读，这里backend要能写）
+      # 2026-08-25删除：原来这里挂了${HOME}/.ssh:/root/.ssh:ro，给SSH到
+      # Jetson改.env/机队启停/规划避障调参这几个功能用——这几个功能
+      # 2026-08-25当天全部被要求删除了（先删SSH机队启停面板，后来"⚙规划/
+      # 避障调参"也彻底删除，见app.py里对应的说明），这个后端现在没有
+      # 任何代码路径需要SSH私钥，继续挂载纯粹是不必要的攻击面（这个
+      # 容器本来就已经因为挂docker.sock是权限最集中的一点，见上面这段
+      # 服务前的整体说明），删掉这条卷线收紧一点。以后如果又要恢复
+      # SSH到Jetson的功能，把这行加回来即可。
+      - ${HOST_REPO_PATH:?}:${HOST_REPO_PATH:?}:ro   # 挂到容器内*相同*
+                          # 绝对路径（不是随便挑一个容器内路径）——这样
+                          # `docker compose --project-directory
+                          # ${HOST_REPO_PATH} up -d`在这个容器里算出来的
+                          # 相对卷路径（比如runtime_logs/）拼出的绝对路径，
+                          # 跟宿主机dockerd实际认识的路径完全一致，不会出现
+                          # "容器内能读到、宿主机dockerd那边路径不存在"这种
+                          # 嵌套容器路径错位问题。只读——这个挂载只是为了让
+                          # docker compose能解析到docker-compose.yml文件
+                          # 本身和volume相对路径，不需要backend写这个目录。
+      - ${HOST_REPO_PATH:?}/gcs/.env:${HOST_REPO_PATH:?}/gcs/.env:rw   # 2026-08-30
+                          # 新增：在上面那条整体只读挂载里，单独给gcs/.env这
+                          # 一个文件开可写口子（更具体的挂载路径会盖过外层更
+                          # 宽泛的挂载，Docker标准行为）——切换仿真/真机模式
+                          # 时backend要把GCS_ROS_DOMAIN_ID持久化写进这个文件，
+                          # 不能只作为subprocess环境变量临时传给一次`docker
+                          # compose up`：如果只临时传、不落盘，以后任何人（或
+                          # 任何脚本）再手动跑一次`docker compose up -d`
+                          # （不经过这条切换接口），compose会读回.env里的旧
+                          # 默认值，把ROS_DOMAIN_ID悄悄改回去，跟cyclonedds_
+                          # gcs.xml里记录的模式对不上——这是实测踩过的真实
+                          # 坑，不是理论风险，见_recreate_gcs_container()的
+                          # 完整说明。
+      - ./hw_fleet_tokens.json:/opt/gcs_config/hw_fleet_tokens.json:rw   # 读写，
+                          # 2026-08-24新增：真机集群远程控制(《单机接口
+                          # 描述文件.md》)每架飞机的X-Control-Token+手动
+                          # IP/端口兜底配置，见app.py"7. 真机集群远程
+                          # 控制"一节。跟cyclonedds_gcs.xml同样的"改文件
+                          # 不改代码"思路，从hw_fleet_tokens.json.example
+                          # 复制一份得到，本身含密钥不进git。
+      - ./gcs_network_state.json:/opt/gcs_config/gcs_network_state.json:rw   # 读写，
+                          # 2026-08-30新增：仿真/真机模式互斥切换用——只存用户
+                          # 手工填过的"真机网络参数"快照(interface_address/
+                          # peer_addresses)，独立于cyclonedds_gcs.xml这份随时
+                          # 会被两种模式切换动作覆写的"活文件"，切到仿真模式
+                          # 不会冲掉这份真机快照，见app.py对应说明。同样从
+                          # .example复制一份得到，含站点专属IP不进git。
+      - ./backend/app.py:/app/app.py   # 2026-08-25新增：app.py是纯Python，
+                          # uvicorn直接读源文件跑，不需要编译。挂载之后改完
+                          # app.py要`docker restart gcs-backend-1`才生效——
+                          # CMD没开uvicorn的--reload热更新（故意的，多起一个
+                          # 文件监听进程没必要，这种低频手动改代码的场景手动
+                          # 重启更直接可控）。跟上面gcs服务同理，镜像build
+                          # 时也会COPY一份进去，这个挂载运行时会盖过它，两份
+                          # 内容应该一致，COPY只是保证镜像脱离这份挂载也能
+                          # 独立跑。
+      - ../scripts/ros2_env_setup.sh:/app/scripts/ros2_env_setup.sh
+      - ../scripts/auto_calibration_flight.py:/app/scripts/auto_calibration_flight.py
+    restart: "no"

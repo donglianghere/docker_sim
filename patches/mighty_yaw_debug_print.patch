@@ -1,0 +1,26 @@
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index e77e2cf..ad9d94b 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -1883,6 +1921,21 @@ void MIGHTY::getDesiredYaw(state& next_goal, const state& yaw_look_ahead_goal) {
+   }
+ 
+   mighty_utils::angle_wrap(diff);
++
++  // 2026-08-13：临时诊断打印，追查"轨迹跟踪时机头左右摇摆"——按用户要求
++  // 把desired_yaw/local_state.yaw这两个值打出来看根子在哪。100Hz
++  // (dc=0.01秒一个周期)太密，节流到大约5Hz(每20个周期打一次)，既能看出
++  // 变化趋势，又不会刷屏。这是诊断用的，等确认清楚摇摆到底是"同一段
++  // plan_内部的高频噪声"还是"两次重规划之间目标本身跳变"之后，应该删掉
++  // 或者收进debug_verbose开关后面，不适合一直留在正式版本里无条件打印。
++  {
++    static int yaw_debug_counter = 0;
++    if ((yaw_debug_counter++ % 20) == 0) {
++      printf("[MIGHTY][yaw_debug] status=%d desired_yaw=%.3f local_yaw=%.3f diff=%.3f\n",
++             static_cast<int>(drone_status_), desired_yaw, local_state.yaw, diff);
++    }
++  }
++
+   if (fabs(diff) < 0.04 && drone_status_ == DroneStatus::YAWING) {
+     // Leaving YAWING: clear the corridor-hop override and drop the held
+     // subgoal so needReplan picks a fresh one for the next leg.

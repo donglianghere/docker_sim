@@ -1,0 +1,69 @@
+PX4 SITL 里这两个话题的频率不是一个参数决定的，而是一条**串行链路上的多重上限取最小值**。逐层拆开看瓶颈在哪：
+
+```
+Gazebo 物理步长 (250Hz) ─► imu_sensor update_rate (250Hz)
+   └─► GZBridge ─► uORB sensor_accel/gyro
+         └─► VehicleIMU 积分 ─► sensor_combined   [IMU_INTEG_RATE, 默认200]
+               └─► EKF2 预测/输出 ─► vehicle_odometry  [EKF2_PREDICT_US, 默认100Hz]
+                     └─► uXRCE-DDS ─► /fmu/out/*   [dds_topics.yaml 里的 rate_limit]
+```
+
+## 各层的实际默认值（PX4 main / gz sim）
+
+**物理步长**（`PX4-gazebo-models/worlds/default.sdf`）：`max_step_size` 0.004 s、`real_time_update_rate` 250。这是硬天花板——传感器 `update_rate` 超过物理步频没有意义。
+
+**IMU 传感器**（`models/x500_base/model.sdf`）：`imu_sensor` 的 `update_rate` 是 250。
+
+**IMU_INTEG_RATE**：默认 200 Hz，代码里 clamp 到 50–1000。它决定 `sensor_combined`/`vehicle_imu` 的发布率，但实际输出是上游速率的**整数分频**——上游只有 250 Hz 时把它设成 400 拿不到 400，会退化成 250。
+
+**EKF2_PREDICT_US**：默认 10000 µs = 100 Hz，范围 1000–20000。这个直接决定 `vehicle_odometry`、`vehicle_local_position`、`vehicle_attitude` 的产生率。
+
+**DDS 层限流**：`src/modules/uxrce_dds_client/dds_topics.yaml` 里每个 publication 带 `rate_limit` 字段。`vehicle_odometry` 是 100、`vehicle_local_position` 和 `vehicle_attitude` 是 50、`sensor_combined` 没有限制。这一层最容易被忽略——很多人改了 EKF2 参数发现 `ros2 topic hz` 纹丝不动，卡的就是这里。
+
+## 提频的改法（自下而上依次放开）
+
+**1. 世界文件**
+```xml
+<max_step_size>0.001</max_step_size>
+<real_time_update_rate>1000</real_time_update_rate>
+```
+两者必须同步改（乘积 = 实时因子 1.0）。
+
+**2. 模型 IMU**
+```xml
+<sensor name="imu_sensor" type="imu">
+  <update_rate>1000</update_rate>
+```
+
+**3. 参数**（pxh> 或 QGC）
+```
+param set IMU_INTEG_RATE 500
+param set EKF2_PREDICT_US 4000    # 250Hz；设 2000 得 500Hz
+param save
+```
+
+**4. DDS 限流** — 改 `dds_topics.yaml` 里的 `rate_limit`（或整行删掉表示不限流），然后**必须重新编译** `make px4_sitl gz_x500`：这个 yaml 是编译期生成 C++ 代码的，改完不重编无效。
+
+**5. 走 MAVROS 的话**层次不同，在 nsh 里：
+```
+mavlink stream -u 14580 -s HIGHRES_IMU -r 250
+mavlink stream -u 14580 -s ODOMETRY -r 200
+```
+注意 MAVROS 的 `/mavros/imu/data` 需要 `HIGHRES_IMU` + `ATTITUDE_QUATERNION` 两条流都提上去。
+
+## 三个容易踩的坑
+
+**Lockstep 的代价**：SITL 与 Gazebo 是锁步的，仿真时间由 IMU 消息推进。物理步长从 4 ms 降到 1 ms，单步计算量不变但步数翻四倍，RTF 会掉到 0.3 以下，而 gz 物理是单线程的——4090D 帮不上忙，瓶颈在 i9 单核。建议先用 `gz stats` 或 gz GUI 右下角确认 RTF，再决定压到多少。对多机编队（ego-planner-swarm）这个代价是乘算的。
+
+**噪声模型会跟着变**：SDF 里 IMU 的 `<stddev>` 是**每采样点**的标准差而非噪声密度。把 250 Hz 提到 1000 Hz 而不动 stddev，等效噪声密度会降到原来的一半，EKF2 和你的 LIO 都会"感觉"IMU 变好了——如果目的是复现真实传感器特性，stddev 需要按 √(f₂/f₁) 放大。
+
+**分清"需要谁提频"**：如果目标是喂 FAST-LIO2，200–500 Hz 的 `sensor_combined` 已足够，且 LIO 通常用仿真的 gz IMU 话题直连而不经过 PX4；如果目标是外环控制器（px4ctrl 那类）的状态反馈，真正要提的是 `vehicle_odometry`——它卡在 `EKF2_PREDICT_US` 和 DDS 的 100 Hz 双重上限上，而 IMU 提频对它无直接帮助。
+
+改完用这两条交叉验证，能立刻定位卡在哪一层：
+```
+pxh> uorb top -1 sensor_combined vehicle_odometry    # PX4 内部实际速率
+$ ros2 topic hz /fmu/out/vehicle_odometry            # 出 DDS 后的速率
+```
+两者不一致就是 DDS 限流；`uorb top` 本身上不去就回头查参数和 SDF。
+
+（gazebo-classic 路径不同：世界在 `Tools/simulation/gazebo-classic/sitl_gazebo-classic/worlds/*.world`，IMU 在 `models/iris/iris.sdf.jinja` 的 `imu_sensor` 段，MAVLink 侧由 `mavlink_interface` 插件负责，其余参数层完全一致。）

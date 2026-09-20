@@ -1,0 +1,421 @@
+# ----------------------------------------------------------------------------
+# 真机单机部署专用compose文件，2026-08-14新增（真机部署第一批骨架代码）。
+#
+# 跟原 docker-compose.yml 的关键差异：
+#   1. 只有一个service（这台Jetson上只跑一架飞机），不需要sim-world、不需要
+#      NX01/NX02两份flight-stack、不需要AGENT_INDEX端口偏移那套双机共宿主机
+#      的处理逻辑。
+#   2. 去掉了ipc:host——那是给同机多容器之间共享/dev/shm用的Fast-DDS SHM
+#      优化，这里只有一个容器，没有"同机其它容器"这回事，留着也无害但没意义，
+#      直接去掉更干净。
+#   3. 新增DEPLOY_TARGET=hw + 几个真机专属环境变量（真实串口设备路径、
+#      真实网卡名、GCS静态IP），详见flight-stack-entrypoint.sh文件头
+#      DEPLOY_TARGET那段完整说明。
+#   4. devices:新增PX4飞控+UWB双标签(uwb_a/uwb_b)的串口直通——这几个路径是
+#      占位默认值，几乎肯定要按实际接线改。
+#   5. 组合默认值锁定成2026-08-14确认的真机首飞组合
+#      （single_uwb_slam/ego_planner/px4ctrl/dlio），仍然保留${VAR:-default}
+#      写法可以覆盖，不是写死成字面量。
+#
+# 用法（跟原compose文件一样的两步build+up习惯）：
+#   docker compose -f docker-compose.hw.yml build
+#   docker compose -f docker-compose.hw.yml up
+#
+# ⚠️ Jetson Orin NX Super只有16G内存，不能直接沿用开发机的BUILD_JOBS默认值
+# （4是按"内存GB/2"估算的保守值，16G机器上4本身问题不大，但如果Jetson同时
+# 在跑其它进程/内存余量更紧，build时用
+#   docker compose -f docker-compose.hw.yml build --build-arg BUILD_JOBS=2
+# 进一步调小，具体数值现场根据实际内存占用调，见docker_sim/
+# 真机部署操作清单.md"3.5 构建镜像"一节。
+# ----------------------------------------------------------------------------
+services:
+
+  flight-stack-hw:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.flight-stack
+      network: host   # 跟原compose文件同样的理由——build阶段如果需要代理
+                       # 访问外网apt/pip源，host网络栈才能让代理正确生效，
+                       # 见真机部署操作清单.md"1.3 网络/代理准备"一节
+      args:
+        HTTP_PROXY: ${http_proxy:-}
+        HTTPS_PROXY: ${https_proxy:-}
+        BUILD_JOBS: ${BUILD_JOBS:-4}
+    image: flight-stack-hw:latest   # 2026-08-14自查时改的——跟docker-compose.yml里
+                          # sim版flight-stack镜像用同一个tag(flight-stack:latest)
+                          # 的话，如果有人在同一台机器上（比如先在开发机上测试这份
+                          # compose文件语法/结构，不涉及真实硬件）先后build了两份，
+                          # 后build的会直接覆盖前一份镜像，容易搞混当前tag到底对应
+                          # 哪份Dockerfile的产物。单独起一个tag，即使两份都在同一台
+                          # 机器上build过也不会互相覆盖。
+    network_mode: host   # 真机上这个模式的意义从"跟其它容器共享网络栈"变成
+                          # "直接用宿主机的真实网卡"——DEPLOY_TARGET=hw下
+                          # CycloneDDS要靠真实网卡+真实局域网被GCS发现，
+                          # 串口/USB设备访问同样依赖宿主机网络/设备栈，
+                          # 不能退回bridge模式。
+    environment:
+      - ROS_DOMAIN_ID=20   # 必须跟GCS侧配的值一致，见gcs/docker-compose.yml
+      # 2026-09-04现场实验：真机排查发现dlio_odom_node长期运行后CPU接近
+      # 满载、odom发布频率从100Hz掉到10多Hz——用/proc枚举线程发现76个线程里
+      # 有多组"恰好7个连号新建"的LWP（8核减去调用线程自己=7），对应GICP
+      # 配准内部5处`#pragma omp parallel for num_threads(omp_get_max_threads())`
+      # ——怀疑是libgomp默认的PASSIVE等待策略导致并行区结束后worker线程
+      # 真的睡眠掉、下次用不到复用，每次配准都要重新clone()一批线程，OS级
+      # 开销随会话时长累积（可能伴随内存分配器碎片化）。先用OMP_WAIT_POLICY=
+      # ACTIVE让worker线程忙等代替睡眠、保持热态方便复用，做个低风险实验，
+      # 纯环境变量、不用重建镜像、无效的话删掉这两行就完全恢复原状。
+      - OMP_WAIT_POLICY=ACTIVE
+      - OMP_DYNAMIC=FALSE
+      # 2026-08-29新增：把CycloneDDS绑死到有线网卡，不要用WiFi。
+      # 根因：这台Jetson同时有 enP8p1s0(192.168.1.5，有线，雷达网络) 和
+      # wlP1p1s0(192.168.43.18，WiFi) 两个活动网卡，而CYCLONEDDS_URI原来是空的
+      # ——CycloneDDS会自己在两个网卡上都发现/发布，往WiFi那条路的写入持续失败
+      # (实测日志里4万+条 ddsi_udp_conn_write to udp/192.168.43.18 failed，
+      # 占日志总量49%)，而有线那条路在socket缓冲修好后已经零失败。
+      # 怀疑这些失败会让RELIABLE writer的历史缓存被撑满、publish()阻塞，
+      # 进而卡住DLIO的IMU回调(实测出现过143.8秒和40.4秒两次执行断档，
+      # 恢复时dt=143.586s导致速度凭空暴涨→位姿跳飞)。详见read_hw.md同日条目。
+      # 用内联XML，不需要额外文件、不需要rebuild。换机器/换网卡名要改这里。
+      - CYCLONEDDS_URI=<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="enP8p1s0" priority="default" multicast="default"/></Interfaces></General></Domain></CycloneDDS>
+      # 2026-08-15改成可覆盖（原来是硬编码字面量NX01/1/1）——双机真机部署是
+      # 两台独立Jetson各自跑一份这个compose文件，靠这三个变量区分身份，不用
+      # 手改文件本身。⚠️ 双机协同飞行（需要机间避让/frame_align）时不能只改
+      # 这三个——LOCALIZATION_SOURCE也要从默认的single_uwb_slam换成不带
+      # single_前缀的uwb_slam（single_*语义是"单机、无编队感知"，双机协同
+      # 需要NUM_AGENTS=2配合uwb_slam才会真正启用机间坐标对齐，具体是
+      # ego_planner的calcSwarmCost/broadcast_bspline那套逻辑，见
+      # flight-stack-entrypoint.sh文件头LOCALIZATION_SOURCE说明）：
+      #   Jetson1: NAMESPACE=NX01 AGENT_INDEX=1 NUM_AGENTS=2 LOCALIZATION_SOURCE=uwb_slam
+      #   Jetson2: NAMESPACE=NX02 AGENT_INDEX=2 NUM_AGENTS=2 LOCALIZATION_SOURCE=uwb_slam
+      - NAMESPACE=${NAMESPACE:-NX01}
+      - AGENT_INDEX=${AGENT_INDEX:-1}
+      - NUM_AGENTS=${NUM_AGENTS:-1}
+      - DEPLOY_TARGET=hw   # 见flight-stack-entrypoint.sh文件头完整说明
+      - DISPLAY=${DISPLAY:-:0}   # RViz2查看点云用，配合下面X11 socket挂载
+
+      # ---- 真机专属：串口/网络（占位默认值，几乎肯定要按实际接线改，
+      #      建议现场确认后写进一个不进git的.env文件或者直接在这里改，
+      #      不要保留占位值就直接起飞）----
+      - FC_SERIAL_DEVICE=${FC_SERIAL_DEVICE:-/dev/ttyTHS2}   # 飞控串口，USB接法通常是/dev/ttyACM0
+      - FC_BAUD_RATE=${FC_BAUD_RATE:-921600}                  # 必须跟PX4侧SER_TELx_BAUD一致
+      - HW_NETWORK_INTERFACE=${HW_NETWORK_INTERFACE:-wlP1p1s0}    # 上机后`ip a`确认真实网卡名
+      - GCS_PEER_ADDRESS=${GCS_PEER_ADDRESS:-}                # GCS静态IP，留空则只用组播发现
+      # 2026-08-18改成双标签(uwb_a=USB/CH340, uwb_b=板载UART/ttyTHS0)，
+      # 定位定向解算模块见uwb_dual_tag_fusion_node.py。UWB_BASELINE_LENGTH_M
+      # 是两个标签实际安装间距(米)，只用来做yaw解算合理性校验，2026-08-18
+      # 现场实测=0.29米，默认值已同步；如果之后改了安装方案，记得改这里。
+      - UWB_A_SERIAL_DEVICE=${UWB_A_SERIAL_DEVICE:-/dev/uwb_a}
+      - UWB_B_SERIAL_DEVICE=${UWB_B_SERIAL_DEVICE:-/dev/uwb_b}
+      - UWB_BAUD_RATE=${UWB_BAUD_RATE:-921600}
+      - UWB_BASELINE_LENGTH_M=${UWB_BASELINE_LENGTH_M:-0.43}
+      # 2026-08-26新增：uwb_a->uwb_b连线方向转多少度才是机头朝向，见
+      # dual_tag_fusion_node.py文件头算法说明，原来是代码里硬编码的90°，
+      # 现在外置成参数，默认135°跟uwb_a/uwb_b实际安装角度绑定，装法变了
+      # 要跟着改这个值。
+      - UWB_YAW_OFFSET_DEG=${UWB_YAW_OFFSET_DEG:-90.0}
+      - LIDAR_IP=${LIDAR_IP:-192.168.1.122}          # 雷达自身IP，flight-stack-entrypoint.sh
+                                                        # 用它现生成MID360_config.json，按现场
+                                                        # ping/Livox Viewer2扫描结果改
+      - LIDAR_HOST_IP=${LIDAR_HOST_IP:-192.168.1.5}   # Jetson接雷达那个网口的IP，须跟`ip a`一致
+      - LIDAR_SCAN_FREQ=${LIDAR_SCAN_FREQ:-20.0}       # 点云发布频率，即livox_ros_driver2的publish_freq，
+                                                        # 2026-08-19从10.0改成20.0，见read_hw.md对应小节
+      - LIDAR_IMU_OUT_RATE_HZ=${LIDAR_IMU_OUT_RATE_HZ:-100.0}  # mid360/imu发布频率(driver内部软件下采样，
+                                                        # 固件本身锁定200Hz改不了)，2026-08-20新增，
+                                                        # 见read_hw.md对应小节
+      - LIDAR_TILT_DEG=${LIDAR_TILT_DEG:-0.0}          # 雷达+IMU一体绕Y轴前倾角度(度)，2026-08-27
+      # 2026-09-10新增：DLIO喂给自己的IMU数据源，相对话题名(不带NX01前缀，
+      # 原因见flight-stack-entrypoint.sh里DLIO这段CONTROLLER dispatch的
+      # 注释)。默认mid360/imu(雷达自带IMU)不变——实测这颗IMU零偏/噪声
+      # (尤其Y轴陀螺)明显偏大，真机上验证过改用mavros/imu/data_raw(飞控
+      # 自己的IMU，零偏干净)之后，需要同步把下面dlio.yaml里的
+      # extrinsics/baselink2imu/t改成飞控IMU相对base_link(=雷达光心，
+      # 假设LIDAR_MOUNT_T保持默认0,0,0)的真实偏移——这个偏移目前还没有
+      # 外置成环境变量，改cfg/dlio.yaml里的字面量。
+      - DLIO_IMU_TOPIC=${DLIO_IMU_TOPIC:-mid360/imu}
+      # 2026-09-18新增：uwb_imu_fusion_node（uwb_imu/single_uwb_imu模式下的
+      # UWB->vision_pose转发节点）喂给自己的IMU数据源，跟上面DLIO_IMU_TOPIC
+      # 是同一个透传模式、但两个开关互相独立。这个节点2026-08-29改版后已经
+      # 不再用IMU的orientation做姿态融合(roll/pitch改从UWB pose_abs的四元数
+      # 拿了)，这一路IMU目前只喂uwb_imu_fusion_node.py的_imu_cb做线加速度/
+      # 角速度的位置-速度积分传播，不是拿它做姿态估计。
+      # 默认值同日从mid360/imu改成mavros/imu/data_raw——理由跟DLIO_IMU_TOPIC
+      # 一样(mid360自带6轴IMU零偏/噪声尤其Y轴陀螺明显偏大，飞控IMU零偏更
+      # 干净)。⚠️ 2026-09-18当天真机(192.168.2.102)排查实测这条MAVLink链路
+      # 当时完全没有数据输出(mavros/imu/data_raw，根因未查清，详见
+      # DEBUG_JOURNAL.md同日"真机排查"条目)——部署前须先确认这台机器上
+      # 该话题确实有数据在流动，否则uwb_imu_fusion_node的_imu_cb会跟DLIO
+      # 一样永远收不到数据、积分传播直接失效。
+      - UWB_IMU_TOPIC=${UWB_IMU_TOPIC:-mavros/imu/data_raw}
+      # 2026-08-29新增：base_link原点 -> 雷达光心 的平移"x,y,z"(米)。
+      # 原来这个量有三处硬编码副本且互相对不上（dlio.yaml 是 [0,0,0]，
+      # gt_odom_bridge_node.py / local_position_readback_node.py 是 (0,0,0.06)，
+      # 注释都写着"保持一致"），现在统一成这一个来源。
+      # ⚠️ 默认 0,0,0 等于"把 base_link 当成雷达光心"（改造前的隐含假设）。
+      # 真机雷达装在机顶，应实测填真实值——它影响 odom 输出的是"雷达位置"
+      # 还是"机体位置"，跟 UWB(标签位置)/飞控(IMU位置)对齐时会露出来。
+      - LIDAR_MOUNT_T=${LIDAR_MOUNT_T:-0.0,0.0,0.0}
+                                                        # (这几行注释实际对应上面LIDAR_TILT_DEG，
+                                                        # 外置成参数(原来是cfg/dlio.yaml里写死的旋转
+                                                        # 矩阵)，装法变了改这个值就行，不用再改yaml
+                                                        # 文件。2026-09-06更新：此前这里写的"真机实际
+                                                        # 是25°"已过时——2026-09-06现场确认当前物理
+                                                        # 安装是水平的，默认0.0正确匹配现状，不需要
+                                                        # 显式设置。⚠️ 这是"当前"这台真机的现状，不是
+                                                        # 永久假设——如果以后改成倾斜安装，这里要跟着
+                                                        # 改成对应角度，不能想当然继续沿用0.0这个默认值
+                                                        # (跟LIDAR_IP/FC_SERIAL_DEVICE同样的模式:占位/
+                                                        # 现状默认值，装机方式变了要跟着更新)
+
+      # ---- 2026-08-27新增，2026-08-28收窄成只过滤障碍点云(grid_map/
+      #      occupancy_inflate)：点云高度过滤(只给地面站/RViz显示用，不
+      #      影响避障)，不再碰SLAM里程计模块自己输出的dlio/odom_node/
+      #      pointcloud/deskewed。封闭空间飞行时天花板点云会挡住俯视图，
+      #      见pointcloud_z_filter包说明。PCLOUD_FILTER_ENABLED是开关，
+      #      默认开；min_z/max_z是**相对飞机当前高度**(读dlio/odom_node/
+      #      odom)的偏移量(米)，不是odom/map坐标系下的绝对高度——飞机
+      #      爬升/下降时这个窗口跟着一起动。现场层高/空间不一样时改
+      #      这两个值 ----
+      - PCLOUD_FILTER_ENABLED=${PCLOUD_FILTER_ENABLED:-true}   # 不需要看点云画面时传false关掉，省~0.5核CPU
+      - PCLOUD_MIN_Z=${PCLOUD_MIN_Z:--0.2}   # 保留点云高度下限=飞机当前高度+这个值(米)，低于此当地面噪声滤掉
+      - PCLOUD_MAX_Z=${PCLOUD_MAX_Z:-0.5}    # 保留点云高度上限=飞机当前高度+这个值(米)，高于此当天花板滤掉
+
+      # ---- 2026-08-27新增：飞机真实物理参数，之前一直是vehicle_profile.yaml
+      #      里写死的仿真机型数字(PX4官方iris+仿真挂载重量算出来的)，且
+      #      entrypoint.sh的覆盖逻辑之前有bug(无条件覆盖，这几个环境变量设了
+      #      也不生效)，两个问题这次一起修了。⚠️ 下面这几个默认值就是那份
+      #      仿真机型的数字，不是真机参数——真机部署必须在.env里显式设成
+      #      真实测量值(整机称重、桨盘悬停推力占比、单电机/整机最大推力)，
+      #      不能保留这些占位默认值就直接起飞，跟LIDAR_IP/FC_SERIAL_DEVICE
+      #      同样的模式。这几个值影响px4ctrl级联PID+mighty轨迹可行性约束，
+      #      是直接关系到能不能正常悬停/控制的核心参数。
+      - VEHICLE_MASS_KG=${VEHICLE_MASS_KG:-2.5}       # 整机质量(kg)，含所有机载设备
+      - VEHICLE_HOVER_THRUST=${VEHICLE_HOVER_THRUST:-0.30}  # 悬停油门，占最大推力的比例(0~1)
+      - VEHICLE_F_MAX_N=${VEHICLE_F_MAX_N:-26.0}        # 整机最大推力(N)，建议留安全余量不要用理论满转速值
+      - VEHICLE_F_MIN_N=${VEHICLE_F_MIN_N:-3.0}         # 整机最小推力(N)，规划器可行性约束下限
+
+      # ---- 2026-08-14确认的真机首飞组合，仍可用环境变量覆盖 ----
+      # 2026-08-29 默认改为 single_uwb_imu：双UWB标签给水平位置+yaw、测距仪给高度，
+      # 不依赖激光SLAM。同日把 uwb_imu_fusion_node 降级为纯转发(UWB->vision_pose)、
+      # 里程计改由飞控回读(mavros/local_position/odom)，见 read_hw.md 同日条目。
+      # 2026-09-02 默认改回 single_uwb_slam（用户指定的默认组合：
+      # single_uwb_slam / dlio / ego_planner / px4ctrl）。原因：双UWB标签解算出的
+      # yaw 实测不可用——σ=21.7°、峰峰137°，常数还差180°（见 read_hw.md 2026-09-02
+      # 条目的实测数据），而 single_uwb_imu 下这个 yaw 会被 EKF2 无条件融合，正是
+      # 2026-09-01「根因一」那次炸机的机制。改用 DLIO 出位姿（repub_odom ->
+      # vision_pose），UWB 退回只给 origin_setter 做 world<->map 对齐。
+      - LOCALIZATION_SOURCE=${LOCALIZATION_SOURCE:-single_uwb_slam}
+      - SLAM_BACKEND=${SLAM_BACKEND:-dlio}
+      - POINT_LIO_CPU_CORES=${POINT_LIO_CPU_CORES:-4}   # SLAM_BACKEND=dlio时用不上，
+                                  # 留着是为了跟entrypoint.sh的默认值兜底逻辑保持一致
+      # 2026-09-06新增：point_lio的odometry.publish_odometry_without_downsample
+      # 开关外置成环境变量（此前只在point_lio自己的launch文件里有个默认false的
+      # LaunchConfiguration，entrypoint.sh调用时从没传过，等于永远锁死false，
+      # 没有任何地方能打开它）。
+      # ⚠️⚠️ 2026-09-06真机实测确认：这个模式目前不可用，不要在任何实际
+      # 场景下打开——打开后里程计频率确实提升到~100Hz（环境变量/launch参数
+      # 都确认生效），但发布的位置/速度**不跟随真实运动**，飞机被实际移动时
+      # 数值只有1-2厘米量级的噪声波动，不反映真实位移。已排查排除：开关未
+      # 生效、频率未提升、use_imu_as_input分支不匹配（配置`false`与代码执行
+      # 分支一致，不是读错状态对象）。根因还没定位，怀疑是point_lio上游
+      # `publish_odometry_without_downsample`实现本身在`use_imu_as_input=
+      # false`（output-EKF）路径下更深层的问题，需要实际调试（加日志/gdb）
+      # 才能继续，详见DEBUG_JOURNAL.md/read_hw.md同日记录。此前写的"内存增长
+      # 风险"顾虑（200Hz IMU+高频10分钟内存暴涨+437MB，降到100Hz IMU后只涨
+      # +2.6MB）依然有效，但现在有一个更严重、更优先的不可用结论——**在根因
+      # 定位并修复之前，不要为了追求更高频率打开这个开关，默认false不变**。
+      - POINT_LIO_HIGH_FREQ_ODOM=${POINT_LIO_HIGH_FREQ_ODOM:-false}   # SLAM_BACKEND=dlio时用不上
+      # 2026-09-02 pt4ctrl -> px4ctrl：这一处原本跟 .env(CONTROLLER=px4ctrl) 和
+      # flight-stack-entrypoint.sh:511 的兜底默认(px4ctrl) 都不一致，是三处默认值
+      # 里唯一的异类；统一成 px4ctrl。
+      - CONTROLLER=${CONTROLLER:-px4ctrl}
+      - PLANNER=${PLANNER:-ego_planner}
+      # ⚠️ px4ctrl_hw.launch.py读的auto_takeoff_land.no_RC开关，默认false
+      # （真实RC failsafe生效，真机首飞必须保持这个默认值）。之前排查"没接/
+      # 没配好RC导致px4ctrl卡在Waiting for RC、takeoff_land话题完全无反应"
+      # 时只能手动kill px4ctrl_node再临时传参跳过，外部化成环境变量之后
+      # PX4CTRL_NO_RC=true可以直接从这里覆盖，用于没有RC信号时的台架/
+      # dry-run测试（比如没装桨叶的软件全流程验证）。真机首飞前务必确认
+      # 这里没有被误设成true。
+      - PX4CTRL_NO_RC=${PX4CTRL_NO_RC:-false}
+
+      # ---- 2026-08-27新增：px4ctrl级联PID增益/姿态角限幅/手动限速/
+      #      低电压阈值/精确推力模型标定系数，原来写死在ctrl_param_fpv.yaml
+      #      里，外置成环境变量。默认值原样保留yaml里的数字，不设这几个
+      #      变量时行为完全不变；K1/K2/K3是accurate_thrust_model:=true时
+      #      才用得上的精确标定系数(yaml注释"Needs precise calibration!")，
+      #      要用这条精确推力模型必须先现场标定出真实数值再通过下面几个
+      #      变量传入，不能沿用这里的占位默认值。gain.Kvi*/Kvd*(积分/微分项，
+      #      yaml标注"No use now")没有外置，代码里没有实际用到，外置了也没
+      #      意义 ----
+      - PX4CTRL_MAX_ANGLE_DEG=${PX4CTRL_MAX_ANGLE_DEG:-30.0}   # 姿态角限幅(度)
+      - PX4CTRL_MAX_MANUAL_VEL=${PX4CTRL_MAX_MANUAL_VEL:-1.0}  # 手动模式限速(m/s)
+      - PX4CTRL_LOW_VOLTAGE=${PX4CTRL_LOW_VOLTAGE:-13.2}       # 低电压阈值(V)，按实际电池节数调
+      - PX4CTRL_THRUST_K1=${PX4CTRL_THRUST_K1:-0.7583}         # 精确推力模型标定系数，需现场标定
+      - PX4CTRL_THRUST_K2=${PX4CTRL_THRUST_K2:-1.6942}
+      - PX4CTRL_THRUST_K3=${PX4CTRL_THRUST_K3:-0.6786}
+      - PX4CTRL_GAIN_KP0=${PX4CTRL_GAIN_KP0:-1.5}              # 级联PID位置环增益(x/y/z)
+      - PX4CTRL_GAIN_KP1=${PX4CTRL_GAIN_KP1:-1.5}
+      - PX4CTRL_GAIN_KP2=${PX4CTRL_GAIN_KP2:-1.5}
+      - PX4CTRL_GAIN_KV0=${PX4CTRL_GAIN_KV0:-1.5}              # 级联PID速度环增益(x/y/z)
+      - PX4CTRL_GAIN_KV1=${PX4CTRL_GAIN_KV1:-1.5}
+      - PX4CTRL_GAIN_KV2=${PX4CTRL_GAIN_KV2:-1.5}
+      - PX4CTRL_GAIN_KANGR=${PX4CTRL_GAIN_KANGR:-20.0}         # 姿态角速率增益(Roll/Pitch/Yaw)，仅rate控制模式用
+      - PX4CTRL_GAIN_KANGP=${PX4CTRL_GAIN_KANGP:-20.0}
+      - PX4CTRL_GAIN_KANGY=${PX4CTRL_GAIN_KANGY:-20.0}
+      # 2026-09-07新增：yaw锁定开关，px4ctrl/so3ctrl/pt4ctrl三个控制器
+      # 共用（同一套PX4CtrlFSM状态机），静态参数（启动时定死，不支持飞行
+      # 中动态切换）。开启后CMD_CTRL态忽略规划器(ego_planner的
+      # calculate_yaw())算出来的行进方向朝向，改成锁定在起飞瞬间的实际
+      # 朝向——四旋翼平动加速度只由roll/pitch倾角决定、跟yaw无关，锁定
+      # 朝向不影响位置/轨迹跟踪，只是前视相机不再跟随飞行方向，具体见
+      # docker_sim/DEBUG_JOURNAL.md 2026-09-07相关记录。默认false(行为
+      # 不变)，首次真机测试前建议先用docker-compose.yml在仿真里验证过。
+      - PX4CTRL_YAW_LOCK_ENABLED=${PX4CTRL_YAW_LOCK_ENABLED:-false}
+
+      # ---- 规划/避障/控制参数，照抄docker-compose.yml的flight-stack-nx01
+      #      默认值，含义见那边的完整注释，这里不重复 ----
+      - V_MAX=${V_MAX:-1.0}
+      - A_MAX=${A_MAX:-3.0}
+      - J_MAX=${J_MAX:-5.0}
+      - OMEGA_MAX=${OMEGA_MAX:-0.10472}
+      - TIME_WEIGHT=${TIME_WEIGHT:-1.5e+2}
+      - GOAL_SEEN_RADIUS=${GOAL_SEEN_RADIUS:-3.0}
+      - GOAL_RADIUS=${GOAL_RADIUS:-0.3}
+      - DYNAMIC_WEIGHT=${DYNAMIC_WEIGHT:-1e+2}
+      - PLANNER_CW=${PLANNER_CW:-3.0}
+      - DYN_CONSTR_THRUST_WEIGHT=${DYN_CONSTR_THRUST_WEIGHT:-1e+3}
+      - EGO_PLANNING_HORIZON=${EGO_PLANNING_HORIZON:-15.0}
+      - EGO_OBSTACLES_INFLATION=${EGO_OBSTACLES_INFLATION:-0.6}
+      - EGO_REPLAN_THRESH=${EGO_REPLAN_THRESH:-0.1}
+      - EGO_LAMBDA_COLLISION=${EGO_LAMBDA_COLLISION:-1.0}
+      - EGO_LAMBDA_FEASIBILITY=${EGO_LAMBDA_FEASIBILITY:-0.3}
+      - EGO_YAW_DOT_MAX=${EGO_YAW_DOT_MAX:-0.8}
+      - EGO_LOCAL_UPDATE_RANGE_XY=${EGO_LOCAL_UPDATE_RANGE_XY:-15.0}
+      - EGO_MAX_RAY_LENGTH=${EGO_MAX_RAY_LENGTH:-15.0}
+      - EGO_DIST0=${EGO_DIST0:-1.0}
+      # A*搜索的z方向代价权重。默认1.0=上游原行为(各向同性)。>1抑制"从障碍物
+      # 上方/下方绕过"的路径——MID360向下FOV只有-7°，落地立柱下半段在盲区里
+      # 没被建图，A*会找到一条物理上不存在的"从下面钻过去"的路径。详见
+      # read_hw.md 2026-08-28。取值参考(resolution=0.2)：3勉强/5推荐/10过大。
+      - EGO_ASTAR_Z_WEIGHT=${EGO_ASTAR_Z_WEIGHT:-1.0}
+      - EGO_SWARM_CLEARANCE=${EGO_SWARM_CLEARANCE:-1.0}
+      - EGO_NO_REPLAN_THRESH=${EGO_NO_REPLAN_THRESH:-1.0}
+      - EGO_USE_FRAME_ALIGNMENT=${EGO_USE_FRAME_ALIGNMENT:-true}
+      # ---- 2026-08-31 新增：垂直方向参数外置 + 补透传 ----
+      # ⚠️ EGO_MIN_RAY_LENGTH 早就被 launch 读了（自扫描伪点过滤半径），但一直
+      #    没在这里透传过 —— 也就是说之前不管 .env 怎么写都只会拿到 launch 的
+      #    默认值 0.4。这次补上。桨尖半径 0.35m，0.4 只剩 5cm 余量，改 0.5。
+      - EGO_MIN_RAY_LENGTH=${EGO_MIN_RAY_LENGTH:-0.5}
+      # 下面四个原本是 launch 里的硬编码，每换一次场地/起飞点都要 rebuild。
+      # 取值依据（实测锚定）见 launch 文件里那段长注释和 read_hw.md 2026-08-31。
+      # ⚠️ ground_height 必须低于飞机停放时的 odom z（实测 -0.12），否则
+      #    isInMap()=false → getInflateOccupancy() 返回 -1 → 飞机被判定"在障碍
+      #    物里" → 一条轨迹都规划不出来，且日志只报 a star error 不报根因。
+      - EGO_GROUND_HEIGHT=${EGO_GROUND_HEIGHT:--0.35}
+      - EGO_GROUND_FILTER_HEIGHT=${EGO_GROUND_FILTER_HEIGHT:-0.10}
+      # 地面起飞 1.8 / 桌面起飞(净空只剩1.5m) 0.8
+      - EGO_VIRTUAL_CEIL_HEIGHT=${EGO_VIRTUAL_CEIL_HEIGHT:-1.8}
+      - EGO_VIS_TRUNCATE_HEIGHT=${EGO_VIS_TRUNCATE_HEIGHT:-2.0}
+      - EGO_MAP_SIZE_Z=${EGO_MAP_SIZE_Z:-3.2}
+
+    devices:
+      # 占位路径，按实际接线改；也可以用udev规则映射持久化设备名代替这种
+      # 容易随插拔顺序变化的/dev/ttyXXX裸路径，更稳妥，这里先给最简单的写法
+      - ${FC_SERIAL_DEVICE:-/dev/ttyTHS1}:${FC_SERIAL_DEVICE:-/dev/ttyTHS2}
+      - ${UWB_A_SERIAL_DEVICE:-/dev/uwb_a}:${UWB_A_SERIAL_DEVICE:-/dev/uwb_a}
+      - ${UWB_B_SERIAL_DEVICE:-/dev/uwb_b}:${UWB_B_SERIAL_DEVICE:-/dev/uwb_b}
+
+    volumes:
+      - ./runtime_logs:/logs   # 真实飞行数据同样落这个目录，跟仿真习惯保持一致
+      # 2026-08-19新增：RViz2查看点云要用，容器里跑GUI程序透传宿主机X
+      # server的标准做法——挂X11 socket目录+传DISPLAY环境变量。宿主机侧
+      # 还需要执行一次`xhost +local:docker`授权（当前X session存活期间
+      # 有效，重启图形会话会失效，需要重新授权，仿真那边start.sh也是
+      # 同样的处理方式，只是那边脚本文件在这个环境里已经丢失，这里没有
+      # 现成模式可抄，直接按Docker官方GUI透传的标准做法加）。
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    restart: "no"   # 全部验证通过之前保持手动启动，见真机部署操作清单.md
+                     # "3.7 开机自启"一节——不要在还没跑通裸机联调之前就设成
+                     # unless-stopped，容器反复自动重启会让排查更混乱
+
+  # --------------------------------------------------------------------------
+  # vision-stack：机载视觉感知独立容器，2026-08-21新增（阶段1：最小GPU容器
+  # 验证）。跟flight-stack-hw为什么分开见docs/视觉感知vision-stack方案.md，
+  # 具体镜像内容见docker/Dockerfile.vision-stack文件头注释。
+  # --------------------------------------------------------------------------
+  vision-stack:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vision-stack
+      network: host
+      args:
+        HTTP_PROXY: ${http_proxy:-}
+        HTTPS_PROXY: ${https_proxy:-}
+    image: vision-stack:latest
+    runtime: nvidia   # 注入CUDA/TensorRT/argus/gstreamer NVMM插件等L4T库，
+                      # 具体挂载清单见/etc/nvidia-container-runtime/
+                      # host-files-for-container.d/{devices,drivers}.csv
+    environment:
+      # 2026-08-21阶段1实测踩坑：光设runtime: nvidia没有用，容器里/usr/lib/
+      # aarch64-linux-gnu/nvidia/完全是空的，drivers.csv里列的库一个都没挂进来。
+      # /etc/nvidia-container-runtime/config.toml里mode="auto"，但
+      # nvidia-container-runtime-hook实际决定"要不要挂"是看这两个环境变量
+      # 存不存在（沿用nvidia-docker2时代的约定），不是看runtime字段本身——
+      # 没这两个变量，hook直接判定"不是GPU容器"，devices.csv/drivers.csv里
+      # 列的东西一个都不碰。这两个必须显式设，csv机制才会真正生效。
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # 2026-08-24：跟flight-stack-hw用同一个NAMESPACE变量+同样的默认值
+      # (NX01)，多机部署时两边命名空间必须保持一致，不能各设各的——见
+      # read_hw.md同日"vision-stack命名空间统一"条目。
+      - NAMESPACE=${NAMESPACE:-NX01}
+      # 2026-08-21曾经加过运行时HTTP_PROXY/HTTPS_PROXY(给下载公版YOLO26n
+      # 权重用)，2026-08-22实测踩坑后去掉了(当时是WebRTC的ICE/STUN协商被
+      # 这两个变量搞坏，WebRTC已经在2026-08-24整个删掉，不再有相关代码，
+      # 但"不要把代理焊进容器常驻环境变量"这个教训依然适用)。权重文件已经
+      # 下载缓存在models/目录，不再需要这两个变量支持一次性下载。以后如果
+      # 又要在容器里下载什么东西，宁可临时`docker exec`用带代理的shell
+      # 单独跑。
+    # privileged: true 而不是精确列devices——2026-08-21现场核查过，Argus相机
+    # 管线实际依赖的设备节点不止/dev/video0一个，还有/dev/nvhost-ctrl-vi0/vi1、
+    # /dev/nvhost-ctrl-isp(-thi)、/dev/nvhost-ctrl-nvcsi、/dev/media0、
+    # /dev/capture-vi-channel0~71、/dev/capture-isp-channel0~63(编号不保证
+    # 跨内核/驱动版本稳定)、/dev/nvmap、/dev/v4l-subdev*等一长串，其中绝大部分
+    # 不在nvidia-container-runtime的devices.csv挂载清单里（那份清单主要覆盖
+    # GPU/nvdla/pva/framebuffer，不覆盖VI/ISP/NVCSI相机通道）。逐条列举不现实、
+    # 编号也可能变化，这台机是单一用途的机载计算机（不是多租户共享服务器），
+    # 用privileged换"不用猜设备节点"的简单性是合理取舍。之后如果想收紧，可以
+    # 用device_cgroup_rules精确到主设备号替代，不是必须现在做。
+    privileged: true
+    network_mode: host
+    ipc: host
+    volumes:
+      - /tmp/argus_socket:/tmp/argus_socket   # nvargus-daemon跑在host上，容器内
+                                                # nvarguscamerasrc插件靠这个socket
+                                                # 跟它通信，权限是0777，不需要额外
+                                                # 处理容器内用户/组
+      - ./models:/models   # 导出的ONNX/.engine文件落这里，跟flight-stack的
+                            # runtime_logs同样的思路——容器可以随便recreate，
+                            # 模型文件不跟着丢；.engine是跟硬件/TensorRT版本
+                            # 绑定的产物，不建议提交进git（见models/.gitignore）
+      - ./src/vision_stack:/opt/vision_ws/src/vision_stack   # 2026-08-22改成正式
+                            # ament_python ROS2包，挂载整个包目录（不只是python
+                            # 子目录），跟flight-stack的/opt/<name>_ws/src同样的
+                            # workspace命名习惯。改代码后要重新colcon build才生效
+                            # （build产物在容器可写层，force-recreate会丢，跟
+                            # read_hw.md记录过的live_src同样的限制）
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: "no"
+    command: sleep infinity   # 阶段1只是进容器手动跑gst-launch-1.0验证管线通不通，
+                               # 还没有真正的entrypoint/推理代码，先占住容器不退出

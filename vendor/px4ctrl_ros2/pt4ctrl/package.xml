@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pt4ctrl</name>
+  <version>0.0.0</version>
+  <description>
+    docker_sim专属的板外控制器（2026-08-13新增）：复用px4ctrl(ZJU-FAST-Lab，
+    GPLv3)的飞行状态机（PX4CtrlFSM，起飞/悬停/降落/RC失控保护，逐字未改），
+    删掉推力模型估计+姿态解算这两步控制律计算，改成把状态机算出来的位置/
+    速度/加速度/偏航参考量直接打包成trajectory_msgs/MultiDOFJointTrajectory
+    发到mavros/setpoint_trajectory/local，交给PX4固件自己的位置控制环解算
+    姿态/推力——这条转发方式仿照ros2_px4_stack(dynus分支)
+    dynus_offboard_node.py的point_to_traj/_pack_into_traj。
+
+    动机：ros2_px4_stack没有真正的状态机，起飞靠touch文件触发一次性动作，
+    降落靠直接调mavros AUTO.LAND，两者互不知情，架构上只支持起飞一次；
+    px4ctrl/so3ctrl有可反复起降的状态机，但直接发姿态指令，要求companion
+    computer高频闭环，LOCALIZATION_SOURCE=uwb_imu这类位置反馈上限~48Hz的
+    场景下2026-08-12实测炸机、被禁止使用。pt4ctrl取两者之长：px4ctrl的
+    可反复起降状态机 + ros2_px4_stack这种对更新率不敏感的setpoint转发
+    方式，理论上应该能同时覆盖"反复起降"和"uwb_imu兼容"两个目标，但这个
+    组合此前从未实测过，见docker_sim/DEBUG_JOURNAL.md。
+
+    跟px4ctrl/so3ctrl是同源但不同的独立ROS2包，通过CONTROLLER=pt4ctrl
+    环境变量在flight-stack-entrypoint.sh里选用，四者
+    （ros2_px4_stack/px4ctrl/so3ctrl/pt4ctrl）互斥、四选一。
+  </description>
+  <maintainer email="iszhouxin@zju.edu.cn">uav</maintainer>
+  <license>GPLv3</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <depend>quadrotor_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>uav_utils</depend>
+  <depend>Eigen3</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

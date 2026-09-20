@@ -1,0 +1,65 @@
+diff --git a/include/mighty/mighty.hpp b/include/mighty/mighty.hpp
+index 0000000..0000000 100644
+--- a/include/mighty/mighty.hpp
++++ b/include/mighty/mighty.hpp
+@@ -516,6 +516,11 @@ class MIGHTY {
+   double previous_yaw_ = 0.0;                       // Previous yaw
+   double prev_dyaw_ = 0.0;                          // Previous dyaw
+   double dyaw_filtered_ = 0.0;                      // Filtered dyaw
++  // 2026-08-13：进入GOAL_SEEN那一刻锁定的yaw值——见getDesiredYaw()里
++  // GOAL_SEEN分支的说明，一旦进入就不再跟着"当前位置到G_term的方向"
++  // 持续重算(那个方向在快到终点时对位置噪声极敏感，容易抖)。
++  double goal_seen_locked_yaw_ = 0.0;
++  bool goal_seen_yaw_locked_ = false;               // 上面那个值是否已经锁定
+   PieceWiseQuinticPol pwp_to_share_;                // Piecewise polynomial to share
+ 
+   // Drone status
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 0000000..0000000 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -1891,9 +1908,27 @@ void MIGHTY::getDesiredYaw(state& next_goal, const state& yaw_look_ahead_goal) {
+       // state constraint" already means GOAL_SEEN is trying to achieve, so
+       // there's no separate front-end needed here the way TRAVELING needs
+       // one to average out normal cruise-phase local optimizer jitter.
+-      const double dx = G_term.pos[0] - local_state.pos.x();
+-      const double dy = G_term.pos[1] - local_state.pos.y();
+-      desired_yaw = safeAtan2OrHold(dx, dy, previous_yaw_);
++      //
++      // 2026-08-13：进一步改成"进入GOAL_SEEN那一刻算一次、锁定，之后不再
++      // 变"，不再每个周期都重新算"当前位置到G_term的方向"。原因：越接近
++      // G_term，"位置到G_term"这个方向对位置本身的噪声越敏感——设想
++      // G_term在正前方1米，飞机因为悬停抖动侧向偏了5厘米，方向角就能摆动
++      // 好几度；等飞机已经贴到G_term跟前几厘米时，同样量级的悬停抖动能让
++      // 方向角摆动几十度甚至完全反向。这是"越接近目标、朝向越不稳"的一个
++      // 真实几何原因，不是"同一段plan_内部的高频噪声"（那个已经用
++      // alpha_filter_dyaw=0.8压住了），alpha滤波器压不住这种大幅度、由
++      // 位置噪声直接放大出来的角度跳变。既然GOAL_SEEN本来就是"已经认为
++      // 足够接近终点、只需要保持最终朝向"这个阶段，没有必要在这个阶段还
++      // 继续跟着位置抖动去调整朝向——锁定进入时算出的那一个值，之后固定
++      // 不变，直到离开GOAL_SEEN（见changeDroneStatus()里goal_seen_yaw_
++      // locked_的复位）。
++      if (!goal_seen_yaw_locked_) {
++        const double dx = G_term.pos[0] - local_state.pos.x();
++        const double dy = G_term.pos[1] - local_state.pos.y();
++        goal_seen_locked_yaw_ = safeAtan2OrHold(dx, dy, previous_yaw_);
++        goal_seen_yaw_locked_ = true;
++      }
++      desired_yaw = goal_seen_locked_yaw_;
+       diff = desired_yaw - local_state.yaw;
+       next_goal.yaw = desired_yaw;
+       break;
+@@ -2200,6 +2235,13 @@ void MIGHTY::changeDroneStatus(int new_status) {
+ 
+   std::cout << std::endl;
+ 
++  // 2026-08-13：离开GOAL_SEEN（去任何别的状态）时把yaw锁定标志复位，下次
++  // 再进入GOAL_SEEN（不管是同一个目标点重新触发，还是全新的目标点）都要
++  // 重新算一次、重新锁定，不能继续用上一次锁定的陈旧值。见getDesiredYaw()
++  // GOAL_SEEN分支+mighty.hpp里goal_seen_locked_yaw_/goal_seen_yaw_locked_
++  // 的说明。
++  if (new_status != DroneStatus::GOAL_SEEN) goal_seen_yaw_locked_ = false;
++
+   drone_status_ = new_status;
+ }
+ 

@@ -1,0 +1,31 @@
+diff --git a/src/lddc.cpp b/src/lddc.cpp
+index 6952db4..6ba7bb9 100644
+--- a/src/lddc.cpp
++++ b/src/lddc.cpp
+@@ -490,9 +490,23 @@ void Lddc::InitImuMsg(const ImuData& imu_data, ImuMsg& imu_msg, uint64_t& timest
+   imu_msg.angular_velocity.x = imu_data.gyro_x;
+   imu_msg.angular_velocity.y = imu_data.gyro_y;
+   imu_msg.angular_velocity.z = imu_data.gyro_z;
+-  imu_msg.linear_acceleration.x = imu_data.acc_x;
+-  imu_msg.linear_acceleration.y = imu_data.acc_y;
+-  imu_msg.linear_acceleration.z = imu_data.acc_z;
++  // 2026-08-18新增：Livox SDK原始acc_x/y/z是以g(标准重力加速度)为单位的，
++  // 但sensor_msgs/Imu.msg的linear_acceleration字段规范要求m/s²——原来这里
++  // 直接透传，实测静止时这三个分量合成模长只有~0.98(应该接近9.8)，下游
++  // DLIO拿这个当m/s²处理，propagateState()里重力补偿(减去gravity_=9.80665)
++  // 残留了将近9.8的"幽灵向下加速度"每周期累积进速度，是这次真机联调速度/
++  // 位置持续发散(数千m/s量级)的主因。本来想在DLIO那边用imu/intrinsics/
++  // accel/sm这个缩放矩阵配置项转换，但DLIO的imu/calibration(自动IMU标定)
++  // 开启时（odom.cc这段：if (!this->imu_calibrate_) {...sm生效...} else
++  // {...强制Identity，无视sm配置...}）会无条件把这个矩阵强制设成单位矩阵、
++  // 完全无视配置——DLIO自动标定只能估加法性的bias，没法修正这种乘法性的
++  // 单位错误，两边配合不了，所以从数据源头这里直接转换成m/s²，不依赖DLIO
++  // 那边的配置。2026-08-18已实测验证：修完net_accel_z从~-8.5收敛到±0.1
++  // 以内、速度收敛到毫米/秒量级、GICP连续观察无一次LOST TRACK。
++  static constexpr double kStandardGravity = 9.80665;
++  imu_msg.linear_acceleration.x = imu_data.acc_x * kStandardGravity;
++  imu_msg.linear_acceleration.y = imu_data.acc_y * kStandardGravity;
++  imu_msg.linear_acceleration.z = imu_data.acc_z * kStandardGravity;
+ }
+ 
+ void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index) {

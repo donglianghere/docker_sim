@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+真机部署GCS侧CycloneDDS配置模板，2026-08-14新增。
+
+用法：复制成 cyclonedds_gcs.xml（去掉.example后缀，这个文件含站点专属IP，
+已经加进.gitignore不会被提交），把下面两处占位IP改成现场实际值：
+  1. NetworkInterfaceAddress：本机（GCS）实际用来跟Jetson通信的网卡IP，
+     `ip a`确认。
+  2. Peer address：Jetson的静态IP（要跟flight-stack-hw容器那边
+     GCS_PEER_ADDRESS配的是"反过来"的关系——这里填Jetson的IP，Jetson那边
+     填GCS的IP，双向都要配，只配一边发现不了对方）。
+
+单机阶段（GCS+1台Jetson）用这份静态Peer配置就够。双机阶段（GCS+2台
+Jetson）建议升级成Fast-DDS/CycloneDDS Discovery Server（把"两两互相配对"
+简化成"大家都连一个中心"），见docker_sim/真机部署与Docker开发知识梳理.md
+第二章"ROS2/DDS网络基础知识"，这份骨架代码暂时只做了静态Peer这一步。
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain>
+    <General>
+      <Interfaces>
+        <NetworkInterface autodetermine="false" address="GCS_LOCAL_IP_PLACEHOLDER" priority="default" multicast="true"/>
+      </Interfaces>
+      <AllowMulticast>true</AllowMulticast>
+    </General>
+    <Discovery>
+      <Peers>
+        <Peer address="JETSON_IP_PLACEHOLDER"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

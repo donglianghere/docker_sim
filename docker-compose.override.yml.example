@@ -1,0 +1,36 @@
+# ----------------------------------------------------------------------------
+# volume调试模式模板，2026-08-14新增。
+#
+# 用法：复制这个文件成 docker-compose.override.yml（去掉.example后缀），
+# Docker Compose会自动加载它叠加到docker-compose.yml上（不需要-f参数，
+# `docker compose up`会自动识别）。docker-compose.override.yml本身已加进
+# .gitignore，不会被提交——这是个人调试配置，不同人正在调试的模块不一样，
+# 不应该进版本控制影响别人。
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   vim docker-compose.override.yml   # 按需修改要挂载的模块
+#
+# ⚠️ 不要直接挂载 staging/xxx_ws_src 原始目录——那是没打过任何patch的上游
+# 代码，直接挂载等于把已经修好的bug全部打回原形。正确做法：
+#   1. 复制一份出来（比如 /tmp/dlio_ws_src_patched），
+#   2. 按 docker/Dockerfile.flight-stack 里这个模块的patch清单，同样顺序
+#      手动 git apply 一遍，
+#   3. git init + commit 打一个基准，方便后面 git diff 直接拿到新patch，
+#   4. 下面volumes:挂载这份"打好补丁的工作副本"，不是原始staging/。
+# 完整步骤和原理见 docker_sim/真机部署与Docker开发知识梳理.md 第六章
+# "调试模式方案对比"。
+#
+# 这个挂载只影响运行时（容器启动时生效），不需要重新docker build，也不会
+# 影响patch机制本身（patch是build时apply的，两者发生在不同阶段，互不干扰）。
+# ----------------------------------------------------------------------------
+services:
+
+  flight-stack-nx01:
+    volumes:
+      # 示例：调试DLIO时打开下面这行（先按上面说明准备好"打好补丁的工作副本"）
+      # - /tmp/dlio_ws_src_patched:/opt/dlio_ws/src
+
+      # 示例：调试这个项目自己写的胶水包不需要"打补丁"这一步，改了直接生效，
+      # 可以直接挂载宿主机的src/目录
+      # - ./src/ego_planner_bridge:/opt/ego_planner_ws/src/ego_planner_bridge
+      []

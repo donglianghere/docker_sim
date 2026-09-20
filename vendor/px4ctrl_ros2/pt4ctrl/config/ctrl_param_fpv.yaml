@@ -1,0 +1,32 @@
+#########################################################################
+# pt4ctrl没有控制律，这份yaml比px4ctrl的同名文件精简很多——删掉了gain/
+# rotor_drag/thrust_model/mass/gra/max_angle/low_voltage/use_bodyrate_ctrl，
+# 只留状态机+主循环+RC实际会读的字段。PX4CtrlParam.cpp用read_essential_param
+# 读取，任何一个字段缺失都会导致节点启动失败，改这份文件时不要漏字段。
+#########################################################################
+/**:
+  ros__parameters:
+    ctrl_freq_max: 100.0
+    max_manual_vel: 1.0
+    yaw_lock_enabled: false # 2026-09-07新增：开启后CMD_CTRL态忽略规划器算出来的
+                             # 行进方向朝向，锁定在起飞瞬间的实际朝向。启动时静态
+                             # 参数，PX4CTRL_YAW_LOCK_ENABLED环境变量覆盖，见
+                             # docker_sim/DEBUG_JOURNAL.md 2026-09-07相关记录。
+
+    rc_reverse:
+      roll: false
+      pitch: false
+      yaw: false
+      throttle: false
+
+    auto_takeoff_land:
+      enable: true
+      enable_auto_arm: true
+      no_RC: false
+      takeoff_height: 1.0 # m
+      takeoff_land_speed: 0.3 # m/s
+
+    msg_timeout:
+      odom: 0.5
+      rc: 0.5
+      cmd: 0.5

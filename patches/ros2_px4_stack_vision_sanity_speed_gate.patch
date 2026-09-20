@@ -1,0 +1,75 @@
+diff --git a/ros2_px4_stack/transforms/repub_odom.py b/ros2_px4_stack/transforms/repub_odom.py
+index f2849bc..6b062bf 100644
+--- a/ros2_px4_stack/transforms/repub_odom.py
++++ b/ros2_px4_stack/transforms/repub_odom.py
+@@ -5,6 +5,7 @@
+ import rclpy
+ from rclpy.node import Node
+ from rclpy.node import Node
++from rclpy.time import Time
+ from geometry_msgs.msg import PoseStamped, TwistStamped, PoseWithCovarianceStamped, TwistWithCovarianceStamped
+ import threading
+ from threading import Thread
+@@ -59,6 +60,30 @@ class OdomRepublisher(Node):
+         self.stale_timeout_sec = self.declare_parameter("~stale_timeout_sec", 0.5).value
+         self._was_stale = False
+ 
++        # 2026-09-04：真机排查发现DLIO在外部定位源（机载链路/CAN总线）短暂
++        # 中断重连时，会把一个跟断线前不连续的绝对坐标直接当成新数据发过来
++        # （同一次真机测试实测过0.1秒内跳变31米），这个节点原来对上游数据
++        # 来者不拒，直接原样转发给PX4的vision_pose——如果当时飞控在依赖这路
++        # 数据做位置控制的模式(POSCTL/OFFBOARD/AUTO)，这种量级的位置阶跃会
++        # 让EKF直接把状态贴过去，触发剧烈修正动作，很容易导致炸机。加一层
++        # 最基础的合理性检查：算这次收到的位置相对上一次真正转发出去的位置
++        # 隐含速度，超过物理不可能的阈值就丢弃这一帧、不转发（保留上一帧
++        # 作为PX4还能看到的"最后已知好值"），让下面已有的stale_timeout_sec
++        # 看门狗去处理"上游持续给不出靠谱数据"这种情况——不在这里做平滑/
++        # 外推，跟DLIO自己propagateState()/GICP那边"拒绝这一帧、回滚到上次
++        # 已知状态"是同一个防御思路，宁可暂停更新也不能把一个不连续的坏值
++        # 喂给下游的位置控制环路。阈值默认15m/s：本机VEHICLE_F_MAX_N=55N/
++        # VEHICLE_MASS_KG=2.5kg换算出的最大推重比只够支持远低于这个速度的
++        # 加速度，15m/s对这台机器来说已经是"正常飞行不可能达到"的量级，跟
++        # DLIO内部updateKeyframes()里同类检查(keyframe_max_velocity_默认
++        # 5m/s，那边是"小房间"场景更保守)是同一类防护，只是这里用于更通用
++        # 的部署环境所以阈值放宽一些。
++        self.max_reasonable_speed_mps = self.declare_parameter(
++            "~max_reasonable_speed_mps", 15.0
++        ).value
++        self._last_fwd_pos = None
++        self._last_fwd_stamp = None
++
+         # 2026-08-10改动：原来这里是"定时器按pub_hz(100Hz)固定重发_last_*_msg"的
+         # 轮询模式——DLIO实测发布频率在这套仿真里~90-94Hz（callback group调度
+         # 争抢导致，真机上更可能更低，取决于点云配准的实际耗时），100Hz轮询会
+@@ -122,6 +147,31 @@ class OdomRepublisher(Node):
+         self._twist_pub.publish(twist_msg)
+ 
+     def _livox_odom_cb(self, msg):
++        # 合理性检查放在最前面：不合理就直接return，不做下面任何构造/
++        # 发布/_last_recv_time更新——这样如果上游持续发跳变坏值，
++        # _last_recv_time会停留在最后一次好数据的时刻，stale_timeout_sec
++        # 看门狗能正确判定"已经陈旧"并报警，而不是被这些坏值持续"续命"。
++        p = msg.pose.pose.position
++        cur_pos = (p.x, p.y, p.z)
++        cur_stamp = Time.from_msg(msg.header.stamp)
++        if self._last_fwd_pos is not None and self._last_fwd_stamp is not None:
++            dt = (cur_stamp - self._last_fwd_stamp).nanoseconds / 1e9
++            if dt > 1e-3:  # dt太小(含0/负值，比如乱序消息)算出的速度没意义，跳过本次检查
++                dist = ((cur_pos[0] - self._last_fwd_pos[0]) ** 2 +
++                        (cur_pos[1] - self._last_fwd_pos[1]) ** 2 +
++                        (cur_pos[2] - self._last_fwd_pos[2]) ** 2) ** 0.5
++                implied_speed = dist / dt
++                if implied_speed > self.max_reasonable_speed_mps:
++                    self.get_logger().error(
++                        f"丢弃这一帧odom：隐含速度{implied_speed:.1f}m/s "
++                        f"(位移{dist:.2f}m / dt={dt:.3f}s) 超过合理阈值"
++                        f"{self.max_reasonable_speed_mps}m/s，大概率是上游"
++                        f"定位源重连时的不连续跳变，不转发给PX4，继续保留"
++                        f"上一帧")
++                    return
++        self._last_fwd_pos = cur_pos
++        self._last_fwd_stamp = cur_stamp
++
+         # Forward raw odom to PX4 (in camera_init frame).
+         # DYNUS handles world↔local conversion internally via init_pose_transform.
+         pose_msg = PoseWithCovarianceStamped()

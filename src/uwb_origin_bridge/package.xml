@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uwb_origin_bridge</name>
+  <version>0.0.1</version>
+  <description>
+    起飞点"一键锁定"：把UWB(或本仿真里的Gazebo真值替身)给出的绝对位置
+    锁存成DLIO局部里程计到统一任务坐标系的偏移量，用一条静态TF+一份
+    持久化文件表达，供多机协同/目标点下发使用。数据源跟uwb_sim的
+    /{ns}/uwb/pose_abs话题解耦——真机上换成真实UWB驱动，这个包不用改。
+  </description>
+  <maintainer email="todo@todo.todo">todo</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_ros</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

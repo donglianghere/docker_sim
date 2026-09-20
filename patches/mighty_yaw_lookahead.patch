@@ -1,0 +1,243 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index d8db603..c5d926a 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -206,6 +206,13 @@ mighty_node:
+         # elsewhere in this patch chain).
+         yaw_spinning_threshold: 10000              # [-] if the planner keeps failing more than this number, we switch to the spinning mode
+         yaw_spinning_dyaw: 1.0                  # [rd/s] Spinning dyaw
++        yaw_look_ahead_time: 1.0                # [s] How far ahead on the local plan to look
++        # when picking the yaw direction target in TRAVELING/GOAL_SEEN,
++        # instead of the immediate next sample (~dc seconds/centimeters
++        # ahead, noise-sensitive -- this was the main source of frequent
++        # yaw wobble during otherwise-normal flight, e.g. small lateral
++        # position adjustments from swarm avoidance). Mirrors ego_planner's
++        # traj_server.cpp calculate_yaw() time_forward_ (also 1.0s).
+ 
+         # Replanning reliability
+         max_replan_failure_duration: 30.0       # [s] give up on current terminal goal after this many seconds of
+diff --git a/config/mighty.yaml b/config/mighty.yaml
+index 3ef45a4..741748c 100644
+--- a/config/mighty.yaml
++++ b/config/mighty.yaml
+@@ -237,6 +237,9 @@ mighty_node:
+         alpha_filter_dyaw: 0.8                          # [-] Yaw rate filter (higher = more aggressive)
+         yaw_spinning_threshold: 10000                   # [-] Failures before switching to spinning mode
+         yaw_spinning_dyaw: 1.0                          # [rad/s] Spinning yaw rate
++        yaw_look_ahead_time: 1.0                        # [s] Look-ahead time on the local plan for
++        # the yaw direction target in TRAVELING/GOAL_SEEN (mirrors
++        # ego_planner traj_server.cpp calculate_yaw()'s time_forward_)
+ 
+         # --- Map Internals ---
+         map_buffer: 1.0                                 # [m] Buffer for goal & A point
+diff --git a/include/mighty/mighty.hpp b/include/mighty/mighty.hpp
+index eaee4e3..07caa9e 100644
+--- a/include/mighty/mighty.hpp
++++ b/include/mighty/mighty.hpp
+@@ -223,8 +223,10 @@ class MIGHTY {
+ 
+   /** @brief Compute the desired yaw for the next goal based on velocity direction.
+    *  @param next_goal Goal state whose yaw field is updated.
++   *  @param yaw_look_ahead_goal Point further ahead on the local plan, used
++   *         as the direction target in TRAVELING/GOAL_SEEN (see getNextGoal).
+    */
+-  void getDesiredYaw(state& next_goal);
++  void getDesiredYaw(state& next_goal, const state& yaw_look_ahead_goal);
+ 
+   /** @brief Command a yaw rotation by the given angular difference.
+    *  @param diff Yaw angle difference in radians.
+diff --git a/include/mighty/mighty_type.hpp b/include/mighty/mighty_type.hpp
+index 6d399fe..f150ec1 100644
+--- a/include/mighty/mighty_type.hpp
++++ b/include/mighty/mighty_type.hpp
+@@ -247,6 +247,11 @@ struct parameters {
+   double w_max;
+   int yaw_spinning_threshold;
+   double yaw_spinning_dyaw;
++  // How far ahead (seconds) on the local plan to look when picking the yaw
++  // direction target in TRAVELING/GOAL_SEEN, instead of the immediate next
++  // sample (~par_.dc seconds/centimeters ahead, noise-sensitive). Mirrors
++  // ego_planner's traj_server.cpp calculate_yaw() time_forward_ (=1.0s).
++  double yaw_look_ahead_time;
+ 
+   // Replanning reliability: give up on the current terminal goal after this
+   // many seconds of continuous replanning failure instead of retrying
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 3a6e641..a70f176 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -13,6 +13,26 @@ using namespace termcolor;
+ 
+ typedef timer::Timer MyTimer;
+ 
++namespace {
++// atan2() on a near-zero direction vector is dominated by position noise
++// and can flip unpredictably across the full +-180deg range between
++// consecutive planner cycles -- this is what shows up as continuous yaw
++// spinning whenever the reference point (a look-ahead trajectory sample in
++// TRAVELING/GOAL_SEEN, or the terminal goal in YAWING) sits within noise
++// distance of the point the direction is measured from. Originally only
++// guarded in the TRAVELING/GOAL_SEEN branch (mighty_traveling_yaw_zero_
++// dist_guard.patch); the YAWING branch had the exact same failure mode
++// (atan2(G_term - next_goal) both very close to the goal) and was the
++// actual source of "spinning while settling final heading at the goal"
++// that the TRAVELING/GOAL_SEEN-only guard didn't cover. Factored out so
++// both branches share one guard instead of duplicating the threshold.
++constexpr double kYawZeroDistGuard = 0.05;  // [m]
++
++double safeAtan2OrHold(double dx, double dy, double fallback_yaw) {
++  return (std::hypot(dx, dy) > kYawZeroDistGuard) ? std::atan2(dy, dx) : fallback_yaw;
++}
++}  // namespace
++
+ // ----------------------------------------------------------------------------
+ 
+ /**
+@@ -1682,7 +1702,21 @@ bool MIGHTY::getNextGoal(state& next_goal) {
+         next_goal.yaw = previous_yaw_;
+         next_goal.dyaw = 0.0;
+       } else {
+-        getDesiredYaw(next_goal);
++        // next_goal (local_plan.front()) is only par_.dc (~1cm at typical
++        // speeds) ahead of local_state.pos -- using it as the yaw target in
++        // TRAVELING/GOAL_SEEN is nearly as noise-sensitive as using the
++        // instantaneous velocity direction, and is the main source of the
++        // "frequent yaw wobble" ego_planner doesn't exhibit (ego's
++        // traj_server.cpp calculate_yaw() looks time_forward_=1.0s ahead on
++        // the same trajectory instead of one sample ahead). local_plan is
++        // dc-spaced and captured before pop_front, so index 0 == "now" and
++        // index i == i*dc seconds ahead; look yaw_look_ahead_time seconds
++        // ahead on this same plan, clamped to the last available sample
++        // (mirrors ego's clamp-to-traj_duration_ near the trajectory end).
++        size_t look_ahead_idx = std::min(
++            local_plan.size() - 1,
++            static_cast<size_t>(std::round(par_.yaw_look_ahead_time / par_.dc)));
++        getDesiredYaw(next_goal, local_plan[look_ahead_idx]);
+       }
+     }
+ 
+@@ -1714,8 +1748,13 @@ bool MIGHTY::getNextGoal(state& next_goal) {
+ /**
+  * @brief Computes the desired yaw for the next goal.
+  * @param state &next_goal: Next goal state to update with desired yaw.
++ * @param state &yaw_look_ahead_goal: Point further ahead on the local plan
++ *        (see getNextGoal) used as the direction target for TRAVELING/
++ *        GOAL_SEEN -- only the yaw target is computed from this point,
++ *        next_goal's own pos/vel/accel/jerk (the actual position setpoint)
++ *        are untouched.
+  */
+-void MIGHTY::getDesiredYaw(state& next_goal) {
++void MIGHTY::getDesiredYaw(state& next_goal, const state& yaw_look_ahead_goal) {
+   double diff = 0.0;
+   double desired_yaw = 0.0;
+ 
+@@ -1739,25 +1778,67 @@ void MIGHTY::getDesiredYaw(state& next_goal) {
+         getG(G_now);
+         desired_yaw = G_now.yaw;
+       } else {
+-        desired_yaw = atan2(G_term.pos[1] - next_goal.pos[1], G_term.pos[0] - next_goal.pos[0]);
++        // NOTE: this whole DroneStatus::YAWING case is currently dead code
++        // for UAVs -- the only changeDroneStatus(DroneStatus::YAWING) call
++        // in this file is gated on par_.vehicle_type == "ground_robot"
++        // (needReplan()'s corridor-hop block), so a drone never actually
++        // enters this switch case. Originally guarded this branch on the
++        // theory that it was where "spinning after arrival" came from;
++        // turned out the real live cause was GOAL_SEEN reading a stale
++        // look-ahead point from an unrefreshed plan_ during a replan
++        // failure stretch (see the GOAL_SEEN case below) -- this guard is
++        // still correct and harmless to keep (same near-zero-vector
++        // failure mode would apply here if vehicle_type ever becomes
++        // "ground_robot" for something other than the corridor-hop path),
++        // just not the fix that mattered for the reported UAV symptom.
++        const double dx = G_term.pos[0] - next_goal.pos[0];
++        const double dy = G_term.pos[1] - next_goal.pos[1];
++        desired_yaw = safeAtan2OrHold(dx, dy, previous_yaw_);
+       }
+       diff = desired_yaw - local_state.yaw;
+       // std::cout << "diff1= " << diff << std::endl;
+       break;
+-    case DroneStatus::TRAVELING:
+     case DroneStatus::GOAL_SEEN: {
+-      // next_goal.pos is the very next sample on the local spline, only
+-      // centimeters ahead of local_state.pos in general -- right after a
+-      // GOAL_REACHED -> TRAVELING transition (or on any near-stationary
+-      // segment) that delta shrinks to noise level, and atan2() on a
+-      // near-zero vector spins unpredictably across the full +-180deg
+-      // range from one planner cycle to the next. Same failure class as
+-      // the z_B/y_B degeneracies already guarded in get_drone_frame() on
+-      // the ros2_px4_stack side -- hold the previous yaw instead of
+-      // trusting a direction computed from noise.
+-      const double dx = next_goal.pos[0] - local_state.pos.x();
+-      const double dy = next_goal.pos[1] - local_state.pos.y();
+-      desired_yaw = (std::hypot(dx, dy) > 0.05) ? atan2(dy, dx) : previous_yaw_;
++      // Deliberately NOT using yaw_look_ahead_goal here, unlike TRAVELING
++      // below -- GOAL_SEEN means needReplan() has already switched the
++      // local optimizer to "hard final state constraint" (see needReplan's
++      // comment), i.e. the remaining plan_ is meant to terminate at G_term.
++      // But if replanning has been failing (confirmed live: HGP search
++      // stuck failing every cycle for 60+ seconds while hovering near but
++      // not quite within goal_radius of G_term, plan_ never refreshed),
++      // yaw_look_ahead_goal silently keeps reading whatever stale content
++      // is sitting in the unrefreshed plan_ tail -- a real, non-near-zero
++      // vector, so the safeAtan2OrHold guard (which only catches near-zero
++      // vectors) does nothing to stop it, and desired_yaw tracks wherever
++      // that stale point happens to be relative to the hovering drone
++      // instead of the actual goal direction. This is what showed up live
++      // as "large-angle spinning after arrival, overshooting far past the
++      // direction of travel" -- not a small noise wobble, a real but wrong
++      // target. G_term itself doesn't have this staleness problem (it's
++      // read fresh from mtx_G_term_ above, not from the replan-dependent
++      // plan_ queue), and heading toward it is exactly what "hard final
++      // state constraint" already means GOAL_SEEN is trying to achieve, so
++      // there's no separate front-end needed here the way TRAVELING needs
++      // one to average out normal cruise-phase local optimizer jitter.
++      const double dx = G_term.pos[0] - local_state.pos.x();
++      const double dy = G_term.pos[1] - local_state.pos.y();
++      desired_yaw = safeAtan2OrHold(dx, dy, previous_yaw_);
++      diff = desired_yaw - local_state.yaw;
++      next_goal.yaw = desired_yaw;
++      break;
++    }
++    case DroneStatus::TRAVELING: {
++      // See getNextGoal's comment on look_ahead_idx: yaw_look_ahead_goal is
++      // par_.yaw_look_ahead_time seconds ahead on the same local plan
++      // (clamped to its last sample), not the immediate next_goal.pos --
++      // averages out small lateral wiggles from swarm avoidance/replanning
++      // the way ego_planner's calculate_yaw() does. Still needs the same
++      // near-zero-vector guard as before: near the very end of a short
++      // remaining plan, the clamped look-ahead point can itself sit right
++      // on top of local_state.pos.
++      const double dx = yaw_look_ahead_goal.pos[0] - local_state.pos.x();
++      const double dy = yaw_look_ahead_goal.pos[1] - local_state.pos.y();
++      desired_yaw = safeAtan2OrHold(dx, dy, previous_yaw_);
+       diff = desired_yaw - local_state.yaw;
+       next_goal.yaw = desired_yaw;
+       break;
+diff --git a/src/mighty/mighty_node.cpp b/src/mighty/mighty_node.cpp
+index 5cfcfe7..c856658 100644
+--- a/src/mighty/mighty_node.cpp
++++ b/src/mighty/mighty_node.cpp
+@@ -715,6 +715,7 @@ void MIGHTY_NODE::declareParameters() {
+   this->declare_parameter("w_max", 0.5);
+   this->declare_parameter("yaw_spinning_threshold", 10);
+   this->declare_parameter("yaw_spinning_dyaw", 0.1);
++  this->declare_parameter("yaw_look_ahead_time", 1.0);
+ 
+   // Replanning reliability
+   this->declare_parameter("max_replan_failure_duration", 0.0);
+@@ -1066,6 +1067,7 @@ void MIGHTY_NODE::setParameters() {
+   par_.w_max = this->get_parameter("w_max").as_double();
+   par_.yaw_spinning_threshold = this->get_parameter("yaw_spinning_threshold").as_int();
+   par_.yaw_spinning_dyaw = this->get_parameter("yaw_spinning_dyaw").as_double();
++  par_.yaw_look_ahead_time = this->get_parameter("yaw_look_ahead_time").as_double();
+ 
+   // Replanning reliability
+   par_.max_replan_failure_duration = this->get_parameter("max_replan_failure_duration").as_double();
+@@ -1370,6 +1372,7 @@ void MIGHTY_NODE::printParameters() {
+   RCLCPP_INFO(this->get_logger(), "W Max: %f", par_.w_max);
+   RCLCPP_INFO(this->get_logger(), "Yaw Spinning Threshold: %d", par_.yaw_spinning_threshold);
+   RCLCPP_INFO(this->get_logger(), "Yaw Spinning Dyaw: %f", par_.yaw_spinning_dyaw);
++  RCLCPP_INFO(this->get_logger(), "Yaw Look Ahead Time: %f", par_.yaw_look_ahead_time);
+   RCLCPP_INFO(this->get_logger(), "Max Replan Failure Duration (s): %f", par_.max_replan_failure_duration);
+ 
+   // Simulation env parameters

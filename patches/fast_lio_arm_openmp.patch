@@ -1,0 +1,28 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index be3040b..b90f1a2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,7 +20,22 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+ 
+ message("Current CPU archtecture: ${CMAKE_SYSTEM_PROCESSOR}")
+ 
+-if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
++# docker_sim 2026-09-08：原版这个判断只认x86/amd64，Jetson Orin NX Super
++# 是aarch64（ARM64），原来直接掉进下面的else分支——不仅MP_PROC_NUM钉死1，
++# 连MP_EN这个宏都没定义，laserMapping.cpp里全文件唯一一处
++# `#pragma omp parallel for`（updateCloudCallback()里"closest surface
++# search and residual computation"这个循环，每个点都要做一次ikd-Tree
++# 最近邻搜索+平面拟合残差计算，是单帧里最耗时的部分）因此在真机上完全
++# 单线程跑，Orin NX Super其余的核心全程闲置——不是真机算力不够，是编译期
++# 压根没给这段热点循环开并行。真机点云密度是这套项目仿真的20~30倍，这个
++# 循环的点数也跟着多20~30倍，单线程跑对里程计发布频率的影响会被放大。
++# 加上aarch64/arm64匹配，让Jetson走跟x86完全一样的按核数自适应逻辑
++# （N>4给3线程，N>3给2线程，其余1线程）——不单独给Jetson定制一个数字，
++# 复用上游这套已有的、按实际核数自适应的保守分配方式，同一个容器里还有
++# mavros/ego_planner/pt4ctrl等其它进程要抢核，不能把MP_PROC_NUM设成核数
++# 本身占满所有核心。效果（里程计发布频率是否明显提升）需要重新build+
++# 真机实测验证，这次只是打开开关，没有另外调过MP_PROC_NUM的具体数值。
++if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)|(aarch64)|(AARCH64)|(arm64)|(ARM64)")
+   include(ProcessorCount)
+   ProcessorCount(N)
+   message("Processer number:  ${N}")

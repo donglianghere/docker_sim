@@ -1,0 +1,99 @@
+diff --git a/src/planner/traj_utils/include/traj_utils/planning_visualization.h b/src/planner/traj_utils/include/traj_utils/planning_visualization.h
+index 0d8e8ba..4a08ee8 100755
+--- a/src/planner/traj_utils/include/traj_utils/planning_visualization.h
++++ b/src/planner/traj_utils/include/traj_utils/planning_visualization.h
+@@ -28,6 +28,46 @@ namespace ego_planner
+     // ros::Publisher guide_vector_pub;
+     // ros::Publisher intermediate_state_pub;
+ 
++    // docker_sim: 原来这几个Marker/MarkerArray的frame_id是硬编码的"world"/
++    // "map"（上游单机demo里两者混用，实际指向同一个坐标系），docker_sim这套
++    // 多机命名空间下"map"这个裸名字只被mavros自己的ENU/NED换算helper frame
++    // 占用（跟机体TF树不连通），"world"同理，RViz的Fixed Frame（多机场景下
++    // 只能设成其中一架飞机自己的frame，比如NX02/odom）永远查不到这两个frame
++    // 的变换，规划可视化Marker因此从未渲染出来过。改成跟grid_map/frame_id
++    // 同一套约定的"<namespace>/map"（已经有UWB frame_align/静态TF把
++    // NX01/map<->NX02/map、<namespace>/map<-><namespace>/odom连起来）。
++    std::string getFrameId() const
++    {
++      std::string ns = node_->get_namespace();
++      if (!ns.empty() && ns[0] == '/')
++        ns = ns.substr(1);
++      return ns.empty() ? "map" : ns + "/map";
++    }
++
++    // docker_sim 2026-08-09：这些Marker的frame_id改成"<namespace>/map"之后，
++    // RViz渲染"自己"的规划轨迹没问题（Fixed Frame跟自己的map/odom之间只隔一
++    // 跳静态TF，tf2对静态边不检查时间戳），但渲染"另一架飞机"的轨迹时会经过
++    // uwb_ground_truth_node.py广播的那条动态TF（{i}/map -> {j}/map，10Hz，
++    // 时间戳跟DLIO/mighty那条"仿真时间+固定偏移1735689600(2025-01-01)"假
++    // epoch时钟域对齐——原因见uwb_sim/uwb_ground_truth_node.py::
++    // broadcast_map_tf的注释）。这里如果继续用rclcpp::Clock().now()（真实
++    // 墙钟，不受use_sim_time影响），RViz按Marker自己的header.stamp去查这条
++    // 动态TF时，真实墙钟这个时间点在假epoch的TF树里永远不存在，效果跟
++    // rviz_goal_bridge_node.py 2026-08-09那次"Lookup would require
++    // extrapolation into the future"是同一类问题——只是这次报错出现在RViz
++    // 自己的日志/控制台，不是某个ROS节点的log，容易被忽略。实测复现：Fixed
++    // Frame设成NX02/odom时，NX01自己的轨迹/目标点不显示，反过来也一样，
++    // "自己"的（只需过一跳静态TF）永远没事，"对方"的（要过这条动态TF）
++    // 永远起不来，跟用户描述的对称性完全吻合。
++    // 改成盖时间戳0（"取最新可用数据"，不是真的查时刻0）——RViz的
++    // FrameManager在展示Marker时把header.stamp=0识别成"不做时间同步检查，
++    // 直接用最新TF"，绕开真实墙钟和假epoch这两个时钟域对不上的问题，跟
++    // rviz_goal_bridge_node.py那次的修复思路一致。
++    static rclcpp::Time zeroStamp()
++    {
++      return rclcpp::Time(0, 0, RCL_ROS_TIME);
++    }
++
+   public:
+     ~PlanningVisualization() {}
+     PlanningVisualization(const rclcpp::Node::SharedPtr &node)
+diff --git a/src/planner/traj_utils/src/planning_visualization.cpp b/src/planner/traj_utils/src/planning_visualization.cpp
+index 5c46cef..44eb347 100755
+--- a/src/planner/traj_utils/src/planning_visualization.cpp
++++ b/src/planner/traj_utils/src/planning_visualization.cpp
+@@ -11,8 +11,8 @@ namespace ego_planner
+                                                 Eigen::Vector4d color, int id, bool show_sphere /* = true */)
+   {
+     visualization_msgs::msg::Marker sphere, line_strip;
+-    sphere.header.frame_id = line_strip.header.frame_id = "world";
+-    sphere.header.stamp = line_strip.header.stamp = rclcpp::Clock().now();
++    sphere.header.frame_id = line_strip.header.frame_id = getFrameId();
++    sphere.header.stamp = line_strip.header.stamp = zeroStamp();
+     sphere.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+     line_strip.type = visualization_msgs::msg::Marker::LINE_STRIP;
+     sphere.action = line_strip.action = visualization_msgs::msg::Marker::ADD;
+@@ -46,8 +46,8 @@ namespace ego_planner
+                                                        const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id)
+   {
+     visualization_msgs::msg::Marker sphere, line_strip;
+-    sphere.header.frame_id = line_strip.header.frame_id = "map";
+-    sphere.header.stamp = line_strip.header.stamp = rclcpp::Clock().now();
++    sphere.header.frame_id = line_strip.header.frame_id = getFrameId();
++    sphere.header.stamp = line_strip.header.stamp = zeroStamp();
+     sphere.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+     line_strip.type = visualization_msgs::msg::Marker::LINE_STRIP;
+     sphere.action = line_strip.action = visualization_msgs::msg::Marker::ADD;
+@@ -81,8 +81,8 @@ namespace ego_planner
+                                                         const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id)
+   {
+     visualization_msgs::msg::Marker arrow;
+-    arrow.header.frame_id = "map";
+-    arrow.header.stamp = rclcpp::Clock().now();
++    arrow.header.frame_id = getFrameId();
++    arrow.header.stamp = zeroStamp();
+     arrow.type = visualization_msgs::msg::Marker::ARROW;
+     arrow.action = visualization_msgs::msg::Marker::ADD;
+ 
+@@ -122,8 +122,8 @@ namespace ego_planner
+   void PlanningVisualization::displayGoalPoint(Eigen::Vector3d goal_point, Eigen::Vector4d color, const double scale, int id)
+   {
+     visualization_msgs::msg::Marker sphere;
+-    sphere.header.frame_id = "world";
+-    sphere.header.stamp = rclcpp::Clock().now();
++    sphere.header.frame_id = getFrameId();
++    sphere.header.stamp = zeroStamp();
+     sphere.type = visualization_msgs::msg::Marker::SPHERE;
+     sphere.action = visualization_msgs::msg::Marker::ADD;
+     sphere.id = id;

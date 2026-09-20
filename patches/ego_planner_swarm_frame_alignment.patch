@@ -1,0 +1,363 @@
+diff --git a/src/planner/plan_manage/include/ego_planner/ego_replan_fsm.h b/src/planner/plan_manage/include/ego_planner/ego_replan_fsm.h
+index ed91462..99c2cb8 100755
+--- a/src/planner/plan_manage/include/ego_planner/ego_replan_fsm.h
++++ b/src/planner/plan_manage/include/ego_planner/ego_replan_fsm.h
+@@ -4,6 +4,8 @@
+ #include <Eigen/Eigen>
+ #include <algorithm>
+ #include <iostream>
++#include <mutex>
++#include <unordered_map>
+ #include "nav_msgs/msg/path.hpp"
+ #include "nav_msgs/msg/odometry.hpp"
+ #include "sensor_msgs/msg/imu.hpp"
+@@ -17,6 +19,7 @@
+ #include "traj_utils/msg/bspline.hpp"
+ #include "traj_utils/msg/multi_bsplines.hpp"
+ #include "geometry_msgs/msg/pose_stamped.hpp"
++#include "geometry_msgs/msg/transform_stamped.hpp"
+ #include "traj_utils/msg/data_disp.hpp"
+ #include "ego_planner/planner_manager.h"
+ #include "traj_utils/planning_visualization.h"
+@@ -64,6 +67,16 @@ namespace ego_planner
+     bool flag_realworld_experiment_;
+     bool enable_fail_safe_;
+ 
++    /* swarm frame alignment (docker_sim: each agent's odom is a local frame
++       anchored at its own spawn point, not a frame shared across agents —
++       see applyFrameAlignTransform()/frameAlignCallback() for why this is
++       needed before comparing any two agents' broadcasted trajectories) */
++    bool use_frame_alignment_;
++    std::unordered_map<int, Eigen::Matrix4d> frame_align_transforms_;
++    std::unordered_map<int, bool> frame_align_received_;
++    std::mutex frame_align_mutex_;
++    std::vector<rclcpp::Subscription<geometry_msgs::msg::TransformStamped>::SharedPtr> frame_align_subs_;
++
+     /* planning data */
+     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
+     FSM_EXEC_STATE exec_state_;
+@@ -83,6 +96,10 @@ namespace ego_planner
+     /* ROS utils */
+     rclcpp::Node::SharedPtr node_;
+     rclcpp::TimerBase::SharedPtr exec_timer_, safety_timer_;
++    // docker_sim: 照mighty的timer_share_heartbeat_模式补的——不管这架飞机
++    // 有没有目标/在不在规划，都1Hz常驻发一条"我在这"，见
++    // publishSelfAsStaticObstacle()注释。
++    rclcpp::TimerBase::SharedPtr heartbeat_timer_;
+ 
+     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr waypoint_sub_;
+     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+@@ -120,9 +137,24 @@ namespace ego_planner
+     void odometryCallback(const std::shared_ptr<const nav_msgs::msg::Odometry> &msg);
+     void swarmTrajsCallback(const std::shared_ptr<const traj_utils::msg::MultiBsplines> &msg);
+     void BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline> &msg);
++    void frameAlignCallback(const std::shared_ptr<const geometry_msgs::msg::TransformStamped> &msg, int agent_id);
++    // Transforms pos_pts (3xN, columns = control points) from sender_drone_id's own
++    // odom frame into this agent's own odom frame, in place. Returns false (and
++    // leaves pos_pts untouched) if no alignment has been received yet for that
++    // sender — callers must treat that as "drop this message", not "use as-is".
++    bool applyFrameAlignTransform(Eigen::MatrixXd &pos_pts, int sender_drone_id);
+ 
+     bool checkCollision();
+     void publishSwarmTrajs(bool startup_pub);
++    // 1Hz心跳，独立于FSM状态/是否在规划——把当前里程计位置打包成一条所有
++    // 控制点重合、覆盖未来60秒的"静止"B样条，发到跟publishSwarmTrajs()同一个
++    // broadcast_bspline_pub_/话题上。没有这个的话，一架停在WAIT_TARGET(没
++    // 目标/悬停)的飞机只要上一条真实轨迹的duration_一过期，就会从其他飞机
++    // 的swarm_trajs_buf_里彻底消失——calcSwarmCost对它完全不设防。跟真实
++    // 重规划广播共用同一个drone_id坑位，新消息互相覆盖，不会冲突；飞行中
++    // 重规划频率(项目里0.1s)远高于这个1Hz心跳，心跳造成的"瞬间冻结"读数
++    // 几乎立刻被下一条真实广播覆盖掉，可忽略。
++    void publishSelfAsStaticObstacle();
+ 
+   public:
+     EGOReplanFSM(/* args */)
+diff --git a/src/planner/plan_manage/src/ego_replan_fsm.cpp b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+index c37e099..3d3c8c3 100755
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -109,6 +109,72 @@ namespace ego_planner
+           this->BroadcastBsplineCallback(msg);
+         });
+ 
++    // docker_sim: 照mighty的timer_share_heartbeat_模式补的1Hz心跳——不像
++    // exec_timer_/safety_timer_那样跟FSM状态挂钩，从这里创建开始就一直跑到
++    // 节点退出，不做"是否空闲"的判断（原因见publishSelfAsStaticObstacle()
++    // 头部注释和mighty那边同名patch的说明：判断本身可能有滞后/漏判，不如
++    // 反正开销很小就一直发）。
++    heartbeat_timer_ = node_->create_wall_timer(std::chrono::milliseconds(1000),
++                                                std::bind(&EGOReplanFSM::publishSelfAsStaticObstacle, this));
++
++    // docker_sim: swarm frame alignment (照mighty的/frame_align模式补的坐标对齐——
++    // 每机DLIO里程计是各自spawn点为原点的局部系，calcSwarmCost/checkCollision
++    // 直接比较两机各自局部坐标之前，必须先把对方广播的控制点变换到本机局部系，
++    // 否则"机间距离"会系统性偏离真值一个spawn偏移的量级，具体分析见README。
++    // 话题命名沿用mighty那边已经在用的/frame_align/<own_ns>/<other_ns>约定
++    // （uwb_sim/uwb_ground_truth_node.py发布，语义是"给定变换点乘other_ns系下
++    // 的点，得到own_ns系下的坐标"），复用这份既有UWB真值数据源，不用额外起
++    // 新节点。
++    node_->declare_parameter("swarm/use_frame_alignment", false);
++    node_->declare_parameter("swarm/num_agents", 1);
++    node_->get_parameter("swarm/use_frame_alignment", use_frame_alignment_);
++    int swarm_num_agents = 1;
++    node_->get_parameter("swarm/num_agents", swarm_num_agents);
++
++    if (use_frame_alignment_)
++    {
++      std::string own_ns = node_->get_namespace();
++      if (!own_ns.empty() && own_ns[0] == '/')
++        own_ns = own_ns.substr(1);
++
++      if (own_ns.size() < 2)
++      {
++        RCLCPP_ERROR(node_->get_logger(),
++                     "swarm/use_frame_alignment=true but namespace '%s' is too short to derive "
++                     "sibling agent names (expects e.g. 'NX01') — frame alignment disabled.",
++                     own_ns.c_str());
++        use_frame_alignment_ = false;
++      }
++      else
++      {
++        std::string prefix = own_ns.substr(0, own_ns.size() - 2);
++        int own_drone_id = planner_manager_->pp_.drone_id;
++        for (int a = 1; a <= swarm_num_agents; a++)
++        {
++          int other_drone_id = a - 1; // 跟launch文件里DRONE_ID的0-based约定对齐
++          if (other_drone_id == own_drone_id)
++            continue;
++
++          char other_ns_buf[16];
++          std::snprintf(other_ns_buf, sizeof(other_ns_buf), "%s%02d", prefix.c_str(), a);
++          std::string topic = "/frame_align/" + own_ns + "/" + std::string(other_ns_buf);
++
++          frame_align_transforms_[other_drone_id] = Eigen::Matrix4d::Identity();
++          frame_align_received_[other_drone_id] = false;
++
++          auto sub = node_->create_subscription<geometry_msgs::msg::TransformStamped>(
++              topic,
++              10,
++              [this, other_drone_id](const std::shared_ptr<const geometry_msgs::msg::TransformStamped> &msg)
++              {
++                this->frameAlignCallback(msg, other_drone_id);
++              });
++          frame_align_subs_.push_back(sub);
++          RCLCPP_INFO(node_->get_logger(), "Frame align: subscribed to %s (agent %d)", topic.c_str(), other_drone_id);
++        }
++      }
++    }
++
+     bspline_pub_ = node_->create_publisher<traj_utils::msg::Bspline>("planning/bspline", 10);
+     data_disp_pub_ = node_->create_publisher<traj_utils::msg::DataDisp>("planning/data_display", 100);
+ 
+@@ -324,17 +382,6 @@ namespace ego_planner
+       }
+     }
+ 
+-    /* Test distance to the agent */
+-    Eigen::Vector3d cp0(msg->pos_pts[0].x, msg->pos_pts[0].y, msg->pos_pts[0].z);
+-    Eigen::Vector3d cp1(msg->pos_pts[1].x, msg->pos_pts[1].y, msg->pos_pts[1].z);
+-    Eigen::Vector3d cp2(msg->pos_pts[2].x, msg->pos_pts[2].y, msg->pos_pts[2].z);
+-    Eigen::Vector3d swarm_start_pt = (cp0 + 4 * cp1 + cp2) / 6;
+-    if ((swarm_start_pt - odom_pos_).norm() > planning_horizen_ * 4.0f / 3.0f)
+-    {
+-      planner_manager_->swarm_trajs_buf_[id].drone_id = -1;
+-      return; // if the current drone is too far to the received agent.
+-    }
+-
+     /* Store data */
+     Eigen::MatrixXd pos_pts(3, msg->pos_pts.size());
+     Eigen::VectorXd knots(msg->knots.size());
+@@ -349,6 +396,34 @@ namespace ego_planner
+       pos_pts(2, j) = msg->pos_pts[j].z;
+     }
+ 
++    // docker_sim: pos_pts目前还是发送方(id)自己的局部odom系——在拿它做任何
++    // "跟自己距离多远"的判断之前，必须先变换到本机局部系，否则下面的
++    // swarm_start_pt距离判断和最终存进swarm_trajs_buf_喂给calcSwarmCost的
++    // 控制点，全都会系统性偏离真值一个spawn偏移的量级(具体分析见README)。
++    // use_frame_alignment_关闭时保持原样直接用(向后兼容，比如两机odom本来
++    // 就共享同一个全局系的场景)。
++    if (use_frame_alignment_)
++    {
++      if (!applyFrameAlignTransform(pos_pts, (int)id))
++      {
++        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
++                             "BroadcastBsplineCallback: no frame alignment for agent %d yet, dropping its trajectory.",
++                             (int)id);
++        return;
++      }
++    }
++
++    /* Test distance to the agent (pos_pts现在已经是本机局部系了) */
++    Eigen::Vector3d cp0 = pos_pts.col(0);
++    Eigen::Vector3d cp1 = pos_pts.col(1);
++    Eigen::Vector3d cp2 = pos_pts.col(2);
++    Eigen::Vector3d swarm_start_pt = (cp0 + 4 * cp1 + cp2) / 6;
++    if ((swarm_start_pt - odom_pos_).norm() > planning_horizen_ * 4.0f / 3.0f)
++    {
++      planner_manager_->swarm_trajs_buf_[id].drone_id = -1;
++      return; // if the current drone is too far to the received agent.
++    }
++
+     planner_manager_->swarm_trajs_buf_[id].drone_id = id;
+ 
+     // 计算路径持续时间
+@@ -411,16 +486,6 @@ namespace ego_planner
+     for (size_t i = 0; i < msg->traj.size(); i++)
+     {
+ 
+-      Eigen::Vector3d cp0(msg->traj[i].pos_pts[0].x, msg->traj[i].pos_pts[0].y, msg->traj[i].pos_pts[0].z);
+-      Eigen::Vector3d cp1(msg->traj[i].pos_pts[1].x, msg->traj[i].pos_pts[1].y, msg->traj[i].pos_pts[1].z);
+-      Eigen::Vector3d cp2(msg->traj[i].pos_pts[2].x, msg->traj[i].pos_pts[2].y, msg->traj[i].pos_pts[2].z);
+-      Eigen::Vector3d swarm_start_pt = (cp0 + 4 * cp1 + cp2) / 6;
+-      if ((swarm_start_pt - odom_pos_).norm() > planning_horizen_ * 4.0f / 3.0f)
+-      {
+-        planner_manager_->swarm_trajs_buf_[i].drone_id = -1;
+-        continue;
+-      }
+-
+       // 存储路径控制点和节点
+       Eigen::MatrixXd pos_pts(3, msg->traj[i].pos_pts.size());
+       Eigen::VectorXd knots(msg->traj[i].knots.size());
+@@ -435,6 +500,31 @@ namespace ego_planner
+         pos_pts(2, j) = msg->traj[i].pos_pts[j].z;
+       }
+ 
++      // docker_sim: 跟BroadcastBsplineCallback同一个道理——msg->traj[i]是
++      // drone i自己局部系下的控制点，i是别的飞机时要先变换到本机局部系
++      // 再用；i是自己时(relay链路里可能把自己也塞进这个数组)不需要变换。
++      if (use_frame_alignment_ && (int)i != planner_manager_->pp_.drone_id)
++      {
++        if (!applyFrameAlignTransform(pos_pts, (int)i))
++        {
++          RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
++                               "swarmTrajsCallback: no frame alignment for agent %d yet, dropping its trajectory.",
++                               (int)i);
++          planner_manager_->swarm_trajs_buf_[i].drone_id = -1;
++          continue;
++        }
++      }
++
++      Eigen::Vector3d cp0 = pos_pts.col(0);
++      Eigen::Vector3d cp1 = pos_pts.col(1);
++      Eigen::Vector3d cp2 = pos_pts.col(2);
++      Eigen::Vector3d swarm_start_pt = (cp0 + 4 * cp1 + cp2) / 6;
++      if ((swarm_start_pt - odom_pos_).norm() > planning_horizen_ * 4.0f / 3.0f)
++      {
++        planner_manager_->swarm_trajs_buf_[i].drone_id = -1;
++        continue;
++      }
++
+       planner_manager_->swarm_trajs_buf_[i].drone_id = i;
+ 
+       // 计算路径持续时间
+@@ -462,6 +552,109 @@ namespace ego_planner
+     have_recv_pre_agent_ = true;
+   }
+ 
++  // docker_sim: 照mighty_node.cpp::frameAlignCallback()的模式补的——记下
++  // "把agent_id这架飞机自己局部系下的点变换到本机局部系"这个4x4齐次变换矩阵，
++  // 每次/frame_align/<own_ns>/<other_ns>更新都刷新一次，不假设它是静态不变的
++  // (UWB真值理论上会跟两机实际漂移的相对位姿同步更新)。
++  void EGOReplanFSM::frameAlignCallback(const std::shared_ptr<const geometry_msgs::msg::TransformStamped> &msg, int agent_id)
++  {
++    Eigen::Quaterniond q(msg->transform.rotation.w, msg->transform.rotation.x,
++                         msg->transform.rotation.y, msg->transform.rotation.z);
++    Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
++    T.block<3, 3>(0, 0) = q.toRotationMatrix();
++    T(0, 3) = msg->transform.translation.x;
++    T(1, 3) = msg->transform.translation.y;
++    T(2, 3) = msg->transform.translation.z;
++
++    std::lock_guard<std::mutex> lock(frame_align_mutex_);
++    frame_align_transforms_[agent_id] = T;
++    if (!frame_align_received_[agent_id])
++    {
++      frame_align_received_[agent_id] = true;
++      RCLCPP_INFO(node_->get_logger(), "Received first frame alignment for agent %d", agent_id);
++    }
++  }
++
++  // pos_pts是3xN矩阵，每一列是B样条的一个控制点(sender_drone_id局部系下的
++  // 真实空间坐标，不是多项式系数)——B样条控制点在仿射变换下具有仿射不变性，
++  // 所以直接对每一列做p' = R*p + t就等价于把整条曲线变换过去，不需要像mighty
++  // 的PieceWiseQuinticPol那样区分"旋转项"和"常数项"分开处理。
++  bool EGOReplanFSM::applyFrameAlignTransform(Eigen::MatrixXd &pos_pts, int sender_drone_id)
++  {
++    Eigen::Matrix4d T;
++    {
++      std::lock_guard<std::mutex> lock(frame_align_mutex_);
++      auto it = frame_align_transforms_.find(sender_drone_id);
++      if (it == frame_align_transforms_.end() || !frame_align_received_[sender_drone_id])
++      {
++        return false;
++      }
++      T = it->second;
++    }
++
++    Eigen::Matrix3d R = T.block<3, 3>(0, 0);
++    Eigen::Vector3d t = T.block<3, 1>(0, 3);
++    for (int j = 0; j < pos_pts.cols(); j++)
++    {
++      pos_pts.col(j) = R * pos_pts.col(j) + t;
++    }
++    return true;
++  }
++
++  // docker_sim: 照mighty_node.cpp::publishSelfAsStaticObstacleCallback()的
++  // 模式补的心跳——不管当前FSM在哪个状态(WAIT_TARGET/EXEC_TRAJ/...都一样)，
++  // 每次都把"当前位置"打包成一条所有控制点重合的B样条广播出去，让一架
++  // 已经很久没有成功重规划(因而也很久没有真的调用publishSwarmTrajs())的
++  // 飞机，不会从别人的swarm_trajs_buf_里彻底消失。
++  //
++  // 具体构造：ego_planner的B样条是标准的p阶(这里p=order=3)均匀B样条，节点
++  // 向量的生成公式(见uniform_bspline.cpp::setUniformBspline())是
++  // knots[i] = (i-order)*interval，跟控制点个数、interval取值本身无关——
++  // 只要控制点全部相同，不管怎么取值，曲线在整个定义域上算出来都是同一个
++  // 点(evaluateDeBoor内部还会把参数钳到[u_(p_), u_(m_-p_)]范围内，进一步
++  // 保证不会有越界访问)，这里不需要现实轨迹那种"贴着实际运动学"的knot
++  // 设计，只要凑够receiver端(BroadcastBsplineCallback)算出来的duration_
++  // 足够长即可。receiver端对order为奇数(3是奇数)时用
++  // duration_=knots[knots.size()-3]，num_ctrl_pts=10个控制点、
++  // interval=7.5秒时，knots.size()=10+3+1=14，
++  // duration_=knots[11]=(11-3)*7.5=60秒——跟mighty那边"60秒/1Hz心跳"用的
++  // 是同一个安全余量(远大于1秒的心跳间隔，网络抖动/丢一两帧不会立刻过期)。
++  void EGOReplanFSM::publishSelfAsStaticObstacle()
++  {
++    if (!have_odom_)
++      return; // 还没收到第一帧里程计，不知道自己在哪，这次心跳先跳过
++
++    constexpr int order = 3;
++    constexpr int num_ctrl_pts = 10;
++    constexpr double interval = 7.5; // 秒
++
++    traj_utils::msg::Bspline bspline;
++    bspline.order = order;
++    bspline.drone_id = planner_manager_->pp_.drone_id;
++    bspline.traj_id = -1; // 哨兵值，标识"这是心跳，不是真实重规划"，方便调试时区分；
++                           // 接收端(BroadcastBsplineCallback/checkCollision)不读这个字段
++    bspline.start_time = node_->get_clock()->now();
++
++    bspline.pos_pts.resize(num_ctrl_pts);
++    for (int i = 0; i < num_ctrl_pts; i++)
++    {
++      geometry_msgs::msg::Point p;
++      p.x = odom_pos_(0);
++      p.y = odom_pos_(1);
++      p.z = odom_pos_(2);
++      bspline.pos_pts[i] = p;
++    }
++
++    int num_knots = num_ctrl_pts + order + 1;
++    bspline.knots.resize(num_knots);
++    for (int i = 0; i < num_knots; i++)
++    {
++      bspline.knots[i] = (double)(i - order) * interval;
++    }
++
++    broadcast_bspline_pub_->publish(bspline);
++  }
++
+   void EGOReplanFSM::changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call)
+   {
+ 

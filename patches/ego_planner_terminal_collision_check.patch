@@ -1,0 +1,100 @@
+diff --git a/src/planner/bspline_opt/src/bspline_optimizer.cpp b/src/planner/bspline_opt/src/bspline_optimizer.cpp
+index 728d3c0..b79b9de 100755
+--- a/src/planner/bspline_opt/src/bspline_optimizer.cpp
++++ b/src/planner/bspline_opt/src/bspline_optimizer.cpp
+@@ -874,7 +874,19 @@ namespace ego_planner
+   void BsplineOptimizer::calcSwarmCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient)
+   {
+     cost = 0.0;
+-    int end_idx = q.cols() - order_ - (double)(q.cols() - 2 * order_) * 1.0 / 3.0; // Only check the first 2/3 points
++    // docker_sim: 原版这里只查前2/3控制点（"Only check the first 2/3
++    // points"），用固定的ctrl_pt_dist/max_vel_算出的时间间隔切分轨迹，
++    // 轨迹越短（飞机越接近终点/共享目标点），总控制点数越少，"排除最后
++    // 1/3"这个操作对短轨迹会把仅有的几个内部控制点几乎全部排除掉——终点
++    // 附近的控制点因此永远拿不到机间避障的排斥梯度。两机被指向同一个/
++    // 挨得很近的目标点时，这段本该生效的避障力在最后一段是恒为零的，
++    // 表现为一架飞机死死卡在离目标一米多外反复重规划、永远进不去也永远
++    // 不放弃（同一个bug的另一种表现见calcDistanceCostRebound()里同款
++    // "只查2/3"和rebound_optimize()里的phase 2校验，三处一起改）。改成
++    // 覆盖到end_idx（终点附近的控制点本来就是自由变量，不是固定边界，
++    // 见rebound_optimize()里"Free end"的注释），让机间避障力能真正作用到
++    // 终点段。
++    int end_idx = q.cols() - order_;
+     const double CLEARANCE = swarm_clearance_ * 2;
+     double t_now = rclcpp::Clock().now().seconds();
+     constexpr double a = 2.0, b = 1.0, inv_a2 = 1 / a / a, inv_b2 = 1 / b / b;
+@@ -1304,7 +1316,15 @@ namespace ego_planner
+     int in_id, out_id;
+     vector<std::pair<int, int>> segment_ids;
+     bool flag_new_obs_valid = false;
+-    int i_end = end_idx - (end_idx - order_) / 3;
++    // docker_sim: 原版这里同样只查前2/3控制点。目标点落在障碍物/膨胀区
++    // 里时（选点没做合法性校验，或者只是终点恰好贴着障碍），终点必然
++    // 落在被排除的最后1/3，check_collision_and_rebound()从来不会检测到
++    // 它、更不会给它分配base_point/direction，calcDistanceCostRebound()
++    // 对应位置的避障代价和梯度因此恒为零——飞机会一路被"必须到达目标点"
++    // 这一项引导力推进障碍物核心，没有任何东西反向拉住。改成覆盖到
++    // end_idx（终点段控制点是自由变量，见rebound_optimize()里"Free end"
++    // 的注释），让它也能被正常检测/分配推出方向。
++    int i_end = end_idx;
+     for (int i = order_ - 1; i <= i_end; ++i)
+     {
+ 
+@@ -1613,8 +1633,15 @@ namespace ego_planner
+         traj.getTimeSpan(tm, tmp);
+         // 计算时间步长
+         double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution());
+-        // 遍历轨迹的前2/3部分进行障碍物检测
+-        for (double t = tm; t < tmp * 2 / 3; t += t_step) // Only check the closest 2/3 partition of the whole trajectory.
++        // docker_sim: 原版只查前2/3（"Only check the closest 2/3
++        // partition"）。t_step是按固定栅格分辨率/速度算出来的物理步长，
++        // 不会随轨迹总时长(tmp-tm)一起缩小——飞机越接近目标(共享目标点/
++        // 目标在障碍物里这类场景)，tmp-tm本身越短，短到跟t_step一个量级
++        // 时，这个循环实际只采样一次(t=tm，也就是起点附近，天然安全)就
++        // 越过终止条件退出，根本没有第二次机会碰到终点附近的障碍物——
++        // "2/3"这个比例没错，但分子(采样步长)不会跟着分母(总时长)一起
++        // 缩小，越靠近目标反而查得越粗。改成遍历全程(tmp而不是tmp*2/3)。
++        for (double t = tm; t < tmp; t += t_step)
+         {
+           flag_occ = grid_map_->getInflateOccupancy(traj.evaluateDeBoorT(t));
+           if (flag_occ)
+@@ -1635,6 +1662,15 @@ namespace ego_planner
+             break;
+           }
+         }
++        // docker_sim: 上面的循环条件是"t < tmp"（严格小于），t_step步长
++        // 较大时最后一步可能直接跨过tmp、循环退出前从未真正采样过t=tmp
++        // 这一点本身——终点是"必须到达目标点"这项代价唯一关心的位置，
++        // 不能靠采样步长凑巧覆盖到，这里补一次显式检查，不管上面循环有
++        // 没有查到过。
++        if (!flag_occ)
++        {
++          flag_occ = grid_map_->getInflateOccupancy(traj.evaluateDeBoorT(tmp));
++        }
+ 
+         // cout << "XXXXXX" << ((cps_.points.col(cps_.points.cols()-1) + 4*cps_.points.col(cps_.points.cols()-2) + cps_.points.col(cps_.points.cols()-3))/6 - local_target_pt_).norm() << endl;
+ 
+@@ -1764,7 +1800,11 @@ namespace ego_planner
+       double tm, tmp;
+       traj.getTimeSpan(tm, tmp);
+       double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution()); // Step size is defined as the maximum size that can passes throgth every gird.
+-      for (double t = tm; t < tmp * 2 / 3; t += t_step)
++      // docker_sim: 跟rebound_optimize()里同款"只查2/3"是同一个问题（见
++      // 那边的详细注释——t_step不会随轨迹总时长一起缩小，越接近目标查得
++      // 越粗），改成遍历全程，并在循环之后补一次对t=tmp本身的显式检查
++      // （循环条件"t < tmp"严格小于，步长较大时可能从没真正采样到终点）。
++      for (double t = tm; t < tmp; t += t_step)
+       {
+         if (grid_map_->getInflateOccupancy(traj.evaluateDeBoorT(t)))
+         {
+@@ -1781,6 +1821,10 @@ namespace ego_planner
+           break;
+         }
+       }
++      if (flag_safe && grid_map_->getInflateOccupancy(traj.evaluateDeBoorT(tmp)))
++      {
++        flag_safe = false;
++      }
+ 
+       // 如果存在碰撞则调整参数并重新迭代
+       if (!flag_safe)

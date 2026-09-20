@@ -1,0 +1,18 @@
+--- a/uwb_origin_bridge/origin_setter_node.py	2026-08-25 22:56:35.008810627 +0800
++++ b/uwb_origin_bridge/origin_setter_node.py	2026-08-25 22:56:35.010810627 +0800
+@@ -96,7 +96,14 @@
+         self.declare_parameter('odom_topic', 'dlio/odom_node/odom')
+         self.declare_parameter('sample_window_sec', 2.0)
+         self.declare_parameter('min_samples', 5)
+-        self.declare_parameter('max_std_dev_m', 0.15)
++        # 2026-08-25临时放宽：真机首次联调时UWB样本Z轴std_dev实测0.49m，
++        # 卡在原来0.15m的阈值上锁不了原点，用户要求"先忽略这一点走通全流程"，
++        # 不是判定阈值本身设错了——0.15m对应"飞机基本静止"这个假设，真机
++        # UWB高度解算目前噪声明显比这个假设大，先放宽到2.0m让流程能走下去，
++        # 定位精度验证/UWB质量排查是后续单独的任务，不应该现在卡住整条
++        # 起飞流程。等定位链路调稳后应该调回一个经过实测验证的更严格阈值，
++        # 不是永久性的改动。
++        self.declare_parameter('max_std_dev_m', 2.0)
+         self.declare_parameter('odom_timeout_sec', 0.5)
+         # 2026-08-10第二处勘误（用户实测报告"NX01/world在场景中央、NX02/world
+         # 消失"）：这里原来默认是`f'{ns}/world'`，两架飞机各有一个互不相干的

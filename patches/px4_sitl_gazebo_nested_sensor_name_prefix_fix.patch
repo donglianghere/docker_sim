@@ -1,0 +1,78 @@
+diff --git a/src/gazebo_mavlink_interface.cpp b/src/gazebo_mavlink_interface.cpp
+index a2e69e0..57108a7 100644
+--- a/src/gazebo_mavlink_interface.cpp
++++ b/src/gazebo_mavlink_interface.cpp
+@@ -93,10 +93,41 @@ void GazeboMavlinkInterface::CreateSensorSubscription(
+     const std::string model_name = model_->GetName();
+ 
+     // Get the nested model sensor name
++    //
++    // contest_mission补丁二（2026-09-10）：上面2026-09-10第一版patch的注释
++    // 曾经断言"这就是DISTANCE_SENSOR永远到不了mavros的根因"，实测证明
++    // 只是必要条件之一，不是充分条件——多机场景下用`ros2 run gazebo_ros
++    // spawn_entity.py -entity NX01`把根模型从原名重命名成"NX01"之后，
++    // Gazebo给嵌套子模型（比如这里的lidar）返回的`GetName()`不是upstream
++    // 原作者设想的那种带"::"域分隔符的写法（例如"NX01::lidar"，这种情况
++    // 下面这段"找最后一个::再取后半段"的逻辑才对），而是直接返回扁平的
++    // "NX01_lidar"（下划线拼接，压根没有":"字符）。原逻辑`find_last_of
++    // ("::")`在这种输入下返回`std::string::npos`，但下面`if (found)`
++    // 直接把found当bool用，npos是`(size_t)-1`非0值，被误判成"找到了"，
++    // 于是执行`substr(found + 1)`——npos+1无符号回绕成0，`substr(0)`是
++    // 整串原样返回，"NX01_lidar"没有被裁剪掉前缀。而对应的
++    // gazebo_lidar_plugin.cpp里发布topic用的名字是从
++    // `parentSensor_->ScopedName()`按"::"拆出来的（走的是另一套真正
++    // 带"::"的命名法），拆出来是干净的"lidar"，不带"NX01_"前缀。两边
++    // 对topic名字的两种不同算法在单机场景碰巧没问题（GPS嵌套模型本来就
++    // 叫"gps0"不叫"gps"，没撞上这个前缀坑，纯属侥幸），但在多机重命名
++    // 场景下订阅方拼出"~/NX01/link/NX01_lidar"、发布方实际发布到
++    // "~/NX01/link/lidar"，两个topic完全对不上，订阅永远收不到消息——
++    // 用`gz topic -i`分别查两个topic的Publishers/Subscribers字段实锤
++    // 确认过（发布方topic有发布者没订阅者，订阅方topic有订阅者没发布者），
++    // 不是猜测。
++    // 修复：优先按原逻辑处理"::"域分隔符（保留对upstream原始使用场景的
++    // 兼容），如果没有":"但名字确实以"<根模型名>_"开头，说明命中的是
++    // 这个多机重命名场景，手动去掉这个前缀还原出真实短名。
+     nested_sensor_name = candidate_model->GetName();
+     std::size_t found = nested_sensor_name.find_last_of("::");
+-    if (found) {
++    if (found != std::string::npos) {
+       nested_sensor_name = nested_sensor_name.substr(found + 1);
++    } else {
++      const std::string prefix = model_name + "_";
++      if (nested_sensor_name.rfind(prefix, 0) == 0) {
++        nested_sensor_name = nested_sensor_name.substr(prefix.length());
++      }
+     }
+ 
+     // Get sensor ID from sensor name
+@@ -148,10 +179,29 @@ void GazeboMavlinkInterface::CreateSensorSubscription(
+       const std::string model_name = model_->GetName();
+ 
+       // Get the sensor name from the joint name
++      //
++      // contest_mission补丁二（2026-09-10）：跟上面nested_sensor_name那处
++      // 同一个bug、同一个修法——多机重命名场景下joint_name是扁平的
++      // "NX01_lidar"（没有"::"），原逻辑的`if (found)`把find_last_of
++      // 返回的npos误判成"找到了"，`substr(found+1)`因无符号回绕变成
++      // `substr(0)`，等于没裁剪，sensor_name保留"NX01_lidar"前缀。这里
++      // 不只是topic名对不对的问题——下面`nested_sensor_name == sensor_name`
++      // 这个判断是用来"如果同一个传感器已经在上面nested model那个分支
++      // 注册过，这里就跳过、不要重复注册"的去重逻辑。如果只修上面
++      // nested_sensor_name那处（变成干净的"lidar"）、不修这里
++      // （sensor_name还是"NX01_lidar"），两边就永远不相等，去重判断失效，
++      // 会在这条joint分支上再多注册一个没人发布、订不到消息的多余
++      // subscriber——不会导致功能错误（多余订阅没有发布者，纯粹是死的），
++      // 但会让原本"防止重复注册"的设计失去意义，所以两处必须同步修。
+       std::string sensor_name = joint_name;
+       std::size_t found = joint_name.find_last_of("::");
+-      if (found) {
++      if (found != std::string::npos) {
+         sensor_name = joint_name.substr(found + 1);
++      } else {
++        const std::string prefix = model_name + "_";
++        if (sensor_name.rfind(prefix, 0) == 0) {
++          sensor_name = sensor_name.substr(prefix.length());
++        }
+       }
+ 
+       // If a nested sensor was already registered with this name

@@ -1,0 +1,48 @@
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index 4514949..076b57c 100644
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -1082,6 +1082,22 @@ int main(int argc, char **argv) {
+                         /******* Publish odometry *******/
+ 
+                         publish_odometry(pubOdomAftMapped, tf_broadcaster);
++                        // 2026-09-06新增诊断打印（临时，排查high_freq_odom不
++                        // 跟随真实运动的问题，排查完可以删掉）：每隔约100次
++                        // 调用打印一次当前位置+这次修正用了多少个点+这一步
++                        // dyn_share修正量的模长，用来判断到底是"修正确实生效
++                        // 但幅度太小/方向抵消"还是"修正名义上成功(返回true)
++                        // 但实际没有让位置发生有意义的变化"。
++                        static int _diag_counter_output = 0;
++                        static Eigen::Vector3d _diag_last_pos_output = kf_output.x_.pos;
++                        if ((_diag_counter_output++ % 100) == 0) {
++                            Eigen::Vector3d _diag_delta = kf_output.x_.pos - _diag_last_pos_output;
++                            RCLCPP_INFO(logger,
++                                "[HIGH_FREQ_DIAG output] pos=(%.4f, %.4f, %.4f) delta_since_last_print=(%.4f, %.4f, %.4f) feats_down_size=%d",
++                                kf_output.x_.pos(0), kf_output.x_.pos(1), kf_output.x_.pos(2),
++                                _diag_delta(0), _diag_delta(1), _diag_delta(2), feats_down_size);
++                            _diag_last_pos_output = kf_output.x_.pos;
++                        }
+                         if (runtime_pos_log) {
+                             state_out = kf_output.x_;
+                             euler_cur = SO3ToEuler(state_out.rot);
+@@ -1235,6 +1251,20 @@ int main(int argc, char **argv) {
+                         /******* Publish odometry *******/
+ 
+                         publish_odometry(pubOdomAftMapped, tf_broadcaster);
++                        // 2026-09-06新增诊断打印，跟output分支(kf_output)那处
++                        // 同一个目的，见那边的完整注释。当前项目配置
++                        // use_imu_as_input=false，这个分支不是当前实际执行
++                        // 路径，加上是为了以后配置切换时同样有诊断可用。
++                        static int _diag_counter_input = 0;
++                        static Eigen::Vector3d _diag_last_pos_input = kf_input.x_.pos;
++                        if ((_diag_counter_input++ % 100) == 0) {
++                            Eigen::Vector3d _diag_delta = kf_input.x_.pos - _diag_last_pos_input;
++                            RCLCPP_INFO(logger,
++                                "[HIGH_FREQ_DIAG input] pos=(%.4f, %.4f, %.4f) delta_since_last_print=(%.4f, %.4f, %.4f) feats_down_size=%d",
++                                kf_input.x_.pos(0), kf_input.x_.pos(1), kf_input.x_.pos(2),
++                                _diag_delta(0), _diag_delta(1), _diag_delta(2), feats_down_size);
++                            _diag_last_pos_input = kf_input.x_.pos;
++                        }
+                         if (runtime_pos_log) {
+                             state_in = kf_input.x_;
+                             euler_cur = SO3ToEuler(state_in.rot);

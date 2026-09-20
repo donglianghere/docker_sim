@@ -1,0 +1,58 @@
+diff --git a/launch/dynus_mavros.launch.py b/launch/dynus_mavros.launch.py
+index 5803a18..5b603db 100644
+--- a/launch/dynus_mavros.launch.py
++++ b/launch/dynus_mavros.launch.py
+@@ -19,6 +19,16 @@ def generate_launch_description():
+     # 谁的指令生效完全看竞态），但repub_odom这些跟controller无关的部分要
+     # 继续跑（px4ctrl/so3ctrl自己不做DLIO里程计到mavros/vision_pose_cov的转发）。
+     run_offboard_follower = os.environ.get("RUN_OFFBOARD_FOLLOWER", "true").lower() != "false"
++    # docker_sim情景一(LOCALIZATION_SOURCE=uwb_imu)专用：这种模式下
++    # uwb_imu_fusion_node直接发布mavros/vision_pose/pose_cov，而这个repub_odom
++    # 节点默认订阅的是dlio/odom_node/odom——uwb_imu模式下这个话题名由
++    # local_position_readback_node发布（读回mavros/local_position/odom再改名
++    # 重发），如果repub_odom也在跑，会把PX4自己算出来的定位结果当成"新的外部
++    # 视觉观测"又转发回vision_pose，形成"PX4输出->读回->当输入喂回去"的反馈环，
++    # 而不是新鲜的UWB+IMU观测——两个发布者同时抢占mavros/vision_pose/pose_cov
++    # 这一个话题，行为完全不可控。跟run_offboard_follower是同一种"按运行模式
++    # 排除职责冲突的节点"处理方式，不新增机制。
++    run_repub_odom = os.environ.get("LOCALIZATION_SOURCE", "gt") != "uwb_imu"
+ 
+     nodes = []
+     if run_offboard_follower:
+@@ -30,6 +40,17 @@ def generate_launch_description():
+             namespace=namespace,
+             output='screen',
+         ))
++    if run_repub_odom:
++        nodes.append(Node(
++            package='ros2_px4_stack',
++            executable='repub_odom',
++            name='repub_odom_py',
++            namespace=namespace,
++            output='screen',
++            parameters=[{
++                '~odom_type': LaunchConfiguration('odom_type'),
++            }]
++        ))
+ 
+     return LaunchDescription([
+         # Declare launch arguments
+@@ -81,18 +102,6 @@ def generate_launch_description():
+             arguments=['0', '0', '0', '0', '0', '0', 'world', 'world_mocap']
+         ),
+ 
+-        # Run repub_livox node
+-        Node(
+-            package='ros2_px4_stack',
+-            executable='repub_odom',
+-            name='repub_odom_py',
+-            namespace=namespace,
+-            output='screen',
+-            parameters=[{
+-                '~odom_type': LaunchConfiguration('odom_type'),
+-            }]
+-        ),
+-
+         # Run mocap to livox command frame conversion
+         Node(
+             package='ros2_px4_stack',

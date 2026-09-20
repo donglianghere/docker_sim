@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""通用几何helper——环绕航点/地面扫描航点生成，纯函数，跟ROS完全无关。
+
+**这是一份vendor过来的拷贝，不是`import contest_mission`**：方案2.1节第8条
+明确指出`orbit_flight_helper.generate_orbit_waypoints()`/`ground_scan_helper.
+generate_ground_scan_waypoints()`这两个纯函数原本活在`contest_mission`包
+（跑在flight-stack容器里）——但全流程任务程序实际跑在选手的`contestant-sdk`
+容器/Python环境里，跟flight-stack是两个不同的容器，选手容器不应该也不需要
+去装`contest_mission`这个跟ROS2节点强耦合的大包（3.1节"选手镜像本来就不
+包含飞行栈源码"这条隔离要求）。这两个函数本身只做纯几何计算（`math`模块，
+不`import rclpy`/不碰任何ROS消息类型），复制一份到这里不会产生"以后两边
+改法不一致"的维护负担太大的问题（方案原话）——如果以后`contest_mission`
+那一侧的实现变了，这里需要人工同步一份，但风险很低、频率也低。
+
+逐个函数对应关系（源文件路径均在`src/contest_mission/contest_mission/`下）：
+- `generate_orbit_waypoints()`/`angle_from_center_to_point()`——照抄
+  `orbit_flight_helper.py`，逻辑一字不改。
+- `compute_ground_footprint()`/`generate_ground_scan_waypoints()`——照抄
+  `ground_scan_helper.py`，逻辑一字不改。
+
+对外暴露方式：`capabilities.py`里`DroneSDK.generate_orbit_waypoints()`/
+`DroneSDK.generate_ground_scan_waypoints()`两个实例方法直接转调这里的
+模块级函数（方案2.1节第8条"作为sdk.generate_orbit_waypoints(...)这两个
+静态方法/独立函数对外暴露"，两种形式都提到了——这里两种都留：既能
+`sdk.generate_orbit_waypoints(...)`调，也能`from contest_sdk.geometry_
+helpers import generate_orbit_waypoints`直接当纯函数用，不依赖任何
+`DroneSDK`实例，方便写不需要真实ROS2环境的单元测试）。
+"""
+import math
+from typing import List, Tuple
+
+
+# ============================================================
+# 第1部分：环绕飞行航点生成（vendor自`orbit_flight_helper.py`）
+# ============================================================
+
+def generate_orbit_waypoints(
+    center_x: float,
+    center_y: float,
+    radius: float,
+    z: float,
+    num_points: int = 16,
+    start_angle_rad: float = 0.0,
+    clockwise: bool = False,
+) -> List[Tuple[float, float, float]]:
+    """生成一圈环绕航点（按角度等分，不是按弧长等分——半径固定的圆环
+    两者等价）。
+
+    Args:
+        center_x/center_y: 环绕中心（一般是候选立柱坐标）。
+        radius: 环绕半径（米），需要调用方保证比立柱半对角线+飞机机体
+            半径的安全间距大，本函数不做碰撞检查。
+        z: 环绕飞行高度（米），全程固定高度绕圈，不爬升/下降。
+        num_points: 一圈离散成几个航点，越多越接近圆、路径越平滑，但
+            要挨个跑完，点数太多会拖慢整体任务节奏，默认16个（每22.5度
+            一个点）是精度和效率的折中，不是理论最优值。
+        start_angle_rad: 起始角度（弧度，0=+x方向，跟math.atan2同一套
+            约定），默认从飞机当前朝向立柱的那一侧开始更自然，但那个
+            "当前朝向"是运行时信息，这个函数本身是纯几何、不读运行时
+            状态，调用方如果想要"从飞机当前位置最近的那个点开始绕"，
+            需要自己算好start_angle_rad传进来（可以配合
+            `angle_from_center_to_point()`）。
+        clockwise: 环绕方向，默认False=逆时针（数学正方向）。
+
+    Returns:
+        长度为num_points的(x, y, z)列表，按环绕方向排列，**首尾不重复**
+        （最后一个点转回起点之前那个点，不会再生成一次跟起点重合的点，
+        调用方如果需要"飞完整整一圈回到起点"，需要自己在末尾再追加
+        一次第一个航点）。
+    """
+    if num_points < 3:
+        raise ValueError(f'num_points必须>=3才能围出一个环，收到{num_points}')
+    if radius <= 0:
+        raise ValueError(f'radius必须>0，收到{radius}')
+
+    sign = -1.0 if clockwise else 1.0
+    waypoints = []
+    for i in range(num_points):
+        angle = start_angle_rad + sign * (2.0 * math.pi * i / num_points)
+        x = center_x + radius * math.cos(angle)
+        y = center_y + radius * math.sin(angle)
+        waypoints.append((x, y, z))
+    return waypoints
+
+
+def angle_from_center_to_point(center_x: float, center_y: float, x: float, y: float) -> float:
+    """给"从飞机当前位置最近的环绕点开始绕"这类调用方算
+    start_angle_rad用的小工具：飞机当前位置相对环绕中心的角度。"""
+    return math.atan2(y - center_y, x - center_x)
+
+
+# ============================================================
+# 第2部分：地面扫描航点生成（vendor自`ground_scan_helper.py`）
+# ============================================================
+
+def compute_ground_footprint(
+    altitude_agl: float,
+    hfov_rad: float,
+    image_aspect_ratio: float = 480.0 / 640.0,
+) -> Tuple[float, float]:
+    """下视相机在给定飞行高度下，地面覆盖矩形的(宽, 高)，单位米。
+
+    标准针孔相机模型换算（跟仿真相机驱动/Gazebo同一套公式，不是凭空
+    定义），只由`hfov_rad`+`altitude_agl`+图像宽高比决定，跟具体某一次
+    检测/某一架飞机无关。
+    """
+    if not (0 < hfov_rad < math.pi):
+        raise ValueError(f'hfov_rad必须在(0, pi)范围内，收到{hfov_rad}')
+    if altitude_agl <= 0:
+        raise ValueError(f'altitude_agl必须>0，收到{altitude_agl}')
+
+    vfov_rad = 2.0 * math.atan(math.tan(hfov_rad / 2.0) * image_aspect_ratio)
+    width = 2.0 * altitude_agl * math.tan(hfov_rad / 2.0)
+    height = 2.0 * altitude_agl * math.tan(vfov_rad / 2.0)
+    return width, height
+
+
+def generate_ground_scan_waypoints(
+    room_min_x: float,
+    room_max_x: float,
+    room_min_y: float,
+    room_max_y: float,
+    altitude_agl: float,
+    hfov_rad: float = 1.3963,  # 跟仿真下视相机默认水平FOV一致(约80度)
+    image_aspect_ratio: float = 480.0 / 640.0,
+    overlap_ratio: float = 0.3,
+    wall_margin: float = 1.0,
+) -> List[Tuple[float, float, float]]:
+    """生成弓字形（沿x方向来回扫，行与行之间沿y方向递进）固定航点序列。
+
+    Args:
+        room_min_x/max_x/min_y/max_y: 房间边界矩形（世界坐标系），调用方
+            自己算好min/max传进来——这个函数不假设房间中心一定在原点。
+        altitude_agl: 飞行高度（离地，米），全程固定高度扫描。
+        hfov_rad: 下视相机水平FOV（弧度），默认跟仿真相机实际参数一致，
+            真的换了相机参数记得同步这个默认值。
+        image_aspect_ratio: 图像高/宽比例，用于算垂直FOV，默认跟仿真
+            相机640x480一致。
+        overlap_ratio: 相邻扫描行的重叠比例（0~1之间，比如0.3=30%
+            重叠）——取地面覆盖矩形"较窄的那条边"当扫描行间距的基准
+            （不管相机实际是横着装还是竖着装，都按更保守的那个方向留
+            间距，保证真的有重叠，不会因为搞错哪个轴对应飞行方向就漏扫）。
+        wall_margin: 离四面墙的安全距离（米），航点不会贴到墙上。
+
+    Returns:
+        (x, y, z)航点列表，按扫描顺序排列（第一行从x_min飞到x_max，
+        第二行从x_max飞回x_min，如此往复，"弓字形"由此得名）。
+    """
+    if room_max_x - 2 * wall_margin <= room_min_x or room_max_y - 2 * wall_margin <= room_min_y:
+        raise ValueError('wall_margin太大，房间可用范围被挤没了')
+    if not (0.0 <= overlap_ratio < 1.0):
+        raise ValueError(f'overlap_ratio必须在[0,1)范围内，收到{overlap_ratio}')
+
+    footprint_w, footprint_h = compute_ground_footprint(altitude_agl, hfov_rad, image_aspect_ratio)
+    # 保守起见取较窄的一边当扫描行间距基准——不假设相机哪个轴对准了
+    # 飞行方向，宁可扫描行数偏多（保守），也不要因为猜错方向导致漏扫。
+    sweep_span = min(footprint_w, footprint_h)
+    row_spacing = sweep_span * (1.0 - overlap_ratio)
+    if row_spacing <= 0:
+        raise ValueError(f'overlap_ratio={overlap_ratio}太大，算出的row_spacing<=0，扫描行会重叠成同一条线')
+
+    x0 = room_min_x + wall_margin
+    x1 = room_max_x - wall_margin
+    y0 = room_min_y + wall_margin
+    y1 = room_max_y - wall_margin
+
+    waypoints: List[Tuple[float, float, float]] = []
+    y = y0
+    left_to_right = True
+    while True:
+        y_clamped = min(y, y1)
+        if left_to_right:
+            waypoints.append((x0, y_clamped, altitude_agl))
+            waypoints.append((x1, y_clamped, altitude_agl))
+        else:
+            waypoints.append((x1, y_clamped, altitude_agl))
+            waypoints.append((x0, y_clamped, altitude_agl))
+        left_to_right = not left_to_right
+        if y_clamped >= y1 - 1e-9:
+            break
+        y += row_spacing
+
+    return waypoints

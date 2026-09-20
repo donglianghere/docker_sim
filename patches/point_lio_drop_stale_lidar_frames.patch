@@ -1,0 +1,62 @@
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index 076b57c..4adf51c 100644
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -258,6 +258,28 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+             frame_ct = 0;
+         }
+     } else {
++        // docker_sim 2026-09-08新增：见DEBUG_JOURNAL.md"point_lio真机处理
++        // 延迟持续积压"排查——原实现对lidar_buffer只做无限FIFO
++        // push_back，从不检查/丢弃旧帧，主循环sync_packages()严格按
++        // front()顺序逐帧处理。真机CPU资源紧张、处理速度略低于点云
++        // 发布速度(~20Hz)时，这个deque持续增长，发布的odom消息时间戳
++        // 越来越滞后于当下时刻(真机实测19分半累计滞后152秒、仍在
++        // 持续增长)——这个延迟远超PX4 EKF2_EV_DELAY能接受的范围，
++        // vision_pose融合被静默拒绝；表现为"飞机明显移动了，odom却
++        // 完全不跟随"，其实是还在处理很久以前的旧帧，不是没响应。
++        // rclcpp::SensorDataQoS()这层本身是BEST_EFFORT+浅队列，跟不上
++        // 就丢弃，不是这里的问题——问题在这个应用层自己另开的deque，
++        // 完全没有"跟不上就丢旧帧、只保留最新"的逻辑。这里改成永远
++        // 只保留最新一帧：新帧到来前，先清空还没处理完的旧帧，用丢帧
++        // 换实时性——对point_lio这种在线定位任务，"处理的数据是不是
++        // 最新的"比"有没有处理完每一帧、地图有没有漏点"更重要。
++        // dlio/fast_lio没有暴露过这个bug不是因为它们的buffer管理更
++        // 严谨（同款deque写法，同样没有丢帧逻辑），是它们处理效率够
++        // 高，从未真正触发过这条FIFO持续增长的路径。
++        if (!lidar_buffer.empty()) {
++            lidar_buffer.clear();
++            time_buffer.clear();
++        }
+         lidar_buffer.emplace_back(ptr);
+         time_buffer.emplace_back(get_time_sec(msg->header.stamp));
+     }
+@@ -327,6 +349,28 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+             frame_ct = 0;
+         }
+     } else {
++        // docker_sim 2026-09-08新增：见DEBUG_JOURNAL.md"point_lio真机处理
++        // 延迟持续积压"排查——原实现对lidar_buffer只做无限FIFO
++        // push_back，从不检查/丢弃旧帧，主循环sync_packages()严格按
++        // front()顺序逐帧处理。真机CPU资源紧张、处理速度略低于点云
++        // 发布速度(~20Hz)时，这个deque持续增长，发布的odom消息时间戳
++        // 越来越滞后于当下时刻(真机实测19分半累计滞后152秒、仍在
++        // 持续增长)——这个延迟远超PX4 EKF2_EV_DELAY能接受的范围，
++        // vision_pose融合被静默拒绝；表现为"飞机明显移动了，odom却
++        // 完全不跟随"，其实是还在处理很久以前的旧帧，不是没响应。
++        // rclcpp::SensorDataQoS()这层本身是BEST_EFFORT+浅队列，跟不上
++        // 就丢弃，不是这里的问题——问题在这个应用层自己另开的deque，
++        // 完全没有"跟不上就丢旧帧、只保留最新"的逻辑。这里改成永远
++        // 只保留最新一帧：新帧到来前，先清空还没处理完的旧帧，用丢帧
++        // 换实时性——对point_lio这种在线定位任务，"处理的数据是不是
++        // 最新的"比"有没有处理完每一帧、地图有没有漏点"更重要。
++        // dlio/fast_lio没有暴露过这个bug不是因为它们的buffer管理更
++        // 严谨（同款deque写法，同样没有丢帧逻辑），是它们处理效率够
++        // 高，从未真正触发过这条FIFO持续增长的路径。
++        if (!lidar_buffer.empty()) {
++            lidar_buffer.clear();
++            time_buffer.clear();
++        }
+         lidar_buffer.emplace_back(ptr);
+         time_buffer.emplace_back(get_time_sec(msg->header.stamp));
+     }

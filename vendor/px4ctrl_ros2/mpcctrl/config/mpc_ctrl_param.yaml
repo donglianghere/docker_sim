@@ -1,0 +1,104 @@
+#########################################################################
+# mpcctrl参数——上半段是px4ctrl/so3ctrl同一套FSM(Parameter_t)要求的字段，
+# 逐字照抄px4ctrl/config/ctrl_param_fpv.yaml的默认值（PX4CtrlParam.cpp的
+# read_essential_param()对这些字段是"必需"的，缺一个节点直接抛异常起不来，
+# 哪怕mpcctrl自己的控制律用不上gain.*/rotor_drag.*这些字段，也必须留着）；
+# 下半段是MPC(mpcctrl::MpcParams)自己的代价矩阵/限幅参数，默认值参考
+# rpg_mpc原版parameters/目录下的示例配置。
+#########################################################################
+
+/**:
+  ros__parameters:
+    mass: 1.2 # kg，需要跟真机核对
+    gra: 9.81
+    pose_solver: 1
+    ctrl_freq_max: 100.0
+    use_bodyrate_ctrl: true   # 跟px4ctrl默认值(false)不同——MPC天然输出
+                              # body_rate+thrust，走publish_bodyrate_ctrl()
+                              # 那条路径，不是quaternion attitude那条。
+    max_manual_vel: 1.0
+    max_angle: 30.0
+    low_voltage: 13.2
+    yaw_lock_enabled: false
+
+    rc_reverse:
+      roll: false
+      pitch: false
+      yaw: false
+      throttle: false
+
+    auto_takeoff_land:
+      enable: true
+      enable_auto_arm: true
+      no_RC: false
+      takeoff_height: 1.0
+      takeoff_land_speed: 0.3
+
+    thrust_model:
+      print_value: false
+      accurate_thrust_model: false
+      K1: 0.7583
+      K2: 1.6942
+      K3: 0.6786
+      hover_percentage: 0.30   # 跟px4ctrl/so3ctrl用同一台真机时应保持一致
+
+    # ↓↓↓ Parameter_t结构体要求这些字段存在，但mpcctrl的controller.cpp
+    # 完全不读取gain.*/rotor_drag.*（MPC自己的增益是下面的Q_*/R_*），
+    # 保留只是为了不用改PX4CtrlParam.cpp的read_essential_param()调用列表。
+    gain:
+      Kp0: 1.5
+      Kp1: 1.5
+      Kp2: 1.5
+      Kv0: 1.5
+      Kv1: 1.5
+      Kv2: 1.5
+      Kvi0: 0.0
+      Kvi1: 0.0
+      Kvi2: 0.0
+      Kvd0: 0.0
+      Kvd1: 0.0
+      Kvd2: 0.0
+      KAngR: 20.0
+      KAngP: 20.0
+      KAngY: 20.0
+
+    rotor_drag:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      k_thrust_horz: 0.0
+
+    msg_timeout:
+      odom: 0.5
+      rc: 0.5
+      cmd: 0.5
+      imu: 0.5
+      bat: 0.5
+
+    #########################################################################
+    # 以下是MPC(mpcctrl::MpcParams)自己的参数，跟上面Parameter_t的字段
+    # 互相独立，没有命名冲突。
+    #########################################################################
+
+    # 状态代价 Q（对角阵，值越大对应误差惩罚越重）
+    Q_pos_xy: 100.0
+    Q_pos_z: 100.0
+    Q_attitude: 50.0
+    Q_velocity: 10.0
+    Q_perception: 0.0   # 本项目机载相机不做MPC主动指向，固定为0关闭
+
+    # 输入代价 R
+    R_thrust: 1.0
+    R_pitchroll: 10.0
+    R_yaw: 1.0
+
+    state_cost_exponential: 0.0
+    input_cost_exponential: 0.0
+
+    # 输入限幅——务必按真实机型复核，这里先按px4ctrl同款机型的保守值给
+    max_bodyrate_xy: 8.0   # rad/s
+    max_bodyrate_z: 3.0    # rad/s
+    min_thrust: 2.0        # m/s^2，质量归一化推力下限
+    max_thrust: 20.0       # m/s^2，质量归一化推力上限
+
+    print_info: false

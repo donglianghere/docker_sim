@@ -1,0 +1,27 @@
+# docker_sim 2026-09-14 —— mid-360仿真雷达最大测距从20米改成40米
+#
+# 用户2026-09-14直接要求：排查D3实测"飞机径直撞上obstacle_cylinder"这次
+# 事故（详见DEBUG_JOURNAL.md对应条目）时，确认了点云->栅格地图这条链路
+# 本身是通的（gt_cloud_bridge_node在uwb_imu模式下正常把mid360原始点云
+# 变换到odom系、以~8.6Hz喂给ego_planner的grid_map/cloud，不是"完全没有
+# 障碍物数据"这种更严重的断链），但雷达仿真本身的`laser_max_range=20.0`
+# 只有20米——房间是20x25米（`fire_drill_room_layout.yaml`），20米量程
+# 在这个场地尺度下探测提前量太短，规划器可能来不及在高速直飞长距离目标
+# 时提前感知到障碍物并规划绕开，容易复现"直接撞上去"这类问题。改成40米
+# （翻倍），给规划器更长的提前感知距离。
+#
+# 应用方式：cd staging/mighty_ws_src/livox_laser_simulation_ros2 && git apply <本文件>
+#
+diff --git a/urdf/mid360.xacro b/urdf/mid360.xacro
+index a0c965b..d276655 100644
+--- a/urdf/mid360.xacro
++++ b/urdf/mid360.xacro
+@@ -3,7 +3,7 @@
+ 
+   <xacro:property name="M_PI" value="3.1415926"/> 
+   <xacro:property name="laser_min_range" value="0.001"/>
+-  <xacro:property name="laser_max_range" value="20.0"/>
++  <xacro:property name="laser_max_range" value="40.0"/>
+   <xacro:property name="samples" value="1000"/>
+   <xacro:property name="resolution" value="0.15"/>
+   <xacro:property name="noise_mean" value="0.0"/>

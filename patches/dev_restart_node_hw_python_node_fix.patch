@@ -1,0 +1,29 @@
+--- a/scripts/dev_restart_node.sh	2026-08-25 22:25:50.970931619 +0800
++++ b/scripts/dev_restart_node.sh	2026-08-25 22:25:50.972931619 +0800
+@@ -151,9 +151,24 @@
+ # workspace overlay（不source的话LD_LIBRARY_PATH找不到这个workspace自己
+ # 编译出的.so，会报class_loader::LibraryLoadException/dlopen error，
+ # 光source基础ROS环境不够，这是2026-08-19实测踩过的坑）。
+-WS=\$(echo \"\${ARGV[0]}\" | grep -oE '^/opt/[^/]+')
++# 2026-08-25修复（两处bug，同一次排查发现）：
++# 1) ament_python节点(比如rviz_goal_bridge_node)是带shebang的脚本，内核
++#    exec时会把解释器塞进argv[0](/usr/bin/python3)，真正的/opt/<ws>/
++#    install/...路径被顶到argv[1]——之前只拿dlio_odom_node/px4ctrl_node
++#    这些C++编译的原生二进制测过，argv[0]本来就是/opt/...路径，没触发过
++#    这个分支缺失；这次是第一次拿python节点测才暴露。
++# 2) grep -oE在ARGV[0]匹配不到时返回退出码1（没匹配到不是grep的错误，是
++#    正常"没找到"），但外层set -euo pipefail会把这个非零退出码当成整个
++#    脚本失败直接退出——甚至不会执行到下面判断WS是否为空的if——必须在
++#    grep后面加“ || true”吞掉这个退出码，让脚本走到下面的判断逻辑，而不是
++#    被grep这一步提前杀死。这是真正的崩溃点，比1)更隐蔽：1)只是"结果不对"，
++#    这个是"代码根本没执行到"。
++WS=\$(echo \"\${ARGV[0]}\" | grep -oE '^/opt/[^/]+' || true)
++if [[ -z \"\$WS\" && \${#ARGV[@]} -ge 2 ]]; then
++  WS=\$(echo \"\${ARGV[1]}\" | grep -oE '^/opt/[^/]+' || true)
++fi
+ if [[ -z \"\$WS\" ]]; then
+-  echo '!! 从可执行文件路径推不出workspace目录 !!' >&2
++  echo '!! 从ARGV[0]/ARGV[1]都推不出workspace目录 !!' >&2
+   exit 1
+ fi
+ 

@@ -1,0 +1,25 @@
+diff --git a/package.xml b/package.xml
+index d047793..6aa01fd 100644
+--- a/package.xml
++++ b/package.xml
+@@ -18,8 +18,18 @@
+   <depend>visualization_msgs</depend>
+   <depend>decomp_ros_msgs</depend>
+   <depend>gazebo_msgs</depend>
+-  <depend>gazebo_ros</depend>
+-  <depend>gazebo_plugins</depend>
++  <!-- gazebo_ros/gazebo_plugins只被CMakeLists.txt里if(BUILD_SIMULATION)块内的
++       imu_plugin/convert_velodyne_to_ros_time等仿真专用target用到（真正需要
++       libgazebo-dev的那部分，跟只用消息定义、不需要Gazebo库本身的gazebo_msgs
++       不是一回事）。真机arm64镜像（Dockerfile.base）不装Gazebo Classic（官方
++       没发arm64包），colcon build时给这两个依赖加condition，跟CMakeLists.txt
++       的-DBUILD_SIMULATION=OFF对齐——Dockerfile.flight-stack里colcon build前
++       会export BUILD_SIMULATION=0，条件不满足时colcon不会把这两个包纳入依赖
++       解析，不会因为它们没编译过而拒绝编译mighty本身。sim-world镜像
++       （BUILD_SIMULATION保持默认1/未设置该环境变量）不受影响，条件为真，
++       照常要求这两个依赖。 -->
++  <depend condition="$BUILD_SIMULATION == '1'">gazebo_ros</depend>
++  <depend condition="$BUILD_SIMULATION == '1'">gazebo_plugins</depend>
+   <depend>sensor_msgs</depend>
+   <depend>std_msgs</depend>
+   <depend>nav_msgs</depend>

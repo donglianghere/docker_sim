@@ -1,0 +1,24 @@
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index e5d9950..25841fa 100644
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -920,7 +920,18 @@ public:
+         /*** ROS subscribe initialization ***/
+         if (p_pre->lidar_type == AVIA)
+         {
+-            sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, 20, livox_pcl_cbk);
++            // docker_sim: 原版这里用裸整数20构造QoS，rclcpp会解析成默认Profile
++            // (RELIABLE)。本项目Gazebo仿真的livox_points_plugin.cpp给这个
++            // CustomMsg话题显式用的是BEST_EFFORT+KeepLast(1)（sensor_qos，见
++            // livox_points_plugin.cpp:77-78），DDS QoS兼容规则下RELIABLE订阅者
++            // 收不到BEST_EFFORT发布者的消息——2026-09-07实测确认：fastlio_mapping
++            // 节点正常启动，但一直打印"New publisher discovered on topic
++            // '.../mid360', offering incompatible QoS...Last incompatible
++            // policy: RELIABILITY_QOS_POLICY"，从未收到过一帧点云、从未产生过
++            // 里程计输出。这跟本项目DLIO踩过的完全同一个坑（见
++            // patches/dlio_pointcloud_qos.patch），改成跟本文件里紧邻的
++            // PointCloud2分支（下面几行）一样用rclcpp::SensorDataQoS()。
++            sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, rclcpp::SensorDataQoS(), livox_pcl_cbk);
+         }
+         else
+         {

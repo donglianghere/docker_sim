@@ -1,0 +1,57 @@
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+index a7ceb62c96..4fe9bf1da8 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+@@ -74,3 +74,52 @@ param set-default MPC_THR_HOVER 0.671
+ # see README.md for the ongoing investigation and the exact captured
+ # telemetry that motivated this revert.
+ param set-default MPC_YAWRAUTO_MAX 45
++
++# docker_sim 2026-08-11: 实测确认(mavros param get)这个机型此前从未设置过
++# EKF2_EV_CTRL/EKF2_HGT_REF，一直停留在PX4出厂默认值(EV_CTRL=0，即水平/垂直
++# 位置+速度+yaw全部四项外部vision融合无条件关闭；HGT_REF=1即高度基准是GPS，
++# 不是vision)——源码逐行确认(ev_pos_control.cpp:52、ev_vel_control.cpp:54、
++# ev_yaw_control.cpp:69、ev_height_control.cpp:105)四个融合分支的第一步都是
++# `_params.ev_ctrl & 对应bit`，ev_ctrl=0时这个判断对任何bit恒为false，
++# repub_odom.py经mavros/vision_pose转发的DLIO/gt数据因此从未被EKF2真正融合过；
++# 同时EKF2_GPS_CTRL默认值7(非零)配合SITL自带的模拟GPS，PX4的定位其实全程在
++# 吃模拟GPS——仿真里"看起来飞得正常"，但真机室内没有GPS，这条依赖链完全不成立。
++#
++# 这里比照PX4官方为同类场景准备的参考机型1013_gazebo-classic_iris_vision
++# (ROMFS/px4fmu_common/init.d-posix/airframes/1013_gazebo-classic_iris_vision)
++# 的做法，把EV_CTRL/HGT_REF设成"信任vision"：
++#   EKF2_EV_CTRL=15：水平位置(bit0)+垂直位置(bit1)+速度(bit2)+yaw(bit3)全开，
++#   repub_odom.py本来就在转发完整的位置+速度+姿态，四项数据都现成。
++#   EKF2_HGT_REF=3：高度基准改成vision，不再依赖GPS高度。
++# 这个参数不需要reboot就生效(EKF2_EV_CTRL无reboot_required标记)，但
++# EKF2_HGT_REF有reboot_required标记，必须在这里(飞控启动时读取的airframe文件)
++# 设置，运行时`param set`不会立刻生效，需要额外触发一次FCU重启才行——写在这里
++# 直接从下一次开机就生效，不用再补一次重启动作。
++#
++# 2026-08-11补充：EKF2_EV_CTRL=15/EKF2_HGT_REF=3已经在重建后的镜像里实测
++# 确认生效(mavros param get回读，两机armed+OFFBOARD飞行中高度稳定在1米
++# 附近，没有跳变)，vision融合本身是健康的，可以进入"断开GPS、纯vision"这一步
++# ——跟PX4官方参考机型1013_gazebo-classic_iris_vision的组合完全一致
++# (EV_CTRL=15+HGT_REF=3+GPS_CTRL=0)。EKF2_GPS_CTRL同样没有reboot_required
++# 标记，之前已经在运行中的两个实例上用mavros param/set直接验证过这个切换本身
++# 是平滑的(位置没有跳变、没有掉高)，这里补一份source-level默认值，让下次
++# 全新镜像/容器也直接是这个组合，不用每次都手动re-apply。
++#
++# 2026-09-07：EV_CTRL从15改成11（水平位置bit0+垂直位置bit1+yaw bit3，
++# 去掉速度融合bit2）——起因是SLAM_BACKEND=fast_lio实测出的一次真实
++# 事故：repub_odom.py在fast_lio偶发>0.5秒空档期间停止转发（见该脚本
++# "上游odom/pose源已经0.5秒没有新数据了"这条日志），EKF2这段时间只能靠
++# 纯IMU积分推算；等fast_lio恢复输出、数据重新接上时，新数据跟EKF2当前
++# （已经被纯惯性积分带偏的）内部状态之间出现一次数值跳变（innovation
++# 突然变大）——GCS网页上表现为"SLAM本身只是高度在温和上涨，但UAV(EKF2
++# 融合结果)彻底发散"，融合端发散幅度远超输入端本身的问题，判断是速度
++# 融合这一路对这种跳变最敏感（连续两帧位置的差分在跳变发生的那一帧会
++# 产生一个数值很大的瞬时速度，被当成"真实速度"直接喂给EKF2，比单纯的
++# 位置阶跃更容易把速度状态、进而把姿态估计一起带崩）——关掉vision速度
++# 融合(bit2)，只留位置(仍然信SLAM的绝对位置，包括还没查清根因的高度
++# 漂移问题)+yaw，速度改回纯IMU积分外推，减少输入跳变时的发散烈度。
++# 这不是"修复"高度漂移本身（那个根因还在查），是给"输入偶发跳变"这个
++# 已确认的现象打的一个降低连锁发散风险的缓解措施，两者要分开看。
++param set-default EKF2_EV_CTRL 11
++param set-default EKF2_HGT_REF 3
++param set-default EKF2_GPS_CTRL 0

@@ -1,0 +1,194 @@
+--- a/ego_planner_bridge/rviz_goal_bridge_node.py	2026-08-25 22:06:13.413008882 +0800
++++ b/ego_planner_bridge/rviz_goal_bridge_node.py	2026-08-25 22:06:13.414008882 +0800
+@@ -29,14 +29,40 @@
+ 这套项目里NX01/odom<->NX02/odom已经有UWB frame_align+静态TF连通，
+ 两架飞机各自的"2D Goal Pose"工具不管Fixed Frame切换成哪一架飞机的
+ frame都能正确换算，不用再关心具体是哪个frame、偏移是多少。
++
++2026-08-22新增：航点队列执行器（GCS网页"规划航线"功能的机载侧）。跟
++上面这段rviz_goal_world转发逻辑完全独立、共用同一个term_goal发布者，
++互不干扰。GCS网页在俯视图上画折线，把整条航点表（已经在浏览器端用
++world_to_local()换算成这架飞机自己的局部坐标，跟单点点击发目标点用
++的是同一套换算，不需要这个节点再做TF转换）一次性发过来，这里只负责
++"按序执行"：发第一个点的term_goal，订阅里程计判断是否进入0.3米阈值，
++到点就发下一个，直到发完。取消队列不是简单地"不再发下一个"——无人机
++还在朝当前目标点飞、有速度，直接不管它不会让它停下来；也不能把
++"当前位置"原样重发一次当term_goal：查过ego_planner的
++planGlobalTraj/one_segment_traj_gen（五次多项式轨迹生成，
++polynomial_traj.cpp），起点终点距离趋近0、但起点速度不为0又要求终点
++速度为0时，六元线性方程组里"终点位置约束"那一行在t→0时会退化成跟
++"起点位置约束"那一行完全相同，系数矩阵奇异/病态，解出来的轨迹系数
++发散——不是安全刹车，是数值噪声，可能给px4ctrl喂一段发散的
++position_cmd。这里的取消逻辑因此改成沿当前速度方向（DLIO在odom.cc里
++线速度显式填的是里程计世界系state.v.lin.w，不是REP-103机体系约定，
++2026-08-22查过DLIO源码确认，可以直接拿v.x/v.y当odom系分量用，不需要
++再用yaw旋转）顺延一小段安全距离（clamp到0.5~3米）当新term_goal，
++让距离保持远离0，规划器按正常逻辑生成一段减速轨迹飞过去停住——全程
++只是"发一个正常的term_goal"，不碰ego_planner/traj_server核心代码
++一行。
+ """
+ 
++import math
++
+ import rclpy
+ from rclpy.node import Node
+ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+ from rclpy.duration import Duration
+ from rclpy.time import Time
+ from geometry_msgs.msg import PoseStamped
++from nav_msgs.msg import Path, Odometry
++from std_msgs.msg import Empty, Int32, String
+ from tf2_ros import Buffer, TransformListener
+ from tf2_ros import TransformException
+ # 必须import这个模块本身（哪怕代码里不直接调用它的函数）——tf2_ros的
+@@ -47,6 +73,13 @@
+ # 崩的，漏掉这一行）。
+ import tf2_geometry_msgs  # noqa: F401
+ 
++ARRIVAL_THRESHOLD_M = 0.3   # 航点抵达判定距离，用户指定
++BRAKE_LOOKAHEAD_SEC = 1.0   # 取消队列时"沿当前速度方向顺延"的时间量纲
++BRAKE_MIN_M = 0.5           # 顺延距离下限——避免速度接近0时顺延距离也
++                             # 趋近0，重新撞上"起点终点重合"的数值奇异
++BRAKE_MAX_M = 3.0           # 顺延距离上限——避免高速飞行时刹车点甩得
++                             # 太远，失去"就近悬停"的意义
++
+ 
+ class RvizGoalBridgeNode(Node):
+ 
+@@ -67,9 +100,22 @@
+         self.pub = self.create_publisher(PoseStamped, 'term_goal', qos)
+         self.create_subscription(PoseStamped, 'rviz_goal_world', self._cb, qos)
+ 
++        # ---- 航点队列执行器 ----
++        self._queue = []       # 待执行航点 [(x,y,z), ...]（局部坐标，已经
++                                # 是term_goal能直接用的坐标系，不含已到达的）
++        self._queue_idx = -1   # 当前正飞往第几个航点，-1=空闲
++        self._latest_odom = None
++        self.progress_pub = self.create_publisher(Int32, 'waypoint_progress', qos)
++        self.state_pub = self.create_publisher(String, 'waypoint_state', qos)
++        self.create_subscription(Path, 'waypoint_queue', self._queue_cb, qos)
++        self.create_subscription(Empty, 'waypoint_cancel', self._cancel_cb, qos)
++        self.create_subscription(Odometry, 'dlio/odom_node/odom', self._odom_cb, 10)
++        self._publish_state('idle')
++
+         self.get_logger().info(
+             f'rviz_goal_bridge_node已启动，目标frame={self.target_frame}，'
+-            f'订阅rviz_goal_world -> TF变换 -> 发布term_goal')
++            f'订阅rviz_goal_world -> TF变换 -> 发布term_goal；'
++            f'另订阅waypoint_queue/waypoint_cancel，实现航点队列执行')
+ 
+     def _cb(self, msg: PoseStamped):
+         # 2026-08-09现场实测：RViz发布2D Goal Pose时msg.header.stamp盖的是
+@@ -100,6 +146,101 @@
+             return
+         self.pub.publish(local)
+ 
++    # ---- 航点队列执行器 ----
++
++    def _publish_state(self, state: str):
++        self.state_pub.publish(String(data=state))
++
++    def _publish_progress(self):
++        self.progress_pub.publish(Int32(data=self._queue_idx))
++
++    def _publish_local_goal(self, x: float, y: float, z: float):
++        msg = PoseStamped()
++        msg.header.frame_id = 'map'  # 只作标注，接收端(ego_replan_fsm)不看这个字段
++        msg.header.stamp = self.get_clock().now().to_msg()
++        msg.pose.position.x = x
++        msg.pose.position.y = y
++        msg.pose.position.z = z
++        msg.pose.orientation.w = 1.0
++        self.pub.publish(msg)
++
++    def _queue_cb(self, msg: Path):
++        # GCS发来的每个点已经是局部坐标（浏览器用跟单点点击相同的
++        # world_to_local()换算过），这里不做任何TF转换，直接当term_goal
++        # 用。新队列无条件替换掉旧的（不管旧队列是不是还没飞完）——GCS
++        # 网页的"单点发目标点"也统一改走这条路径（发一个只有1个点的
++        # 队列），所以"发一个新目标点"天然就是"打断旧队列、执行新的"，
++        # 不会跟旧队列的term_goal互相覆盖打架。
++        self._queue = [(p.pose.position.x, p.pose.position.y, p.pose.position.z)
++                        for p in msg.poses]
++        if not self._queue:
++            self._queue_idx = -1
++            self._publish_state('idle')
++            self._publish_progress()
++            return
++        self._queue_idx = 0
++        self._publish_state('executing')
++        self._publish_progress()
++        x, y, z = self._queue[0]
++        self._publish_local_goal(x, y, z)
++        self.get_logger().info(
++            f'收到航线，共{len(self._queue)}个航点，飞往第1个：'
++            f'({x:.2f}, {y:.2f}, {z:.2f})')
++
++    def _odom_cb(self, msg: Odometry):
++        self._latest_odom = msg
++        if self._queue_idx < 0 or self._queue_idx >= len(self._queue):
++            return
++        tx, ty, tz = self._queue[self._queue_idx]
++        p = msg.pose.pose.position
++        dist = math.sqrt((p.x - tx) ** 2 + (p.y - ty) ** 2 + (p.z - tz) ** 2)
++        if dist > ARRIVAL_THRESHOLD_M:
++            return
++        self._queue_idx += 1
++        self._publish_progress()
++        if self._queue_idx >= len(self._queue):
++            self._publish_state('completed')
++            self.get_logger().info('航线执行完毕，最后一个航点已到达')
++            return
++        x, y, z = self._queue[self._queue_idx]
++        self._publish_local_goal(x, y, z)
++        self.get_logger().info(
++            f'到达第{self._queue_idx}个航点，飞往第{self._queue_idx + 1}个：'
++            f'({x:.2f}, {y:.2f}, {z:.2f})')
++
++    def _cancel_cb(self, _msg: Empty):
++        if self._queue_idx < 0:
++            return  # 没有正在执行的队列，忽略
++        self._queue = []
++        self._queue_idx = -1
++        self._publish_progress()
++        if self._latest_odom is None:
++            self._publish_state('cancelled')
++            self.get_logger().warn(
++                '收到取消指令，但还没收到过里程计，无法计算刹车点，只清空队列')
++            return
++        p = self._latest_odom.pose.pose.position
++        v = self._latest_odom.twist.twist.linear
++        # DLIO在odom.cc里线速度显式填的是里程计世界系(state.v.lin.w，
++        # 见文件头注释)，可以直接拿v.x/v.y当这架飞机局部坐标系下的
++        # 速度分量用，不需要额外用yaw旋转。
++        speed = math.hypot(v.x, v.y)
++        if speed > 0.05:
++            dx, dy = v.x / speed, v.y / speed
++        else:
++            # 接近悬停，没有明确的速度方向可顺延——退化用当前机头朝向，
++            # 仍要保证顺延距离不为0（不能把当前位置原样发回去，见文件头
++            # 注释里"起点终点重合导致轨迹生成数值奇异"那段论证）。
++            q = self._latest_odom.pose.pose.orientation
++            yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
++                              1 - 2 * (q.y * q.y + q.z * q.z))
++            dx, dy = math.cos(yaw), math.sin(yaw)
++        brake_dist = min(max(speed * BRAKE_LOOKAHEAD_SEC, BRAKE_MIN_M), BRAKE_MAX_M)
++        self._publish_local_goal(p.x + dx * brake_dist, p.y + dy * brake_dist, p.z)
++        self._publish_state('cancelled')
++        self.get_logger().info(
++            f'收到取消指令，沿当前速度方向顺延{brake_dist:.2f}米发送刹车目标点')
++
+ 
+ def main():
+     rclpy.init()
+--- a/package.xml	2026-08-25 22:06:13.415008882 +0800
++++ b/package.xml	2026-08-25 22:06:13.417008882 +0800
+@@ -19,6 +19,8 @@
+   <exec_depend>ego_planner</exec_depend>
+   <exec_depend>rclpy</exec_depend>
+   <exec_depend>geometry_msgs</exec_depend>
++  <exec_depend>nav_msgs</exec_depend>
++  <exec_depend>std_msgs</exec_depend>
+   <exec_depend>tf2_ros</exec_depend>
+   <exec_depend>tf2_geometry_msgs</exec_depend>
+   <exec_depend>dynus_interfaces</exec_depend>

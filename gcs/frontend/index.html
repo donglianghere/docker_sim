@@ -1,0 +1,4322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>康鹤智能无人机集群指控系统</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="konghe_logo.png">
+<style>
+  html, body { height: 100%; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #12161c; color: #e6e6e6; margin: 0; padding: 16px;
+         display: flex; flex-direction: column; box-sizing: border-box; }
+  .brandHeader { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 4px 0 12px; }
+  .brandLogo { height: 46px; width: auto; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0; }
+  /* 2026-08-22新增：logo/标题固定在左侧栏顶部，链接行挪到左侧栏底部——
+     用户反馈原来这两块跟其它内容一起卷走不方便，希望logo"常驻可见、
+     不受鼠标（滚动）影响"。position:sticky只在有滚动祖先(#leftPane设了
+     overflow-y:auto)时才生效，配一个跟body同色的background盖住底下
+     滚过的内容，不然文字会重叠透出来。链接行只是被要求"放在底部"，
+     没要求常驻可见，就放在两个模式pane后面正常走文档流，跟着一起滚，
+     不需要sticky。（2026-08-25：原来这里连带固定的还有一条"已连接
+     rosbridge"提示条(#conn)，已删除，见下面ros.on()那几行旁边的说明。）*/
+  #leftPaneHeader { position: sticky; top: 0; z-index: 2; background: #12161c;
+    padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #2a3140; }
+  #linkRow { text-align: center; margin-top: 18px; padding-top: 12px; border-top: 1px solid #2a3140; }
+  /* 2026-08-22新增：左右分栏——左边"参数"（控制按钮+表格+管理面板），
+     右边"大幅面视图"（俯视图，以后再加视频回传这类），中间一条可拖拽
+     调宽度的分隔条。原来是单栏从上到下堆叠，俯视图展开后占满整页、
+     其它内容要滚很远才能看到，用户反馈过——分栏之后两边各自独立滚动，
+     俯视图和参数能同时看到，不用来回滚。 */
+  #splitContainer { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  #leftPane { flex: 0 0 auto; overflow-y: auto; padding-right: 14px; box-sizing: border-box; }
+  #dragHandle { flex: 0 0 6px; cursor: col-resize; background: #1c222b;
+    border-left: 1px solid #2a3140; border-right: 1px solid #2a3140; }
+  #dragHandle:hover, #dragHandle.dragging { background: #2a3140; }
+  #rightPane { flex: 1 1 auto; min-width: 0; overflow: hidden; display: flex; flex-direction: column; padding-left: 14px; box-sizing: border-box; }
+  .rightTabs { flex: 0 0 auto; display: flex; gap: 4px; margin-bottom: 8px; }
+  .rightTabs .rightTab { padding: 6px 14px; border-radius: 6px 6px 0 0; font-size: 13px;
+    cursor: pointer; color: #9aa4b2; background: #1c222b; border: 1px solid #2a3140; border-bottom: none; user-select: none; }
+  .rightTabs .rightTab.active { color: #7bb8ff; background: #232a36; }
+  .rightTabContent { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .rightTabPage { display: none; }
+  /* 2026-08-22修复：漏了height:100%——.camPanel/#mapPanel下面都有
+     height:100%的子元素依赖"父级有个明确高度"才能正确撑满/居中，
+     .rightTabPage原来是display:block、没设高度(auto)，百分比高度
+     对着auto高度的父级算不出东西，实际效果是"垂直方向没有真的撑满，
+     只是凑巧显得还行"——加上height:100%（父级.rightTabContent的高度
+     是flex:1 1 auto算出来的确定值，不是auto，百分比在这一层能正确
+     解析）。 */
+  .rightTabPage.active { display: block; height: 100%; }
+  .camPlaceholder { color: #6b7684; font-size: 14px; text-align: center; padding: 80px 20px; }
+  /* 2026-08-22新增：俯视/前视相机标签页——填一个MJPEG推流地址(浏览器
+     原生支持multipart/x-mixed-replace，<img>标签直接播，不需要转码/
+     后端中转)，地址存在localStorage，不经过后端。 */
+  .camPanel { display: flex; flex-direction: column; height: 100%; }
+  .camToolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex: 0 0 auto; flex-wrap: wrap; }
+  .camToolbar input { flex: 1; min-width: 220px; background: #12161c; border: 1px solid #2a3140;
+    border-radius: 4px; color: #e6e6e6; padding: 5px 8px; font-size: 12px; }
+  .camToolbar button { padding: 5px 10px; border-radius: 6px; border: 1px solid #2a3140;
+    background: #1e3a5f; color: #8ecdff; font-weight: 700; font-size: 12px; cursor: pointer; }
+  .camToolbar button:hover { background: #274a75; }
+  .camView { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center;
+    overflow: hidden; background: #12161c; border: 1px solid #2a3140; border-radius: 8px; cursor: grab; }
+  .camView.dragging { cursor: grabbing; }
+  /* 2026-08-22调整：原来是max-width/max-height，图片按自己原始分辨率
+     (比如640x360)显示，在一个大得多的容器里显得很小——改成width/
+     height:100%+object-fit:contain，撑满容器、按原比例缩放，水平垂直
+     都靠上面.camView的flex居中（跟画布俯视图同一套居中思路）。滚轮
+     缩放/拖动平移在这个基础上叠加一个transform:scale+translate，见
+     下面JS的onCamWheel/onCamMouseDown。 */
+  .camView img { width: 100%; height: 100%; object-fit: contain; user-select: none;
+    -webkit-user-drag: none; }
+  .mapTitle { font-size: 20px; font-weight: 700; text-align: center; margin: 0 0 12px; color: #7bb8ff; }
+  h3 { font-size: 14px; margin: 16px 0 6px; color: #7bb8ff; }
+  .row { display: flex; justify-content: space-between; font-size: 13px;
+         padding: 3px 0; border-bottom: 1px dashed #2a3140; }
+  .row:last-child { border-bottom: none; }
+  .row .k { color: #9aa4b2; }
+  .row .v { font-variant-numeric: tabular-nums; }
+  .stale { opacity: 0.4; }
+  /* 2026-08-22新增：controlBar第一行"连接/模式"+"解锁"两组k/v并排显示——
+     跟.row同款配色/间距，但.row是给单独一对k/v设计的(space-between
+     直接撑两端)，这里一行要放两组，改成给每组包一层<span>再space-
+     between，撑的是"两组"而不是"两个文字节点"。 */
+  .statusRow { display: flex; justify-content: space-between; font-size: 13px;
+    padding: 3px 0; margin-bottom: 8px; border-bottom: 1px dashed #2a3140; }
+  .statusRow .k { color: #9aa4b2; }
+  .statusRow .v { font-variant-numeric: tabular-nums; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px; margin-right: 4px; }
+  .badge.armed { background: #5c2020; color: #ff8888; }
+  .badge.disarmed { background: #1f3d24; color: #7cd992; }
+  /* 2026-08-25新增：真机flight/vision容器状态原来是statusText里一段
+     纯文字("flight=up vision=down")，用户反馈"需要醒目显示，不是仅仅
+     字符输出"——改成跟仿真卡片ARMED/DISARMED同一套色块徽章，up用绿色
+     (跟disarmed=安全同一个配色逻辑：容器在跑是正常/期望状态)，down用
+     中性灰(容器没起不代表出错，很多时候是还没手动启动，不用红色制造
+     "坏了"的错觉)。 */
+  .badge.up { background: #1f3d24; color: #7cd992; }
+  .badge.down { background: #2a3140; color: #9aa4b2; }
+  #empty { color: #6b7684; font-size: 13px; }
+  .actions { display: flex; gap: 6px; margin-top: 12px; }
+  /* 2026-08-29用户要求"按钮都用醒目的颜色，加粗的字体，立体浮雕风格"——
+     "立体浮雕"这部分早就有了(见下面.actions button/.panel button等的
+     box-shadow规则，凸起+按下变凹的新拟态效果)，这次是在那基础上补
+     "颜色"和"字重"两项：默认(没有danger/ok/err/stateOn/stateOff这些
+     语义色覆盖时)背景从原来偏灰的#232a36换成更饱和的深蓝#1e3a5f，字色
+     从中性灰#e6e6e6换成醒目的天蓝#8ecdff，字重从默认(400)改成700。这条
+     规则只改背景/字色/字重，不碰box-shadow，跟"立体浮雕"效果互不冲突；
+     danger(红)/ok(绿)/err(红)/stateOn(绿)/stateOff(灰)这些语义色变体
+     规则本身没改，只会自动继承这里新加的font-weight:700(它们没有覆盖
+     font-weight)，颜色仍然各自保留原来的语义色，不会被这条新规则的
+     蓝色覆盖掉。 */
+  .actions button { flex: 1; padding: 7px 0; border-radius: 6px; border: 1px solid #2a3140;
+    background: #1e3a5f; color: #8ecdff; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .actions button:hover:not(:disabled) { background: #274a75; }
+  .actions button:disabled { opacity: 0.5; cursor: default; }
+  .actions button.danger { border-color: #5c2020; color: #ff9a9a; }
+  /* 2026-08-22新增：锁定起飞点/起飞/降落三个按钮的操作结果只用按钮
+     颜色表示（busy靠已有的:disabled变暗即可，不用单独定义），成功/
+     失败保持几秒后由JS自动摘掉这两个class、恢复默认样式。 */
+  .actions button.ok { background: #1f3d24; border-color: #2f5c38; color: #7cd992; }
+  .actions button.err { background: #5c2020; border-color: #7a3030; color: #ff9a9a; }
+  /* 2026-08-29新增："更新NameSpace"按钮+命名空间输入框那一排——用跟
+     flight/vision启停同一个.actions三等分flex布局，中间塞一个空
+     `<div>`当spacer撑开1/3宽度(.actions只给button元素设了flex:1，
+     纯div/input默认flex:0不会自动撑开，需要显式声明)，让按钮跟输入框
+     分别对齐到"启动vision"/"重启vision"那两列。输入框套用跟按钮相同的
+     padding/border/border-radius/字号，看起来是同一批"按钮大小"的控件，
+     不是一个普通细长输入框杵在按钮堆里。
+     ⚠️ 用户反馈"更新NameSpace/输入框宽度要跟启动vision一样"——光有
+     flex:1不够：flex子元素默认min-width是auto(按内容撑开的最小宽度)，
+     不是0，`<input>`的默认内容宽度比按钮文字宽，会顶住flex:1不让它真的
+     缩到跟"启动vision"按钮同宽，三个格子表面上都flex:1、实际渲染宽度
+     却不相等。这里显式把.actions所有直接子元素的min-width都归零，
+     flex-basis:0(flex:1的隐含值)才能真正接管，三等分严格相等。 */
+  .actions > * { min-width: 0; }
+  .actions > div { flex: 1; }
+  .actions input.renameSlotInput { flex: 1; padding: 7px 6px; border-radius: 6px;
+    border: 1px solid #2a3140; background: #12161c; color: #e6e6e6; font-size: 13px;
+    text-align: center; box-sizing: border-box; }
+  .actionMsg { font-size: 12px; margin-top: 6px; min-height: 16px; color: #9aa4b2; }
+  .actionMsg.ok { color: #7cd992; }
+  .actionMsg.err { color: #ff8888; }
+  .toggleLink { font-size: 12px; color: #7bb8ff; cursor: pointer; margin-top: 10px;
+    display: inline-block; user-select: none; padding: 2px 6px; border-radius: 4px; }
+  /* 2026-08-22新增：链接对应的面板展开时，链接本身也要跟着变样式——
+     深色背景+浅色文字的"按下"效果，跟.rightTab.active是同一套配色，
+     收起来(去掉.active)自动恢复成原来的样子，不需要额外记状态。 */
+  .toggleLink.active { background: #232a36; color: #e6e6e6; }
+  .panel { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2a3140; }
+  .field { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .field label { flex: 1; font-size: 12px; color: #9aa4b2; }
+  .field input { width: 110px; background: #12161c; border: 1px solid #2a3140;
+    border-radius: 4px; color: #e6e6e6; padding: 4px 6px; font-size: 12px;
+    font-variant-numeric: tabular-nums; }
+  .field select { min-width: 200px; background: #12161c; border: 1px solid #2a3140;
+    border-radius: 4px; color: #e6e6e6; padding: 4px 6px; font-size: 12px; }
+  .panel button { margin-top: 8px; width: 100%; padding: 6px 0; border-radius: 6px;
+    border: 1px solid #2a3140; background: #1e3a5f; color: #8ecdff; font-weight: 700; font-size: 13px;
+    cursor: pointer; }
+  .panel button:hover:not(:disabled) { background: #274a75; }
+  .panel button:disabled { opacity: 0.5; cursor: default; }
+  #settingsPanel { display: none; margin-bottom: 16px; }
+  #settingsPanel.open { display: block; }
+  #gcsHostPanel { display: none; margin-bottom: 16px; }
+  #gcsHostPanel.open { display: block; }
+  #simUtilPanel { display: none; margin-bottom: 16px; background: #1c222b;
+    border: 1px solid #2a3140; border-radius: 8px; padding: 12px 16px;
+    margin-top: 10px; }   /* 跟.droneCard同一套底色框视觉语言，2026-08-31用户要求 */
+  #simUtilPanel.open { display: block; }
+  #simUtilPanel h3:first-child { margin-top: 0; }
+  #uwbBanner { font-size: 13px; margin-bottom: 10px; }
+  .linkSep { color: #2a3140; margin: 0 6px; font-size: 12px; user-select: none; }
+  /* 2026-08-25新增：仿真/真机顶层模式切换——原来7个平行toggleLink堆在
+     一起，仿真和真机的东西没有物理隔开，同一张表格里飞机命名空间又
+     不区分数据来源，被用户反馈"混在一起很乱、状态把握不清"。改成两个
+     大按钮切换模式，模式专属的内容（仿真机队卡片/本地仿真启停/资源
+     消耗/清空日志 vs 真机集群卡片/GCS网络设置）分别收进各自的pane，
+     用display:none/block整体切换，不需要互相感知对方的DOM。 */
+  #modeSwitch { display: flex; gap: 8px; margin: 4px 0 14px; }
+  .modeBtn { flex: 1; padding: 10px 0; border-radius: 8px; border: 1px solid #2a3140;
+    background: #1e3a5f; color: #8ecdff; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .modeBtn:hover { background: #274a75; }
+  .modeBtn.active { background: #2f5a8a; color: #bfe3ff; border-color: #4a7bab; }
+  #simModePane, #realModePane { display: none; }
+  #simModePane.active, #realModePane.active { display: block; }
+  /* 一机一卡片——比重构前的.controlBar更"重"，容纳的内容更多（遥测+
+     健康状态+操作按钮+折叠的调参/令牌配置子区），配色沿用同一套深色
+     卡片风格，但不限制min-width/flex（卡片纵向堆叠，不是横排撑满）。 */
+  .droneCard { background: #1c222b; border: 1px solid #2a3140; border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 12px; }
+  .droneCard b.cardTitle { font-size: 15px; color: #7bb8ff; }
+  .droneCard .cardSub { font-size: 12px; color: #6b7684; margin-left: 8px; }
+  .fieldGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 4px 14px; margin: 8px 0; }
+  .fieldGrid .row { margin: 0; }
+  /* 2026-08-25新增：真机卡片"保存配置"/"删除本地配置"到底管哪些输入框
+     用户反馈"光写一句话不够，得用框框起来"——把这两个按钮实际覆盖的
+     字段(令牌/手动IP/手动端口/检测模式/推流参数)整体框进这个带边框的
+     子区域，跟旁边"查状态/启停容器/应用检测模式/改名"这类立即生效、
+     不受这两个按钮影响的操作从视觉上分开，不用再靠一句说明文字硬记。 */
+  .configBox { border: 1px solid #3a4a63; border-radius: 6px; padding: 10px 12px;
+    margin-top: 10px; background: #171d27; }
+  .configBoxTitle { font-size: 12px; color: #7bb8ff; font-weight: 600; margin-bottom: 6px; }
+  /* 2026-08-29新增：真机卡片"①容器状态/②飞机状态/③控制面板/④配置面板"
+     四段用户要求"不同面板用不同底色"——用低透明度色块区分，不是纯装饰，
+     文字/表格/按钮该有的颜色不受影响(半透明叠加在.droneCard的#1c222b
+     底色上面，不是遮住内容重新上色)。四种颜色分别沿用页面里已经在用的
+     语义色调：蓝(信息类，链接/标题用的#7bb8ff同色系)、绿(正常/UP用的
+     #7cd992同色系)、橙(操作类，不跟绿=UP/红=DOWN/危险冲突)、紫(配置类，
+     跟.configBox原来的边框色#3a4a63同色系延伸)。 */
+  .panelSection { border-radius: 6px; padding: 8px 10px 2px; margin-top: 10px; }
+  .panelSection-container { background: rgba(96, 165, 250, 0.10); }
+  .panelSection-vehicle { background: rgba(124, 217, 146, 0.08); }
+  .panelSection-control { background: rgba(255, 177, 102, 0.10); }
+  .panelSection-config { background: rgba(196, 148, 255, 0.10); }
+  /* 2026-08-25新增：位置/姿态这类多分量数据用户反馈"逗号拼一串数字谁
+     看得懂"，改回真正的表格——列头写清楚X/Y/Z、Roll/Pitch/Yaw是第几个
+     数，跟仿真/真机卡片共用同一份telemetryFieldsHtml()。表格样式在
+     2026-08-25早些时候的卡片化重构里被删过一次（当时以为不再需要
+     <table>了），这次为这个具体场景加回来，缩小字号/内边距适配卡片
+     里的紧凑空间，不是简单照抄以前那份全宽表格样式。 */
+  /* 2026-08-29：table-layout:fixed让每张表的列宽只由"这张表有几列"决定
+     (100%/列数)，不再跟着表头文字长短(比如"SLAM频率(收到/真实)"比"UWB频率"
+     长得多)各算各的——同一张卡片里6张telemetryTable宽度都是100%，列数
+     相同的表(位置/姿态/MAVROS链路/发布频率都是4列)因此列宽也完全相同，
+     纵向堆叠时表格线能对整齐，不再是每张表各自乱窜的宽度。 */
+  /* 2026-08-29用户上次反馈"没设对"，明确要求"表格头这一行用'凸式'
+     风格，表格内容行用'沉式'风格"——不是单纯换字色/字重，是真正的
+     新拟态(neumorphism)浮雕效果：凸=像从底色上鼓起来的按钮，左上角
+     打亮、右下角压暗；沉=像陷进底色里的凹槽，左上角压暗、右下角打亮，
+     跟凸正好相反。这种效果每个格子都要有自己独立的立体感，改成
+     border-collapse:separate+border-spacing留出缝隙（collapse会让相邻
+     格子共用一条线，box-shadow在边界处会互相干扰、看不出独立的凹凸），
+     缝隙也顺便让下面panelSection的底色能透出来一圈，跟之前"四段底色"
+     那次改动不冲突。 */
+  .telemetryTable { border-collapse: separate; border-spacing: 3px; width: 100%; font-size: 12px; table-layout: fixed; }
+  .telemetryTable th, .telemetryTable td { border: none; padding: 4px 6px; border-radius: 4px;
+    text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums; }
+  .telemetryTable th { background: #1c222b; color: #dbe2ea; font-weight: 700;
+    box-shadow: -2px -2px 3px rgba(255,255,255,0.06), 2px 2px 5px rgba(0,0,0,0.6); }
+  .telemetryTable td { background: #10141b; color: #9aa4b2; font-weight: 400;
+    box-shadow: inset 2px 2px 4px rgba(0,0,0,0.6), inset -1px -1px 2px rgba(255,255,255,0.05); }
+  /* 2026-08-25：不能用td:first-child统一处理"第一列是行标签"——位置/姿态
+     两张表第一列确实是行标签(SLAM/UWB)，但推力/健康状态那两张表每一列
+     都是数据本身，没有行标签这一说，first-child会把它们的第一个数据值
+     误判成"标签"变成左对齐+灰色，跟其它列不一致。改成显式class，只加在
+     真正的行标签单元格上。2026-08-29用户反馈行标签(SLAM/UWB/UAV等)没有
+     居中——原来这里连着改了text-align:left，是刻意跟数据值区分开的
+     设计，现在用户明确要求都居中，只保留灰色区分，去掉左对齐。 */
+  .telemetryTable td.rowLabel { color: #9aa4b2; }
+  .telemetryTable tr.stale td { opacity: 0.4; }
+  /* 配合"一行里几个单元格分别来自不同信源"的表格(比如健康状态表里
+     电池电压/电流跟故障保护是两个不同话题)，没法整行共用一个.stale，
+     改成直接把.stale打在具体的<td>上。 */
+  .telemetryTable td.stale { opacity: 0.4; }
+  /* 2026-08-29新增：位置/姿态是飞行时最需要一眼盯住的两张表，用户要求
+     "通过字体/颜色/亮度手段醒目显示"——字号从表格默认12px放大到15px、
+     颜色从中性灰(#9aa4b2)换成醒目的青蓝色、加一圈同色发光(text-shadow)
+     模拟"更亮"的观感，跟同一张卡片里健康/频率/RC这些次要信息拉开
+     视觉层级。只作用于数据列(:not(.rowLabel))，SLAM/UWB/UAV这几个行
+     标签保持原样不跟着放大。tr.stale的0.4透明度规则在.telemetryTable
+     td上，选择器优先级比这条低但顺序在后，处理掉线情况时依然会覆盖
+     颜色/发光(变暗)，不会出现"数据都掉线了还亮着"的假象。 */
+  .telemetryTable-highlight td:not(.rowLabel) {
+    font-size: 15px; color: #4fd1ff; font-weight: 700;
+    text-shadow: 0 0 6px rgba(79, 209, 255, 0.45);
+  }
+  /* 2026-09-08新增：真机模式下"全局位置"表（UWB/UWB_A/UWB_B，UWB基站
+     锚定的绝对坐标，不随时间累积漂移）用暖色（琥珀色）跟"局部位置"表
+     （UAV/SLAM，从起飞/初始化时刻开始累积、会漂移的相对坐标，沿用上面
+     telemetryTable-highlight的青蓝色）区分开——同一套字号/发光处理，
+     只换主色，保持两张表视觉权重一致，一眼就能分清哪些数字是"绝对"、
+     哪些是"相对会飘"的。 */
+  .telemetryTable-highlight-global td:not(.rowLabel) {
+    font-size: 15px; color: #ffb84f; font-weight: 700;
+    text-shadow: 0 0 6px rgba(255, 184, 79, 0.45);
+  }
+  /* 2026-09-08新增：UWB_A/UWB_B（单个基站原始解算值，仅供参考/调试）
+     跟UWB（融合后主值，实际参与EKF2融合的那个）虽然同属"全局位置"，
+     重要性不一样——用同一色相更浅的琥珀色区分，主UWB行保持上面
+     `telemetryTable-highlight-global`默认的深琥珀色不用改。行级class
+     覆盖手法跟row-highlight-global/row-highlight-uav一致。 */
+  .telemetryTable-highlight-global tr.row-highlight-global-light td:not(.rowLabel) {
+    color: #ffd699; text-shadow: 0 0 6px rgba(255, 214, 153, 0.35);
+  }
+  /* 2026-09-08新增：姿态表（telemetryTable-highlight，青蓝色）没有像
+     位置表那样整张拆分成"局部/全局"两张表——UAV/SLAM/UWB三行还在同一张
+     表里，只是UWB这一行单独标成琥珀色（跟上面全局位置表同一个颜色），
+     因为UWB的yaw同样是基站/标签解出来的绝对朝向，跟UAV/SLAM那两行
+     依赖姿态积分、会漂移的性质不一样。用行级class
+     `row-highlight-global`覆盖，选择器比telemetryTable-highlight
+     自己的td:not(.rowLabel)规则多一层tr.row-highlight-global，
+     specificity更高，能正确覆盖同一张表里的默认青蓝色。 */
+  .telemetryTable-highlight tr.row-highlight-global td:not(.rowLabel) {
+    color: #ffb84f; text-shadow: 0 0 6px rgba(255, 184, 79, 0.45);
+  }
+  /* 2026-09-08新增：位置/姿态表里UAV和SLAM原来共用同一套青蓝色，
+     数字连在一起容易看串——UAV是mavros/px4的估计值，SLAM是fast_lio/
+     point_lio/dlio的估计值，来源不同、健康与漂移特性也不同，需要一眼
+     分清哪行是哪个源。UAV行单独换成紫色，SLAM行保留原有青蓝色不用
+     新增class。跟row-highlight-global同样的specificity覆盖手法：
+     tr.row-highlight-uav比telemetryTable-highlight自己的
+     td:not(.rowLabel)规则多一层，能正确覆盖。 */
+  .telemetryTable-highlight tr.row-highlight-uav td:not(.rowLabel) {
+    color: #c792ea; text-shadow: 0 0 6px rgba(199, 146, 234, 0.45);
+  }
+  /* 2026-08-25新增：flight/vision启停/重启这六个按钮，根据当前容器
+     状态提示"现在点哪个有意义"——已经在跑的容器，"启动"按钮变灰
+     （没必要点，虽然点了也不会报错，只是没意义）、"停止/重启"变绿
+     （现在点这两个才是有实际效果的操作）；没在跑则反过来。只有真的
+     收到心跳、知道flight_up/vision_up准确值时才会上色，不知道就用
+     默认按钮样式（不瞎猜)。 */
+  .actions button.stateOn { border-color: #2f5c38; background: #1f3d24; color: #7cd992; }
+  .actions button.stateOn:hover:not(:disabled) { background: #26492c; }
+  .actions button.stateOff { border-color: #2a3140; background: #1a1f27; color: #6b7684; }
+  /* 2026-08-25新增：每张真机卡片"点了按钮之后"的结果提示，原来是最下面
+     一行不起眼的文字，用户反馈"干脆用一个显眼的输出框"——飞机端有的
+     操作（比如启停容器）message字段是原始docker compose命令输出，可能
+     是好几行文本(接口文档3.4节写的"截断到最后2000字符")，普通一行文字
+     装不下也不好读，改成带边框+等宽字体+可滚动的输出框，跟终端输出的
+     观感更接近，长文本不会把卡片撑得很高。 */
+  .outputBox { margin-top: 8px; border: 1px solid #2a3140; border-radius: 6px;
+    background: #0d1117; padding: 8px 10px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    max-height: 180px; overflow-y: auto; color: #9aa4b2; }
+  .outputBox.ok { border-color: #2f5c38; color: #cfead8; }
+  .outputBox.err { border-color: #7a3030; color: #ffc7c7; }
+  #mapPanel { }
+  .mapToolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .mapToolbar button { padding: 5px 10px; border-radius: 6px; border: 1px solid #2a3140;
+    background: #1e3a5f; color: #8ecdff; font-weight: 700; font-size: 12px; cursor: pointer; }
+  .mapToolbar button:hover { background: #274a75; }
+  /* 2026-08-29用户要求"按钮都要用突起和立体风格"——跟前面telemetryTable
+     表头(凸式)同一套新拟态语言：静止状态像从底色鼓起来的按钮(左上打亮/
+     右下压暗)，按下(:active)那一刻反转成陷进去的效果(inset阴影)，给
+     真实的按压反馈，不是纯装饰。这条规则统一盖住全站所有真正的
+     `<button>`元素（.actions/.panel/.camToolbar/.mapToolbar四个容器里的
+     按钮+顶层仿真/真机模式切换的.modeBtn），不管背景色是默认灰、
+     danger红、ok绿还是stateOn/stateOff——box-shadow跟background是两个
+     独立属性，颜色变体规则(比如.actions button.danger)只覆盖颜色，不会
+     跟这条阴影规则冲突。.rightTab/.toggleLink是标签页/文字链接（`<span>`
+     不是`<button>`），不在"按钮"这个范围内，没有加这个效果。 */
+  .actions button, .panel button, .camToolbar button, .mapToolbar button, .modeBtn {
+    box-shadow: -2px -2px 3px rgba(255, 255, 255, 0.06), 2px 2px 5px rgba(0, 0, 0, 0.6);
+  }
+  .actions button:active:not(:disabled), .panel button:active:not(:disabled),
+  .camToolbar button:active, .mapToolbar button:active, .modeBtn:active {
+    box-shadow: inset 2px 2px 4px rgba(0, 0, 0, 0.6), inset -1px -1px 2px rgba(255, 255, 255, 0.05);
+  }
+  .mapToolbar select { background: #12161c; border: 1px solid #2a3140; border-radius: 4px;
+    color: #e6e6e6; padding: 3px 6px; font-size: 12px; }
+  /* 2026-08-22：之前用width:100%;height:100%;object-fit:contain +
+     #mapPanel/.rightTabPage一路flex:1 1 auto+display:flex试图让画布
+     占满右侧栏可用高度，结果暴露两个真实bug——mapClickPanel/
+     mapRoutePanel这些画布下面的按钮面板被canvas的flex-grow挤没了
+     (看不见)，以及点击画布后画布"粘"在鼠标上跟着走（大概率是这套
+     嵌套flex布局在某些尺寸下让canvas.getBoundingClientRect()算出
+     退化的矩形，导致onMapMouseUp里的处理逻辑抛异常、mapDrag没能清空
+     ——见onMapMouseUp里新加的try/finally兜底）。改回分栏之前就在用、
+     没出过问题的简单方案：宽度撑满、高度按960:630固定比例算，不掺和
+     flex-grow/object-fit，画布下面的面板正常占用自己的高度，多出来的
+     内容让.rightTabContent的overflow:auto去滚，不需要精确"画布刚好
+     占满剩余空间"这种效果。 */
+  #mapCanvas { width: 100%; max-width: 100%; height: auto; aspect-ratio: 960 / 630;
+    background: #12161c; border: 1px solid #2a3140; border-radius: 8px; cursor: grab;
+    display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="splitContainer">
+<div id="leftPane">
+<div id="leftPaneHeader">
+  <div class="brandHeader">
+    <img src="konghe_logo.png" alt="康鹤智能" class="brandLogo">
+    <h1>康鹤智能无人机集群指控系统</h1>
+  </div>
+</div>
+<div id="uwbBanner"></div>
+
+<div id="modeSwitch">
+  <button id="modeBtn-sim" class="modeBtn active" onclick="requestGcsModeSwitch('sim')"
+    title="点击会让GCS自己重建容器、真正切到本机回环DDS网络+仿真专用ROS_DOMAIN_ID——本机sim-world+双机flight-stack容器，飞行参数/健康状态/规划地图数据走DDS/rosbridge，起飞/降落/发目标点这类飞行指令只对这个模式里的飞机生效">🖥️ 仿真模式</button>
+  <button id="modeBtn-real" class="modeBtn" onclick="requestGcsModeSwitch('real')"
+    title="点击会让GCS自己重建容器、真正切到'GCS网络设置'里保存的真机网卡/Peer配置+真机ROS_DOMAIN_ID——真实飞机通过UDP广播自动发现+HTTP直连《单机接口描述文件.md》里的control_server.py，不需要SSH；额外配好DDS网络桥接后卡片上还会多一段实时遥测">🛰️ 真机模式</button>
+</div>
+<div id="modeSwitchStatus" class="actionMsg"></div>
+
+<div id="simModePane" class="active">
+  <div id="empty" style="display:none">仿真机队还没起来，或者容器起了但PX4/DDS话题还没就绪——去下面"仿真工具"面板启动（等待 /&lt;NS&gt;/mavros/state 之类的话题出现）</div>
+  <div id="simCards"></div>
+  <span class="toggleLink" onclick="toggleSimUtilPanel(this)">⚙ 仿真工具</span>
+  <div id="simUtilPanel" class="panel">
+    <h3>本地仿真启停</h3>
+    <div id="simFleetPanel"></div>
+    <h3>资源消耗</h3>
+    <div id="resourcePanel"></div>
+    <h3>记录文件</h3>
+    <div class="actions"><button class="danger" onclick="doClearLogs()">清空记录文件（双击5秒内确认）</button></div>
+    <div id="clearLogsMsg" class="actionMsg"></div>
+  </div>
+</div>
+
+<div id="realModePane">
+  <div id="realEmpty" style="display:none">还没收到任何飞机的UDP发现心跳(:8891)，也没有手动配置过的命名空间——确认飞机端docker_sim/scripts/control_server.py已经在跑</div>
+  <div id="hwFleetDiscoverPanel"></div>
+  <h3>GCS网络设置（真机模式必填，点上方"🛰️真机模式"按钮前先在这里配好）</h3>
+  <span class="toggleLink" onclick="toggleSettings(this)">⚙ 展开配置</span>
+  <div id="settingsPanel" class="panel">
+    <div class="field"><label>本机网卡IP（NetworkInterface）</label><input id="gcsIfaceInput" placeholder="加载中..."></div>
+    <div class="field"><label>Jetson对端IP（Peer，可留空，多台用逗号分隔）</label><input id="gcsPeerInput" placeholder="加载中...例：192.168.2.104, 192.168.2.107"></div>
+    <button id="gcsSaveBtn" onclick="saveGcsNetwork()">保存真机网络参数</button>
+    <div id="gcsNetworkMsg" class="actionMsg"></div>
+  </div>
+</div>
+
+<div id="linkRow">
+  <span class="toggleLink" onclick="toggleGcsHostPanel(this)"
+    title="关闭GCS自己（gcs-gcs-1前端+rosbridge、gcs-backend-1这个后端）——只有停止，没有启动按钮，关掉后要回宿主机终端手动重新拉起，不影响仿真/真机那边正在跑的飞控软件">💻 GCS主机</span>
+</div>
+<div id="gcsHostPanel" class="panel"></div>
+</div>
+<div id="dragHandle" title="拖动调整左右宽度"></div>
+<div id="rightPane">
+  <div class="rightTabs" id="rightTabs">
+    <span class="rightTab active" data-tab="map" onclick="switchRightTab('map')">🗺️ 规划地图</span>
+    <span class="rightTab" data-tab="frontcam" onclick="switchRightTab('frontcam')">🎥 前视相机</span>
+    <span class="rightTab" data-tab="topcam" onclick="switchRightTab('topcam')">📷 俯视相机</span>
+  </div>
+  <div class="rightTabContent">
+    <div id="rightTabPage-map" class="rightTabPage active">
+      <div id="mapPanel">
+        <div class="mapToolbar">
+          <label style="font-size:12px;color:#9aa4b2;">坐标来源：</label>
+          <select onchange="mapSetCoordSource(this.value)">
+            <option value="world">世界系(θ*标定)</option>
+            <option value="uwb" selected>UWB绝对坐标(免标定)</option>
+            <option value="slam">本机SLAM局部系(单机部署，无UWB)</option>
+          </select>
+          <label style="font-size:12px;color:#9aa4b2;margin-left:8px;">叠加障碍物：</label>
+          <select id="mapOccSelect" onchange="mapOccUserPicked = true; mapSelectOccupancy(this.value)"></select>
+        </div>
+        <canvas id="mapCanvas" width="960" height="630"></canvas>
+        <div id="mapStatus" class="actionMsg"></div>
+        <div id="mapClickPanel"></div>
+        <div id="mapRoutePanel"></div>
+        <div id="mapQueueStatus"></div>
+      </div>
+    </div>
+    <div id="rightTabPage-topcam" class="rightTabPage">
+      <div class="camPanel">
+        <div class="camToolbar">
+          <label style="font-size:12px;color:#9aa4b2;">信号源：</label>
+          <select id="camMode-topcam" onchange="camModeChange('topcam', this.value)">
+            <option value="mjpeg">MJPEG</option>
+            <option value="h264">H.264(经本机转码)</option>
+          </select>
+          <label style="font-size:12px;color:#9aa4b2;">地址：</label>
+          <input id="camUrl-topcam" placeholder="http://192.168.x.x:8080/stream.mjpg">
+          <button onclick="camApply('topcam')">应用</button>
+        </div>
+        <div class="camView" id="camView-topcam"></div>
+      </div>
+    </div>
+    <div id="rightTabPage-frontcam" class="rightTabPage">
+      <div class="camPanel">
+        <div class="camToolbar">
+          <label style="font-size:12px;color:#9aa4b2;">信号源：</label>
+          <select id="camMode-frontcam" onchange="camModeChange('frontcam', this.value)">
+            <option value="mjpeg">MJPEG</option>
+            <option value="h264">H.264(经本机转码)</option>
+          </select>
+          <label style="font-size:12px;color:#9aa4b2;">地址：</label>
+          <input id="camUrl-frontcam" placeholder="http://192.168.x.x:8080/stream.mjpg">
+          <button onclick="camApply('frontcam')">应用</button>
+        </div>
+        <div class="camView" id="camView-frontcam"></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="roslib.min.js"></script>
+<script>
+// 最简网页地面站：不写死"单机/双机"，只做一件事——订阅rosapi看DDS域里
+// 实际有哪些命名空间，动态渲染卡片。这条原则见
+// docker_sim/网页端地面站控制面板方案.md 第六章。
+const WS_HOST = location.hostname || "localhost";
+const WS_PORT = 9090;
+const BACKEND_URL = `http://${WS_HOST}:8000`;  // 容器B，见gcs/backend/app.py
+
+// 2026-08-25：容器B(/api/*)原来要求Authorization: Bearer <token>鉴权，
+// 用户明确要求删掉——这个内部工具只在受信任局域网用，多一层令牌反而
+// 经常跟真机的X-Control-Token搞混（这次会话连续踩过好几次，见
+// DEBUG_JOURNAL.md 2026-08-25记录）。backendFetch()这个包装函数名保留
+// 不改（全文件23处调用点，改成直接调fetch()要动23处，没必要），但
+// 不再往请求头里塞任何令牌，就是fetch()的薄包装。
+function backendFetch(url, opts) {
+  return fetch(url, opts || {});
+}
+
+// 2026-08-22新增：展开面板对应的链接自己也要变个颜色标出"当前是展开
+// 状态"——用户反馈链接行挪到左侧栏底部之后，点开的面板离链接本身
+// 有一段距离，光看链接本身完全看不出"这个已经点开了"，收起来之后
+// 又恢复不了原样，全靠链接文字本身猜。6个"点链接展开面板"的场景
+// 都是同一套逻辑（判断.open类、切换、opening时执行一个初始化回调），
+// 抽成这一个共用函数，链接元素(linkEl，靠onclick="xxx(this)"传进来)
+// 跟着面板的开关状态同步切一个.active类，不用6个函数各自重复一遍。
+function toggleLinkPanel(linkEl, panelId, onOpen) {
+  const panel = document.getElementById(panelId);
+  const opening = !panel.classList.contains("open");
+  panel.classList.toggle("open", opening);
+  if (linkEl) linkEl.classList.toggle("active", opening);
+  if (opening && onOpen) onOpen();
+}
+
+
+const STATUS_TOPICS = [
+  { suffix: "mavros/state", type: "mavros_msgs/msg/State" },
+  { suffix: "dlio/odom_node/odom", type: "nav_msgs/msg/Odometry" },
+  { suffix: "uwb/pose_abs", type: "geometry_msgs/msg/PoseStamped" },
+  { suffix: "mavros/battery", type: "sensor_msgs/msg/BatteryState" },
+  // 2026-09-08新增：EKF2是否接受vision_pose融合——真机排查point_lio
+  // "lidar_buffer无限积压导致odom时间戳滞后152秒、EKF2静默拒绝融合"
+  // 那次问题时，只能靠手动订阅UAV/SLAM两个话题对比数值/算时间戳差值
+  // 才能判断，GCS上完全没有这个可见性。
+  // ⚠️ 第一版用的是mavros/estimator_status(mavros_msgs/msg/
+  // EstimatorStatus)的const_pos_mode_status_flag字段——上线后用户
+  // 实测反馈"EKF2肯定接受了，但还显示否"，查PX4源码
+  // (src/modules/ekf2/EKF/ekf_helper.cpp的get_ekf_soln_status())
+  // 确认这个bit的真实计算公式是
+  // `_control_status.flags.fake_pos || valid_fake_pos ||
+  // vehicle_at_rest`——**vehicle_at_rest(载具静止检测)也会触发这个
+  // flag**，跟"是否在融合vision"完全不是一回事：飞机只要没有明显
+  // 移动，这个bit几乎总是true，不管vision_pose有没有被正常融合。
+  // 真正精确的信号(control_mode_flags里的CS_EV_POS，"是否在融合
+  // 具体这个vision源")没有通过标准ESTIMATOR_STATUS这条MAVLink消息
+  // 转发出来(该消息flags字段映射的是solution_status_flags，见
+  // src/modules/mavlink/streams/ESTIMATOR_STATUS.hpp)，拿不到。
+  // 改用这次调试真正用来定位问题的方法：直接看vision_pose自己的
+  // 时间戳相对当前时刻的延迟——这正是lidar_buffer积压问题的直接
+  // 症状(最严重时滞后152秒)，延迟过大时EKF2会静默拒绝融合，延迟
+  // 正常(实测正常范围0.08~0.28秒)时才会被接受。不依赖PX4内部状态
+  // 位的复杂语义，直接测因果链上最前端的可观测量。
+  { suffix: "mavros/vision_pose/pose_cov", type: "geometry_msgs/msg/PoseWithCovarianceStamped" },
+];
+// vision_pose时间戳延迟超过这个阈值(秒)判定"EKF2大概率没有接受"——
+// 实测正常延迟0.08~0.28秒，异常时是152秒这种量级，1.0秒的阈值留了
+// 充分余量，不会因为正常抖动误判，但能明确抓住量级异常的延迟。
+const VISION_POSE_DELAY_FAIL_S = 1.0;
+// 2026-08-21新增：移植自scripts/status_monitor.py的诊断信息——姿态/推力、
+// θ*在线标定展示。这几个话题不区分场景，always-on订阅。
+// 2026-08-25：原来这里还订阅mid360_PointCloud2（雷达原始点云，走rosbridge
+// 单条消息就是几百KB~几MB，纯粹为了算个"点云频率"数字去拉这么大的数据
+// 不划算）、point_current_state("规划器心跳"，只在PLANNER=mighty时才有
+// 节点发布，真机env取不到时永远显示"?"）——都已从健康监控表里去掉，见
+// computeHealth()/healthFieldsHtml()，这里不再订阅这两个话题。
+// 2026-08-26新增：mavros/imu/data（飞控IMU，融合后姿态+角速度+线加速度，
+// mavros IMU插件的标准话题名，不是这个项目自定义remap的）、mavros/
+// hrlv_ez4_pub（高度计——真机实际装的是一颗测距仪(rangefinder)，不是靠
+// PX4气压计估计高度，一开始想当然用过mavros/altitude(气压高度)，被
+// 用户纠正："高度计不能用mavros/altitude，要用distance sensor对应的
+// 那个话题"。真实话题路径在真机项目根目录read_hw.md"2026-08-18关键
+// 话题帧率验证"那节记录过一次踩坑：mavros的distance_sensor插件把
+// 传感器发布到`~<传感器id对应名字>`（这台机上配的id是`hrlv_ez4`），
+// **不带**`distance_sensor/`这层前缀——最初"测距仪没数据"排查了很久，
+// 就是猜错了话题路径多套了一层distance_sensor/。这个id/话题名是这台
+// 机器/这颗传感器型号specific的配置，不是mavros写死的标准名，换传感器
+// 型号或者mavros distance_sensor插件配置的id变了，这个话题名要跟着改。
+// 消息类型sensor_msgs/msg/Range是mavros distance_sensor插件的标准
+// 输出类型（跟mavros/altitude的mavros_msgs/msg/Altitude不是同一种）。
+// 都只是为了下面"发布频率"这张表用，不参与任何控制/显示逻辑。
+// 2026-08-27新增：mavros/extended_state——真机"起飞"按钮(doHwFleetTakeoff())
+// 原来发完takeoff_land话题后固定等800ms就报"已发送"，不管PX4有没有真的
+// 解锁/起飞，跟仿真那边sim_takeoff()同样的毛病（网页上看到"发送成功"跟
+// 飞机真的会不会飞没有任何关系）。真机场景GCS后端没有SSH到Jetson的能力，
+// 读不到px4ctrl的ROS日志，只能靠mavros自己发布的标准话题当"飞控反馈"——
+// mavros/state(armed/mode)是mavros一直有的标准话题，这里再加上
+// mavros/extended_state(landed_state：地面/空中/起飞中/降落中)，两个都是
+// PX4/mavros自己汇报的真实状态，不依赖px4ctrl有没有额外发东西。
+// 2026-08-30新增：mavros/local_position/pose（PX4 EKF2融合后的位置估计，
+// 飞控自己真正拿去做控制的那个值，跟SLAM/UWB是三个独立信源，标准mavros
+// local_position插件话题名，不是自定义remap）。用户要求给位置表
+// 加"UAV"这一行（跟姿态表已有的UAV/SLAM对比模式看齐，之前位置表只有
+// SLAM/UWB两行，缺UAV这行不对称）。
+// 2026-09-04：曾经新增过线速度/角速度两张表（连带订阅过
+// mavros/local_position/velocity_local取线速度），2026-09-04用户要求
+// 隐藏这两张表不再显示——遂删掉，连带这条只为它订阅的velocity_local话题
+// 一并去掉（角速度用的mavros/imu/data姿态表还在用，继续订阅）。
+const DIAG_TOPICS = [
+  { suffix: "mavros/setpoint_raw/target_attitude", type: "mavros_msgs/msg/AttitudeTarget" },
+  { suffix: "origin_setter/yaw_estimate", type: "std_msgs/msg/Float64" },
+  { suffix: "origin_setter/yaw_sample_count", type: "std_msgs/msg/Int32" },
+  { suffix: "mavros/imu/data", type: "sensor_msgs/msg/Imu" },
+  { suffix: "mavros/hrlv_ez4_pub", type: "sensor_msgs/msg/Range" },
+  { suffix: "mavros/extended_state", type: "mavros_msgs/msg/ExtendedState" },
+  { suffix: "mavros/local_position/pose", type: "geometry_msgs/msg/PoseStamped" },
+  // 2026-09-04新增、2026-09-07删除、2026-09-07又恢复：双标签UWB各自的
+  // 原始绝对坐标（uwb_a/pose_abs、uwb_b/pose_abs）——只有真机的
+  // uwb_dual_tag_fusion节点会发布，仿真的uwb_sim是单标签模型没有对应
+  // 发布者。删除时是从sim/hw共用的telemetryFieldsHtml()里整体去掉这两行
+  // （用户当时反馈仿真卡片这两行永远显示"--"，见那次记录），但用户后来
+  // 明确要求"恢复真机控制面板的UWB_A,UWB_B的位置显示"——这两行对真机
+  // 是真实有效的数据，删除时误伤了真机这一侧，改成telemetryFieldsHtml()
+  // 新增第三个参数showUwbAB控制，只有真机两处调用点传true。
+  { suffix: "uwb_a/pose_abs", type: "geometry_msgs/msg/PoseStamped" },
+  { suffix: "uwb_b/pose_abs", type: "geometry_msgs/msg/PoseStamped" },
+];
+// 2026-09-04：曾经短暂订阅过mavros/imu/temperature_imu做"飞控温度"（SSH
+// 实测这个话题真实存在且在发布），但连续6秒抓了70多条消息数值一模一样
+// (15.0)，没有任何真实传感器该有的量化噪声，判定这个字段大概率是这颗IMU
+// 驱动/固件的写死占位值、不是真实板温，见DEBUG_JOURNAL同日记录。用户要求
+// 换成"机载计算机CPU占用率"——那项数据走control_server.py的UDP心跳
+// (cpu_usage_pct字段)，不需要订阅ROS话题，所以这里删掉了这条订阅，见
+// hwTimingHtml()。
+// 2026-08-22新增：航点队列执行器(机载rviz_goal_bridge_node.py)的状态
+// 反馈——这两个话题名不区分规划器（跟term_goal一样，PLANNER=mighty时
+// 只是没有节点在监听/发布，不是话题名不同），always-on订阅，不需要像
+// OCCUPANCY_SUFFIX/TRAJECTORY_TOPICS那样按planner分流。
+const WAYPOINT_TOPICS = [
+  { suffix: "waypoint_progress", type: "std_msgs/msg/Int32" },
+  { suffix: "waypoint_state", type: "std_msgs/msg/String" },
+];
+// 话题后缀 -> 发布频率统计用的key，用滑动窗口(30帧)算频率，见hzFor()。
+// 2026-08-25：原来还有lidar/plan两个key，随点云频率/规划器频率两列一起
+// 从健康监控表里删掉了，见DIAG_TOPICS上面的说明。2026-08-26新增uwb/imu/
+// alt三个——独立的"发布频率"表要用，见freqFieldsHtml()。
+const HZ_TRACKED_SUFFIX = {
+  "dlio/odom_node/odom": "slam",
+  "uwb/pose_abs": "uwb",
+  "mavros/imu/data": "imu",
+  "mavros/hrlv_ez4_pub": "alt",
+};
+// 跟status_monitor.py的STALE_THRESHOLDS_SEC/HEALTH_STARTUP_GRACE_SEC取值
+// 保持一致——各话题预期发布频率不同，"多久没消息算掉线"也不同。uwb沿用
+// 已有的3000ms（uwb_sim默认publish_rate_hz=10，留够余量）；imu/alt是
+// 2026-08-26新加的，没有实测过真机这两个话题的实际发布频率，先按"飞控
+// IMU一般至少几十Hz、掉到500ms没消息基本可以确定异常"给imu留500ms，
+// alt(mavros/hrlv_ez4_pub测距仪，具体发布频率没有实测确认过)先比照
+// uwb给3000ms——这两个阈值都是估的，不是照抄哪个配置文件的实测值，用户
+// 反馈"误报/迟钝"的话需要现场核实真实发布频率后再调。
+const HEALTH_THRESHOLDS_MS = { slam: 2000, link: 6000, uwb: 3000, imu: 500, alt: 3000 };
+const HEALTH_GRACE_MS = 90000;
+// 低电压预警阈值——跟px4ctrl自己的安全阈值保持一致（不是随手定的数字），
+// 见vendor/px4ctrl_ros2/px4ctrl/config/ctrl_param_fpv.yaml的low_voltage:
+// 13.2（4S电池）。用电压而不是percentage字段判定，因为percentage依赖
+// FCU侧配置了电池容量，没配的话恒为NaN，电压是BatteryState里唯一始终
+// 有效的字段。
+const BATTERY_LOW_VOLTAGE = 13.2;
+// 俯视示意图的障碍物栏格话题——按PLANNER分流，两者都是sensor_msgs/msg/
+// PointCloud2、字段布局相同，见ensureSubscribed()里的订阅逻辑。
+// 2026-08-27：ego_planner这边一度改成订阅grid_map/occupancy_inflate_
+// z_filtered，当时这个话题在源码里还搜不到，是预留给"另一处尚未开发的
+// Z轴过滤改动"用的新话题名。2026-08-31确认：这个z_filtered话题后来是
+// 作为`pointcloud_z_filter`包实现的，但那个包**只在`DEPLOY_TARGET=hw`
+// 时启动**（`flight-stack-entrypoint.sh`里`DEPLOY_TARGET=sim`分支完全
+// 不会起这个节点），而且它本身`z_filter_node.py`文件头就写明"只用于
+// 地面站/RViz显示，不改动原始话题"——仿真场景下这个话题永远没有发布者，
+// GCS这边订阅了个空话题，俯视图障碍物栏格自然一直没有数据，这正是用户
+// 报告的"仿真模式下规划地图叠加障碍物显示不出来"的直接原因。ego_planner
+// 自己发布的原始占据栅格话题一直是`grid_map/occupancy_inflate`
+// （`grid_map.cpp:185`），仿真场景应该订阅这个，不是z_filtered版本；
+// mighty的`occupancy_grid`（global_mapper_ros发布）sim/hw用的是同一个
+// 话题，不需要按来源区分。
+const OCCUPANCY_SUFFIX = {
+  ego_planner: { sim: "grid_map/occupancy_inflate", real: "grid_map/occupancy_inflate_z_filtered" },
+  mighty: { sim: "occupancy_grid", real: "occupancy_grid" },
+};
+// 俯视示意图的"当前规划轨迹"话题——查过两个规划器的源码确定该订阅哪个
+// 话题，不是瞎选：
+// - ego_planner: `optimal_list`(单个visualization_msgs/msg/Marker)，
+//   NLopt优化后的B样条控制点，跟真正发给traj_server执行的`Bspline`
+//   消息是同一份控制点；每次成功重规划发一次。`a_star_list`这个fork里
+//   从来不发布，`init_list`是优化前的初始猜测，`global_list`只在收到
+//   新目标点那一刻发一次、不跟着局部重规划更新——都不是"当前要飞的
+//   轨迹"，排除了。
+// - mighty: `traj_committed_colored`(visualization_msgs/msg/MarkerArray，
+//   注意跟ego_planner不是同一个消息类型)，同样是每次成功重规划发一次，
+//   点两两一组是线段(LINE_LIST)，第一个marker是DELETEALL清掉上一次的。
+// ⚠️选哪个话题这一步是查源码定的，但两边的frame_id最终以实测为准，不是
+// 直接信静态代码分析：设计阶段查ego_planner源码以为`header.frame_id`
+// 硬编码是"world"，实测起飞发目标点后拿到的真实消息frame_id其实是
+// "NX01/map"（飞机自己的局部系）——跟静态分析结论不一致，这次改成信
+// 实测数据。下面drawTrajectory()只认两种能确认的frame（字面量"world"
+// 不用换算、"{ns}/map"套mapTf[ns]换算），mighty那条线因为没能实测
+// (没切到PLANNER=mighty测过)、静态分析看到的frame_id("map"，未加
+// 命名空间)又跟这两种都对不上，会被这个检查挡住、不显示——是刻意的、
+// 如实的"没验证清楚就不展示"，不是漏掉了没写，等以后真的用mighty跑一遍
+// 实测确认了frame_id再放开。
+const TRAJECTORY_TOPICS = {
+  ego_planner: { suffix: "optimal_list", type: "visualization_msgs/msg/Marker" },
+  mighty: { suffix: "traj_committed_colored", type: "visualization_msgs/msg/MarkerArray" },
+};
+const HEALTH_LABEL = { ok: "正常", fail: "掉线", wait: "启动中", na: "不监控", unknown: "?" };
+const HEALTH_COLOR = { ok: "#7cd992", fail: "#ff8888", wait: "#9aa4b2", na: "#9aa4b2", unknown: "#9aa4b2" };
+// mavros_msgs/State.system_status——直接搬mavlink的MAV_STATE枚举
+// (https://mavlink.io/en/messages/common.html#MAV_STATE)，PX4故障保护
+// (failsafe)触发时会把这个字段切到CRITICAL/EMERGENCY/FLIGHT_TERMINATION，
+// 是判断"是否要立刻处理"最直接的信号，比armed/mode这些间接推断更可靠。
+const MAV_STATE_LABEL = {
+  0: "未初始化", 1: "启动中", 2: "标定中", 3: "待命",
+  4: "正常飞行", 5: "故障保护(CRITICAL)", 6: "紧急(EMERGENCY)",
+  7: "已断电", 8: "强制降落中",
+};
+const MAV_STATE_COLOR = {
+  0: HEALTH_COLOR.unknown, 1: HEALTH_COLOR.wait, 2: HEALTH_COLOR.wait, 3: HEALTH_COLOR.ok,
+  4: HEALTH_COLOR.ok, 5: HEALTH_COLOR.fail, 6: HEALTH_COLOR.fail,
+  7: HEALTH_COLOR.unknown, 8: HEALTH_COLOR.fail,
+};
+const pageLoadTime = Date.now();
+const STALE_MS = 3000;     // 超过这么久没收到新消息，字段变灰提示可能断流
+const DISCOVER_MS = 4000;  // 定期重新枚举话题，发现新上线的飞机
+
+const simCardsEl = document.getElementById("simCards");
+let lastSimCardsHtml = null; // 上一次真正写进simCardsEl的HTML字符串，见render()里的说明
+// 2026-09-07新增：仿真卡片刷新模式参照真机拆成两层——render()(250ms)只管
+// 卡片"壳"(标题/容器徽章/按钮/展开收起链接)这些很少变的结构，真正高频
+// 变化的遥测(连接摘要/位置摘要/展开区的详细数据)挪进独立子树
+// <div id="simTelemetry_${ns}">，由refreshSimTelemetryOnly()按跟真机
+// hwTelemetryLastHtml同款的200ms/5Hz节奏单独刷新，不会碰到①里的按钮
+// 节点。见simTelemetryBlockHtml()/refreshSimTelemetryOnly()的说明，动机
+// 是2026-09-07那次"按钮都点不动了"事故——根因是给卡片新增的飞行栈模式
+// 懒加载失败后陷入死循环，每次render()都整卡重建，按钮节点被换得太
+// 频繁；即使修好了那个死循环，render()本身仍然是"位置/姿态这类高频
+// 变化的数据在壳里，稍微改动就要整卡重建"的架构，跟真机2026-08-22/
+// 2026-09-04两次踩过的坑是同一类问题，这次借这次事故一并拆开，不只是
+// 头痛医头。
+const simTelemetryLastHtml = {};
+// 2026-08-31新增：renderSimFleetPanel()同款"内容没变就不碰innerHTML"缓存
+// ——这个面板一直没加过这层防抖，`refreshSimFleetStatus()`每5秒无条件
+// 重建一次`<select>`（定位来源/规划器/控制器），用户点开下拉框选了个
+// 新选项、还没来得及点"启动仿真机队"提交，5秒一到旧值就把整个select
+// 节点连带用户刚选的值一起冲掉——表现正是"选不上"（能点开，但选完不
+// 提交就会被下一轮轮询悄悄弹回默认值），是跟2026-08-22 sim卡片、
+// 2026-08-29真机集群面板同一类"定时器无条件重建吞掉交互"的坑，只是
+// 这次卡的不是按钮点击、是select的已选值。
+let lastSimFleetPanelHtml = null;
+// 2026-08-29新增：真机集群面板同款的"内容没变就不碰innerHTML"缓存，见
+// renderHwFleetDiscoverPanel()里的说明——用户要求把这个面板的刷新间隔
+// 减半提速之后，必须补上sim卡片那边2026-08-22已经踩过的同一个坑
+// （定时器无条件重建带交互控件的DOM，撞上正在进行中的点击会丢事件），
+// 不能只加速不加保护。
+let lastHwFleetPanelHtml = null;
+// 2026-09-04新增：真机卡片"②飞机状态"里的只读遥测(位置/姿态/健康/频率/
+// RC/推力标定)提速到5Hz独立刷新之后（见refreshHwFleetTelemetryOnly()），
+// 每个命名空间各自一份"上次写进对应<div>的HTML"缓存，同样是"内容没变就
+// 不碰innerHTML"这套防抖，只是这次是按ns分别存（不是renderHwFleetDiscoverPanel()
+// 那种整个面板一份）。
+const hwTelemetryLastHtml = {};
+const emptyEl = document.getElementById("empty");
+
+// ---- 仿真/真机顶层模式切换（2026-08-25新增）----
+// 命名空间字符串(NX01/NX02...)在仿真和真机两边是同一套约定，会撞车，
+// 不能用来区分"这条数据是仿真来的还是真机来的"；改用数据来源判定：
+// 仿真容器在不在本机docker里跑着，直接查fleetCtl.sim.status就知道；
+// 真机命名空间的权威来源是UDP发现表+本地令牌配置(hwFleetDiscover)，
+// 不依赖DDS。跟backend/app.py的SIM_NS_CONTAINERS(sim_takeoff()那节)是
+// 同一份映射，仅限NX01/NX02两个固定仿真机身，改了那边要跟着改这里。
+const SIM_NS_CONTAINERS = { NX01: "docker_sim-flight-stack-nx01-1", NX02: "docker_sim-flight-stack-nx02-1" };
+
+function nsSource(ns) {
+  const simContainer = SIM_NS_CONTAINERS[ns];
+  if (simContainer && fleetCtl.sim.status[simContainer] === "running") return "sim";
+  if (hwFleetDiscover.drones[ns] || hwFleetDiscover.targets[ns]) return "real";
+  return "unknown"; // DDS能看到，但既不是运行中的仿真容器、也没在真机通道注册过
+}
+
+// 2026-08-30重构：仿真/真机从"纯前端换pane"改成"真的切GCS自己连的DDS
+// 网络"，比赛场景下选手容易看错模式点错按钮/自己写的代码连错目标，
+// 互斥切换从软件层过滤升级成结构性隔离（网络配置+ROS_DOMAIN_ID两层，
+// 见backend/app.py"1. GCS自己的网络配置"一节的完整说明）。setGcsMode()
+// 保留下来只做纯UI/localStorage同步，不碰网络——初始化、以及真正切换
+// 成功后同步UI状态时复用它；requestGcsModeSwitch()才是按钮真正挂的
+// 入口，负责发起后端切换+等待生效。
+let gcsMode = localStorage.getItem("gcsMode") === "real" ? "real" : "sim";
+function setGcsMode(mode) {
+  gcsMode = mode;
+  localStorage.setItem("gcsMode", mode);
+  document.getElementById("modeBtn-sim").classList.toggle("active", mode === "sim");
+  document.getElementById("modeBtn-real").classList.toggle("active", mode === "real");
+  document.getElementById("simModePane").classList.toggle("active", mode === "sim");
+  document.getElementById("realModePane").classList.toggle("active", mode === "real");
+  if (mode === "sim") refreshResourceStats(); // 切进来时立刻查一次，不用干等下一个3秒轮询
+}
+
+function setModeSwitchStatus(text, cls) {
+  const el = document.getElementById("modeSwitchStatus");
+  el.textContent = text;
+  el.className = `actionMsg ${cls || ""}`;
+}
+
+// 每次rosbridge websocket重新建立连接（不管是不是这个函数触发的——也可能
+// 是有人手动docker restart了gcs容器）都要清空的per-namespace缓存。之前
+// 这批缓存从来没人在重连后清过，旧的ROSLIB.Topic订阅在rosbridge那端已经
+// 失效，fleet[ns]对象却还在，discover()靠ensureSubscribed()的"if(fleet[ns])
+// return"短路，永远不会重新发起订阅——这正是这次真实故障"NX01卡片有壳
+// 没数据"的根因，不是短路逻辑写错了，是没人清缓存。
+function clearFleetCaches() {
+  Object.keys(fleet).forEach((k) => delete fleet[k]);
+  Object.keys(mapTf).forEach((k) => delete mapTf[k]);
+  tfTopicsSubscribed = false;
+  Object.keys(realSlamHz).forEach((k) => delete realSlamHz[k]);
+  Object.keys(mapTrails).forEach((k) => delete mapTrails[k]);
+  Object.keys(mapRoutes).forEach((k) => delete mapRoutes[k]);
+  uwbAlign.pair = null; uwbAlign.lastSeen = 0;
+  lastSimCardsHtml = null; lastHwFleetPanelHtml = null; lastMapOccNames = null;
+  Object.keys(simTelemetryLastHtml).forEach((k) => delete simTelemetryLastHtml[k]);
+  // 注意：不重置mapOccUserPicked——用户手动选过之后即使rosbridge重连、
+  // fleet被清空重建，也不应该把选择弹回NX01，见refreshMapOccSelect()注释。
+}
+
+// 浏览器端对旧脚本(已合并进scripts/up_gcs.sh)"用ros2 topic list验证rosbridge
+// 真活了"的等价实现——不是只等一个固定时间/只看websocket是否open，是
+// 反复真的调一次/rosapi/topics（discover()用的同一个服务），直到成功或
+// 超时。这次真实故障里rosbridge进程活着、websocket能连，只是DDS层被
+// 拖垮到服务调用超时，只看连接层信号（ros.isConnected/on("connection")）
+// 会误判成功，必须用真正命中DDS层的服务调用做探测。
+function waitForRosbridgeReady(timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    function attempt() {
+      const srv = new ROSLIB.Service({ ros, name: "/rosapi/topics", serviceType: "rosapi/Topics" });
+      callServiceWithTimeout(srv, {}, () => { discover(); resolve(); }, () => {
+        if (Date.now() > deadline) {
+          reject(new Error("rosbridge在超时时间内没能恢复正常，可能仍在崩溃或DDS连不上，检查docker logs gcs-gcs-1"));
+          return;
+        }
+        setTimeout(attempt, 1500);
+      }, 3000);
+    }
+    attempt();
+  });
+}
+
+let gcsSwitching = false;
+
+// 两个模式按钮真正的入口——发起后端切换（改网络配置+ROS_DOMAIN_ID+重建
+// GCS容器）、等待rosbridge重新可用，而不是像setGcsMode()那样只切UI。
+async function requestGcsModeSwitch(mode) {
+  if (gcsSwitching) return;
+  const label = mode === "sim" ? "仿真" : "真机";
+  if (mode !== gcsMode) {
+    if (!confirm(`切换到${label}模式会重建GCS容器，断开当前所有飞机的遥测/规划地图连接几秒钟`
+      + `（起飞/降落这类正在执行的指令不受影响，只是显示会短暂中断）。确定切换吗？`)) return;
+  }
+  gcsSwitching = true;
+  document.getElementById("modeBtn-sim").disabled = true;
+  document.getElementById("modeBtn-real").disabled = true;
+  setModeSwitchStatus(`正在切换到${label}模式：写入网络配置并重建GCS容器...`, "");
+  try {
+    const r = await backendFetch(`${BACKEND_URL}/api/gcs-network/mode`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (!d.restarted) {
+      setGcsMode(mode);
+      setModeSwitchStatus(d.message, "ok");
+      return;
+    }
+    setGcsMode(mode);   // 立刻切UI，不等重连确认——网络已经真的变了，继续显示旧pane更误导人
+    setModeSwitchStatus("配置已写入、GCS容器已重建，正在等待rosbridge重新可用...", "");
+    await waitForRosbridgeReady(25000);
+    setModeSwitchStatus(`已切换到${label}模式，rosbridge已确认可用`, "ok");
+  } catch (e) {
+    setModeSwitchStatus(`切换失败: ${e.message || e}`, "err");
+  } finally {
+    gcsSwitching = false;
+    document.getElementById("modeBtn-sim").disabled = false;
+    document.getElementById("modeBtn-real").disabled = false;
+  }
+}
+
+// 规划地图上"发给哪架飞机"这类真正会执行动作(发目标点/发航线/取消队列)
+// 的下拉框/按钮，只列当前激活模式的命名空间——防止命名空间撞车时（比如
+// 真机也叫NX01）手滑把指令发给同名的另一模式那架飞机，这是撞车场景下
+// 唯一有"实际执行后果"的地方，轨迹绘制/障碍物叠加选择器纯展示，不受
+// 这个限制，见drawMap()/refreshMapOccSelect()。
+function currentModeNames() {
+  return Object.keys(fleet).filter((ns) => nsSource(ns) === gcsMode).sort();
+}
+
+// 2026-08-25：原来这里维护一个常驻显示的"已连接rosbridge(...)"提示条
+// (#conn)，用户反馈"这个提示有没有用"——平时rosbridge基本不会断，这个
+// 提示99%的时间只是静态显示"已连接"，真正有信号量的场景（rosbridge
+// 真断了）已经有更具体的信号：每张卡片自己的字段会因为收不到新消息
+// 变灰(staleClassFor)，比一条全局文字更能定位"到底是哪架飞机的数据
+// 断了"。删掉这个UI元素，只保留error时打一条console.error方便开发时
+// 排查，跟"重连"这个真正有功能意义的逻辑（setTimeout里那行）无关，
+// 不能跟着一起删。
+const ros = new ROSLIB.Ros({ url: `ws://${WS_HOST}:${WS_PORT}` });
+// 2026-08-30新增：任意一次websocket重新建立连接都清一次per-namespace
+// 缓存——不止requestGcsModeSwitch()触发的场景，因为陈旧配置导致的重连
+// 不一定都经过网页按钮（可能是有人手动docker restart，这次真实故障
+// 复现现场就是这么来的），做成通用修复覆盖面更大，见clearFleetCaches()
+// 的完整说明。首次连接时fleet本来就是空的，清一次没意义但也无害，
+// 用rosEverConnected跳过纯粹是避免无意义的空操作。
+let rosEverConnected = false;
+ros.on("connection", () => {
+  if (rosEverConnected) clearFleetCaches();
+  rosEverConnected = true;
+  discover();
+});
+ros.on("error", (e) => { console.error("rosbridge连接错误:", e); });
+ros.on("close", () => { setTimeout(() => ros.connect(`ws://${WS_HOST}:${WS_PORT}`), 2000); });
+
+// 俯视示意图用——origin_setter_node把world->{ns}/map这条变换发布在
+// /tf_static（实测确认：lock-origin时发一次latched消息，不是周期性发在
+// /tf）。2026-08-21修复：一开始用的是ROSLIB.TFClient，实测发现网页上
+// "起飞点其实已锁定、却一直显示未标定"——查这个项目实际打包的roslib.js
+// （unpkg.com/roslib@1）源码才发现TFClient根本不是直接订阅/tf或
+// /tf_static，而是走`tf2_web_republisher`这个需要额外单独部署的ROS
+// 节点（通过/republish_tfs服务请求一个中转话题），这套东西这个项目
+// 里根本没跑，TFClient的回调因此永远不会触发。改成自己直接订阅/tf和
+// /tf_static两个原始话题(tf2_msgs/msg/TFMessage)、手动按child_frame_id
+// 过滤——已经用roslibpy实测确认这样能收到world->{ns}/map这条变换，包括
+// "先lock-origin、网页后订阅"这种时间顺序（/tf_static是latched，新
+// 订阅者能收到已经发过的消息，不需要重新触发一次lock-origin）。起飞点
+// 没锁定之前mapTf[ns]保持undefined——渲染函数据此判断"未标定"，不强行
+// 拿一个不存在的变换去算，也不假装有一个默认值。
+// ⚠️实测还发现：两机分别各自的origin_setter_node都在发/tf_static，
+// 新订阅者收到"每个发布者各自保留的那一条"latched消息不是同时到达的，
+// 实测最长见过隔了小几秒——这是正常的DDS行为（不同publisher各自按自己
+// 的心跳重发），不是丢消息，网页是长驻订阅，等几秒后自然会两架都收到，
+// 不需要额外做重连/轮询之类的规避。
+const mapTf = {}; // ns -> {translation:{x,y,z}, rotation:{x,y,z,w}} | undefined(未标定)
+let tfTopicsSubscribed = false;
+function handleTfMessage(msg) {
+  (msg.transforms || []).forEach((tr) => {
+    const child = tr.child_frame_id || "";
+    if (tr.header.frame_id === "world" && child.endsWith("/map")) {
+      mapTf[child.slice(0, -4)] = tr.transform; // "NX01/map" -> ns="NX01"
+    }
+  });
+}
+function ensureTfSubscribed(ns) {
+  if (!Object.prototype.hasOwnProperty.call(mapTf, ns)) mapTf[ns] = undefined;
+  if (tfTopicsSubscribed) return;
+  tfTopicsSubscribed = true;
+  new ROSLIB.Topic({ ros, name: "/tf_static", messageType: "tf2_msgs/msg/TFMessage" }).subscribe(handleTfMessage);
+  new ROSLIB.Topic({ ros, name: "/tf", messageType: "tf2_msgs/msg/TFMessage" }).subscribe(handleTfMessage);
+}
+
+// 2026-08-29新增：LOCALIZATION_SOURCE=single_slam_only（纯SLAM单机、不依赖
+// 任何UWB硬件）部署下，entrypoint从一开始就不会启动uwb_origin_bridge这个
+// 包（见flight-stack-entrypoint.sh对应分支），origin_setter_node根本没在
+// 跑——mapTf[ns]不是"还没锁定"，是这套部署形态压根没有"起飞点锁定"这一步。
+// 只有一架飞机时，SLAM局部系本身就是唯一坐标系，没有第二架飞机需要对齐，
+// 把它直接当world系用不是凑合、是准确的。故意做成操作员手动选择的第三种
+// coordSource（而不是"探测到没有UWB就自动切换"）：自动探测没法区分"这架
+// 飞机部署形态里根本没有UWB硬件"和"双机场景下UWB暂时掉线/还没连上"，
+// 误判成后者会把两架实际没对齐的飞机当成同一坐标系画出来，比不画更危险。
+const IDENTITY_TF = { translation: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 } };
+function effectiveTf(ns) {
+  return mapView.coordSource === "slam" ? IDENTITY_TF : mapTf[ns];
+}
+
+// namespace -> { lastSeen: {suffix: ts}, fields: {suffix: {...}}, subs: {suffix: ROSLIB.Topic} }
+const fleet = {};
+
+function extractNamespace(topicName) {
+  // "/NX01/mavros/state" -> "NX01"；只认与STATUS_TOPICS后缀匹配的话题，
+  // 避免把rosapi/parameter_events这类全局话题也当成一架飞机。
+  for (const { suffix } of STATUS_TOPICS) {
+    if (topicName.endsWith("/" + suffix)) {
+      const ns = topicName.slice(0, topicName.length - suffix.length - 1);
+      if (ns.startsWith("/") && ns.slice(1).indexOf("/") === -1) return ns.slice(1);
+    }
+  }
+  return null;
+}
+
+function makeStatusHandler(ns, suffix) {
+  const hzKey = HZ_TRACKED_SUFFIX[suffix];
+  return (msg) => {
+    // 故意不在这里调用render()——dlio/odom_node/odom等话题实测能到100Hz，
+    // 每条消息都重建tablesEl/controlsEl的innerHTML会导致：1)数字每秒刷新
+    // 上百次，人眼完全看不清；2)按钮DOM节点被高频销毁重建，点击经常打不到任何元素上，
+    // 表现为"点了没反应"。只更新数据，交给下面setInterval(render,250)
+    // 统一按4Hz节奏刷新画面（2026-08-29从2Hz/500ms再提速一倍）——render()
+    // 内部有lastSimCardsHtml防抖，内容没变不会真的碰DOM，加速不会重新
+    // 踩中"重建吞掉点击"的坑，见render()和renderHwFleetDiscoverPanel()
+    // 里各自的防抖说明。
+    fleet[ns].lastSeen[suffix] = Date.now();
+    fleet[ns].fields[suffix] = msg;
+    if (hzKey) {
+      const arr = fleet[ns].hzTimes[hzKey];
+      arr.push(Date.now());
+      if (arr.length > 30) arr.shift();
+    }
+    // 2026-09-04新增："起飞后飞行时长"——landed_state从ON_GROUND(1)变成
+    // 非ON_GROUND(TAKEOFF=3/IN_AIR=2/LANDING=4)的那一刻记时间戳，回到
+    // ON_GROUND清零；UNDEFINED(0，还没收到过有效值)不改变当前状态，
+    // 避免"还不知道"被误判成"已经落地"。这几个话题两种场景(仿真/真机)
+    // 都会订阅、都会经过这里，但表格只在hwTelemetryBlockHtml()里读它，
+    // 只有真机卡片会显示，仿真这边算了也没人读、无副作用。
+    if (suffix === "mavros/extended_state") {
+      const landed = msg.landed_state;
+      if (landed === 1) fleet[ns].airborneSinceMs = null;
+      else if (landed === 2 || landed === 3 || landed === 4) {
+        if (fleet[ns].airborneSinceMs == null) fleet[ns].airborneSinceMs = Date.now();
+      }
+    }
+  };
+}
+
+// 跟vendor/px4ctrl_ros2/px4ctrl/src/input.h:55-58的三个常量原样对应——
+// 这三个数字不是GCS这边定的，是px4ctrl自己判定RC开关/摇杆状态用的阈值，
+// 换了这几个常量两边就对不上了，只能跟着px4ctrl源码一起改。
+const RC_API_MODE_THRESHOLD = 0.75;
+const RC_GEAR_SHIFT_THRESHOLD = 0.75;
+const RC_DEAD_ZONE = 0.25;
+const RC_REBOOT_THRESHOLD = 0.5;
+
+function rcApplyDeadZone(raw) {
+  if (raw > RC_DEAD_ZONE) return (raw - RC_DEAD_ZONE) / (1 - RC_DEAD_ZONE);
+  if (raw < -RC_DEAD_ZONE) return (raw + RC_DEAD_ZONE) / (1 - RC_DEAD_ZONE);
+  return 0;
+}
+
+// 照抄RC_Data_t::feed()(input.cpp:22-98)的判定逻辑，不是简化版——
+// is_command_mode只在is_hover_mode为true的那一刻才会被更新(input.cpp:
+// 70-79)，hover开关没拨到位时is_command_mode保持上一次的值不变，这是
+// px4ctrl真实的状态机行为，这里必须原样复刻，否则会跟真机实际会不会
+// 放行起飞对不上。check_centered()(input.cpp:113-116)在px4ctrl里本身
+// 就有个bug——只重复检查了ch[0]四次，从没看过ch[1]/ch[2]/ch[3]——这里
+// 照抄这个bug而不是"修正"它，因为这份反馈的目的是预测"px4ctrl实际会不
+// 会放行"，不是给出"理论上应该怎样"，两者一旦不一致，用户照着GCS提示
+// 拨好开关、摇杆却因为这个bug被漏检，反而更容易踩坑。
+function makeRcInHandler(ns) {
+  return (msg) => {
+    fleet[ns].lastSeen["mavros/rc/in"] = Date.now();
+    fleet[ns].fields["mavros/rc/in"] = msg;
+    const ch = msg.channels;
+    const rc = fleet[ns].rcState;
+    const mode = (ch[4] - 1000) / 1000;
+    const gear = (ch[5] - 1000) / 1000;
+    const reboot = (ch[7] - 1000) / 1000;
+    const isHoverMode = mode > RC_API_MODE_THRESHOLD;
+    if (isHoverMode) {
+      rc.isCommandMode = gear > RC_GEAR_SHIFT_THRESHOLD;
+    }
+    rc.isHoverMode = isHoverMode;
+    const ch0 = rcApplyDeadZone((ch[0] - 1500) / 500);
+    rc.centered = Math.abs(ch0) < 1e-5;
+    rc.rawMode = mode;
+    rc.rawGear = gear;
+    // 通道8(reboot_cmd，input.cpp里ch[7])——只用来显示当前开关状态，不
+    // 复刻toggle_reboot那套边沿触发+"仅在hover/command都关闭时才生效"
+    // 的判定（那是"要不要真的发送重启指令"的触发条件，这里只是状态
+    // 展示，不需要那么复杂，误报也无所谓，不会真的触发任何动作）。
+    rc.rawReboot = reboot;
+  };
+}
+
+function hzFor(ns, key) {
+  const arr = fleet[ns].hzTimes[key];
+  if (!arr || arr.length < 2) return 0;
+  const spanSec = (arr[arr.length - 1] - arr[0]) / 1000;
+  return spanSec > 0 ? (arr.length - 1) / spanSec : 0;
+}
+
+// DLIO的原生（不经过rosbridge）真实发布频率，走后端GET /api/sim/{ns}/
+// slam-hz——这个接口每次调用都要真的等几秒钟收集样本，不能像其它状态
+// 一样每500ms轮询，单独开一个低频定时器，只更新数据不强制render()，
+// 交给已有的周期render()自然反映出来（见makeStatusHandler同样的模式）。
+const realSlamHz = {}; // ns -> number|null|undefined(还没查过)
+function refreshRealSlamHz() {
+  Object.keys(fleet).forEach((ns) => {
+    backendFetch(`${BACKEND_URL}/api/sim/${ns}/slam-hz`)
+      .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+      .then((d) => { realSlamHz[ns] = d.hz; })
+      .catch(() => { realSlamHz[ns] = undefined; });
+  });
+}
+
+function ensureSubscribed(ns) {
+  if (fleet[ns]) { ensureOccAndTrajSubscribed(ns); return; }
+  ensureTfSubscribed(ns);
+  fleet[ns] = {
+    lastSeen: {}, fields: {}, subs: {}, hzTimes: { slam: [], uwb: [], imu: [], alt: [] },
+    env: null,  // {planner, controller}——只用来决定俯视示意图订阅哪个
+                // 障碍物栏格/轨迹话题(OCCUPANCY_SUFFIX/TRAJECTORY_TOPICS)，
+                // null=还没定下来，见ensureOccAndTrajSubscribed()。
+    // 2026-09-04新增：见makeStatusHandler()里的说明，"起飞后飞行时长"用，
+    // null=当前在地面/还不知道。
+    airborneSinceMs: null,
+    // 阶段5：起降与标定控制——直接用roslib.js对着rosbridge发话题/调service，
+    // 不经过后端容器B（起飞/降落/锁定起飞点rosbridge本身就能直接从浏览器
+    // 发起）。
+    takeoffLandPub: new ROSLIB.Topic({ ros, name: `/${ns}/takeoff_land`, messageType: "quadrotor_msgs/msg/TakeoffLand" }),
+    lockOriginSrv: new ROSLIB.Service({ ros, name: `/${ns}/set_origin_from_uwb`, serviceType: "std_srvs/srv/Trigger" }),
+    // 2026-08-22新增：航线规划——单点发目标点和多点航线统一走
+    // waypointQueuePub（1个点的队列就是单点goal），取消统一走
+    // waypointCancelPub，见doMapSendGoal()/mapSendRoute()/mapCancelQueue()。
+    waypointQueuePub: new ROSLIB.Topic({ ros, name: `/${ns}/waypoint_queue`, messageType: "nav_msgs/msg/Path" }),
+    waypointCancelPub: new ROSLIB.Topic({ ros, name: `/${ns}/waypoint_cancel`, messageType: "std_msgs/msg/Empty" }),
+    actionStates: { lock: null, takeoff: null, land: null }, actionBusy: false,
+    // 2026-08-25：规划/避障调参(改.env+SSH远程重启flight-stack-hw)的
+    // 展开状态原来挂在这个对象上——改成挂在hwFleetRow(ns)（见"真机集群
+    // 远程控制"那节）上了，因为这个功能现在只在真机卡片里出现，而纯真机
+    // （没接DDS遥测）的命名空间根本不会走ensureSubscribed()、不会有
+    // fleet[ns]这个对象，状态不能挂在一个可能不存在的对象上。
+    // 2026-08-27新增：RC开关状态——real实测确认真机px4ctrl(no_RC=false)
+    // 要求RC已连接时"自动悬停"/"指令控制"两个开关必须先拨到位才放行
+    // AUTO_TAKEOFF，见doHwFleetTakeoff()。初始值照抄RC_Data_t的构造函数
+    // 默认值（input.cpp:7-13）：is_hover_mode/is_command_mode默认true，
+    // 不是"没收到RC=false"，跟PX4CtrlFSM的初始状态保持一致。
+    rcState: { isHoverMode: true, isCommandMode: true, centered: true, rawMode: null, rawGear: null, rawReboot: null },
+    // 2026-08-31新增：仿真卡片默认折叠成紧凑摘要（连接/位置摘要/四个
+    // 按钮），点"展开详细数据"才显示完整的位置对比/姿态/速度/健康/频率/
+    // RC/目标油门这些诊断细节——笔记本屏幕两架飞机的卡片摞起来太长，
+    // 常驻只留操作时真正要看的东西，跟真机卡片hwFleetRow()的configOpen
+    // 是同一套"状态挂在fleet[ns]上、由render()的字符串diff决定要不要
+    // 重建DOM"思路，默认收起（false）。
+    expanded: false,
+    // 2026-09-07新增：展开详细数据时顺带展示这架飞机自己容器里的飞行栈
+    // 模式（融合模式/定位器/规划器/控制器），跟真机卡片
+    // hwFleetStackSummaryHtml同一个视觉设计，数据来源换成
+    // /api/fleet/sim/params/{ns}（懒加载，跟真机的
+    // ensureHwFleetStackContract()同一个"展开才查、查一次缓存"节奏，见
+    // ensureSimDroneStackParams()）。
+    stackParams: null, stackParamsLoading: false,
+    // 2026-09-07新增：恢复一个常驻的操作结果文字提示框（跟真机卡片
+    // controlPanelHtml里的outputBox同一个设计）——2026-08-22那次改版
+    // 曾经明确去掉过这个文字反馈区、改成只用按钮颜色表示（见
+    // ACTION_STATE_CLEAR_MS上面的注释），但用户反馈"点击按钮反应很慢，
+    // 有没有效果也看不出来"，颜色变化持续时间短(2.5秒)+不常驻文字，
+    // 确实容易错过。这次不是撤销按钮颜色反馈（st.actionStates还在，
+    // 继续控制按钮着色），是在它之外再加一份不自动清除、常驻可读的
+    // 文字记录，两者并存。
+    msg: null, msgCls: "",
+  };
+  for (const { suffix, type } of STATUS_TOPICS.concat(DIAG_TOPICS, WAYPOINT_TOPICS)) {
+    const topic = new ROSLIB.Topic({ ros, name: `/${ns}/${suffix}`, messageType: type });
+    topic.subscribe(makeStatusHandler(ns, suffix));
+    fleet[ns].subs[suffix] = topic;
+  }
+  // mavros/rc/in单独订阅、不走上面那个通用循环——px4ctrl的RC开关判定
+  // (is_hover_mode/is_command_mode)是有状态的边沿触发逻辑（只有"档位
+  // 切换的那一刻"才更新is_command_mode，不是每条消息都重算），makeStatus
+  // Handler()那套只存最新消息做不到，见makeRcInHandler()。
+  const rcInTopic = new ROSLIB.Topic({ ros, name: `/${ns}/mavros/rc/in`, messageType: "mavros_msgs/msg/RCIn" });
+  rcInTopic.subscribe(makeRcInHandler(ns));
+  fleet[ns].subs["mavros/rc/in"] = rcInTopic;
+  ensureOccAndTrajSubscribed(ns);
+}
+
+// 2026-08-26新增（原逻辑直接写在ensureSubscribed()里，见DEBUG_JOURNAL.md
+// 续33/续34）：决定俯视示意图该订阅哪个障碍物栏格/轨迹话题，按规划器
+// 类型分流(OCCUPANCY_SUFFIX/TRAJECTORY_TOPICS)。
+//   - 仿真命名空间：规划器由PLANNER环境变量随docker compose up动态选，
+//     本机容器随时能docker exec查，跟以前一样查一次/api/sim/{ns}/env。
+//   - 真机命名空间：GCS后端够不到真机上的进程，查不到PLANNER，改成读
+//     "真机集群"面板里手工登记的静态配置(hwFleetDiscover.targets[ns].
+//     planner)；没配置过的话默认按ego_planner处理（2026-08-26续35，
+//     跟docker-compose.hw.yml里`PLANNER=${VAR:-ego_planner}`同一个
+//     默认值——真机首飞组合本来就锁定的是ego_planner，不该在GCS这边
+//     又要求用户手动选一遍才有默认行为），跟backend/app.py的
+//     sim_env()兜底逻辑（printenv取不到时也是默认"ego_planner"）保持
+//     一致。用户在面板里显式选mighty并保存，才会覆盖这个默认值。
+// nsSource()依赖的两份数据(仿真容器状态/真机UDP发现表)都是异步轮询
+// 加载的，页面刚打开那一刻可能还没到——不像原来那样"只查一次、错了就
+// 永远错"，这个函数设计成幂等、可重复调用：判断不出数据来源就直接
+// return，不设置occSuffix，下一轮discover()（4秒一次）会自动重试。
+function ensureOccAndTrajSubscribed(ns) {
+  if (!fleet[ns] || fleet[ns].occSuffix) return;
+  const source = nsSource(ns);
+  if (source === "sim") {
+    // 2026-09-07修复：这里原来写的是`fleet[ns].env !== null`，本意是"只在
+    // 从没查过时才查"，但失败分支（下面.catch）把env设成`undefined`而不是
+    // `null`——`undefined !== null`是true，导致一旦某一次discover()轮询
+    // 恰好撞上NX02容器重启/瞬时不可达，这个命名空间就会永久卡在"查过
+    // 但没查到"的状态，再也不会重试，表现就是"规划地图上这架飞机的点云
+    // 一直显示不出来"，只有刷新整个网页（fleet对象重建）才会恢复——
+    // 这跟上面函数说明里"设计成幂等、可重复调用...下一轮discover()自动
+    // 重试"的初衷正好相反，是实现跟设计意图不一致的bug，不是故意的行为。
+    // 改成只在成功拿到`d`（truthy）时才跳过，失败(null/undefined)保持
+    // 可以在下一次discover()（4秒一次）重试。
+    if (fleet[ns].env) return;
+    backendFetch(`${BACKEND_URL}/api/sim/${ns}/env`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { fleet[ns].env = d || undefined; subscribeOccAndTraj(ns, d && d.planner, source); })
+      .catch(() => { fleet[ns].env = undefined; });
+  } else if (source === "real") {
+    const cfg = hwFleetDiscover.targets[ns];
+    const planner = (cfg && cfg.planner) || "ego_planner";
+    fleet[ns].env = { planner };
+    subscribeOccAndTraj(ns, planner, source);
+  }
+  // source === "unknown"：仿真容器状态/真机发现表还没加载完，先不订阅，等下一轮discover()重试。
+}
+
+// 2026-08-31新增source参数：占据栅格话题名不止取决于规划器类型，仿真/
+// 真机也要分开选（见OCCUPANCY_SUFFIX定义处的说明），轨迹话题
+// (TRAJECTORY_TOPICS)不受影响、sim/real用的是同一份，不用跟着传。
+function subscribeOccAndTraj(ns, planner, source) {
+  // 障碍物栏格——ego_planner/mighty各自的话题名按sim/real分开选（见
+  // OCCUPANCY_SUFFIX定义处的说明），两者返回的消息都是
+  // sensor_msgs/msg/PointCloud2、字段布局相同(pcl::toROSMsg生成，x/y/z
+  // float32分别在offset 0/4/8)，解码用同一份decodePointCloudXY()，只是
+  // 话题名不同。
+  const occSuffix = (OCCUPANCY_SUFFIX[planner] || {})[source];
+  if (occSuffix) {
+    const topic = new ROSLIB.Topic({ ros, name: `/${ns}/${occSuffix}`, messageType: "sensor_msgs/msg/PointCloud2" });
+    topic.subscribe(makeStatusHandler(ns, occSuffix));
+    fleet[ns].subs[occSuffix] = topic;
+    fleet[ns].occSuffix = occSuffix;
+  }
+  // 当前规划轨迹——两个规划器都订阅（管线打通），但mighty那条线是否
+  // 真的画出来由drawTrajectory()按frame_id把关，见TRAJECTORY_TOPICS
+  // 定义处的注释。ego_planner的Marker.points/mighty的
+  // MarkerArray.markers[].points都是geometry_msgs/Point[]，rosbridge
+  // JSON协议里是普通JSON数组，不像PointCloud2.data那样是base64，不需要
+  // decodePointCloudXY()那套解码。
+  const trajCfg = TRAJECTORY_TOPICS[planner];
+  if (trajCfg) {
+    const topic = new ROSLIB.Topic({ ros, name: `/${ns}/${trajCfg.suffix}`, messageType: trajCfg.type });
+    topic.subscribe(makeStatusHandler(ns, trajCfg.suffix));
+    fleet[ns].subs[trajCfg.suffix] = topic;
+    fleet[ns].trajSuffix = trajCfg.suffix;
+  }
+}
+
+function subsystemState(lastRecvMs, thresholdMs, extraOk) {
+  if (extraOk === undefined) extraOk = true;
+  if (!lastRecvMs) {
+    return (Date.now() - pageLoadTime) < HEALTH_GRACE_MS ? "wait" : "fail";
+  }
+  return (Date.now() - lastRecvMs <= thresholdMs && extraOk) ? "ok" : "fail";
+}
+
+function computeHealth(ns) {
+  const st = fleet[ns];
+  const state = st.fields["mavros/state"];
+  return {
+    slam: subsystemState(st.lastSeen["dlio/odom_node/odom"], HEALTH_THRESHOLDS_MS.slam),
+    link: subsystemState(st.lastSeen["mavros/state"], HEALTH_THRESHOLDS_MS.link, state ? state.connected === true : false),
+    uwb: subsystemState(st.lastSeen["uwb/pose_abs"], HEALTH_THRESHOLDS_MS.uwb),
+    imu: subsystemState(st.lastSeen["mavros/imu/data"], HEALTH_THRESHOLDS_MS.imu),
+    alt: subsystemState(st.lastSeen["mavros/hrlv_ez4_pub"], HEALTH_THRESHOLDS_MS.alt),
+  };
+}
+
+function healthText(state, key, ns) {
+  // 2026-09-07修复：原来"ok"和"fail"两种状态都会拼Hz数字——但hzFor()算的
+  // 是fleet[ns].hzTimes[key]这个最近30条消息时间戳数组的平均间隔，这个
+  // 数组只在makeStatusHandler()收到新消息时才push/shift，消息真的断流
+  // 之后数组不会再被清空/收缩，hzFor()会拿着这份"断流前最后30条"的陈旧
+  // 数据永远算出同一个频率数字。state=="fail"（对应距上次收到消息已经
+  // 超过HEALTH_THRESHOLDS_MS这个阈值，真实判定为"已经掉线"）时如果还在
+  // 显示这个数字，就是"明明已经死了，却一直显示一个看似正常的Hz值"——
+  // 这次真实事故：SLAM(fast_lio)卡死不再发布新消息，网页上"SLAM频率"
+  // 这一格却一直显示上次断流前的17Hz，用户误以为SLAM还在正常工作。
+  // 改成只在state=="ok"时才拼Hz数字，"fail"跟其它非ok状态一样显示
+  // HEALTH_LABEL（"掉线"），不再用一个冻结的旧数字冒充"当前速率"。
+  if (state === "ok" && HZ_TRACKED_SUFFIX_BY_KEY[key]) {
+    return `${hzFor(ns, key).toFixed(1)}Hz`;
+  }
+  return HEALTH_LABEL[state];
+}
+const HZ_TRACKED_SUFFIX_BY_KEY = { slam: true, uwb: true, imu: true, alt: true };
+
+
+function quatToEulerDeg(x, y, z, w) {
+  // 跟scripts/status_monitor.py的quat_to_euler_deg()是同一套ZYX（航空）
+  // 欧拉角公式，两处独立实现，保持数学上同步。
+  const sinrCosp = 2 * (w * x + y * z);
+  const cosrCosp = 1 - 2 * (x * x + y * y);
+  const roll = Math.atan2(sinrCosp, cosrCosp);
+  let sinp = 2 * (w * y - z * x);
+  sinp = Math.max(-1, Math.min(1, sinp));
+  const pitch = Math.asin(sinp);
+  const sinyCosp = 2 * (w * z + x * y);
+  const cosyCosp = 1 - 2 * (y * y + z * z);
+  const yaw = Math.atan2(sinyCosp, cosyCosp);
+  const toDeg = (r) => (r * 180) / Math.PI;
+  return [toDeg(roll), toDeg(pitch), toDeg(yaw)];
+}
+
+// ---- 俯视示意图用的坐标换算——跟scripts/dual_goal_input.py的local_to_
+// world()/world_to_local()是同一套SE(2)公式，两处独立实现，数学上必须
+// 保持同步（那个脚本文件头有同样的提醒）。tf.rotation这里只用quatYaw()
+// 这个"仅偏航角"公式，不能跟quatToEulerDeg()的yaw分量混用——origin_
+// setter_node广播的world->{ns}/map这条TF本身就是纯SE(2)旋转（没有
+// roll/pitch），2*atan2(qz,qw)对这种"纯绕Z轴"的四元数才是精确公式；
+// 飞机自己的姿态四元数(DLIO里程计)有roll/pitch，提取yaw分量必须用
+// quatToEulerDeg()那套完整公式，两者不能换着用。
+function quatYaw(qz, qw) { return 2 * Math.atan2(qz, qw); }
+
+function localToWorld(tf, lx, ly, lz) {
+  const t = tf.translation;
+  const theta = quatYaw(tf.rotation.z, tf.rotation.w);
+  const c = Math.cos(theta), s = Math.sin(theta);
+  return { x: t.x + lx * c - ly * s, y: t.y + lx * s + ly * c, z: t.z + lz };
+}
+
+function worldToLocal(tf, wx, wy, wz) {
+  const t = tf.translation;
+  const theta = quatYaw(tf.rotation.z, tf.rotation.w);
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const dx = wx - t.x, dy = wy - t.y;
+  return { x: dx * c + dy * s, y: -dx * s + dy * c, z: wz - t.z };
+}
+
+function decodePointCloudXY(msg) {
+  // 只解出x,y（俯视图用不到z）——PointCloud2.data在rosbridge JSON协议里
+  // 是base64字符串（实测roslibpy/rosbridge都是这样编码uint8[]字段，不是
+  // 数字数组），要先atob()解码成字节再用DataView按point_step读。x/y/z
+  // 分别在offset 0/4/8——ego_planner(grid_map/occupancy_inflate_z_filtered)和
+  // mighty(occupancy_grid/global_mapper_ros)两边实测/查证都是
+  // pcl::toROSMsg(pcl::PointXYZ)生成，字段顺序相同，可以共用这一份解码，
+  // 不用按PLANNER分支写两套。
+  if (!msg || !msg.data || !msg.width) return [];
+  let bytes;
+  try {
+    const bin = atob(msg.data);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch (e) {
+    return [];
+  }
+  const view = new DataView(bytes.buffer);
+  const little = !msg.is_bigendian;
+  const step = msg.point_step;
+  const n = msg.width * msg.height;
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const off = i * step;
+    if (off + 8 > bytes.length) break;
+    pts.push({ x: view.getFloat32(off, little), y: view.getFloat32(off + 4, little) });
+  }
+  return pts;
+}
+
+// 2026-08-22改版：起飞点锁定/起飞/降落这三个按钮点击后不再在下面输出
+// 一行文字结果——用户要求只用按钮自身的状态（颜色）表示，不要额外的
+// 文字反馈区。withBusy()第二个参数改成传"这次操作是哪个按钮"（'lock'/
+// 'takeoff'/'land'），执行完调用方传的done(ok, msg)时把结果记到
+// st.actionStates[action]（ok决定颜色、msg存起来但只当成button的
+// title提示——不是隐藏了失败信息，鼠标悬停还能看到具体原因，只是不再
+// 常驻占一行文字），过ACTION_STATE_CLEAR_MS毫秒自动回到中性样式，不用
+// 一直红着/绿着（"刚才这次操作的结果"是个瞬时反馈，不是"当前状态"，
+// 无人机是否真的已解锁/已到位这类持续状态本来就已经在上面几张表格里
+// 实时显示，这里不用重复维护一份可能过期的"记忆"）。
+const ACTION_STATE_CLEAR_MS = 2500;
+// 2026-08-27新增：起飞按钮的title现在可能带上后端回读的px4ctrl FSM
+// 接受/拒绝日志（多行，见backend/app.py的_recent_px4ctrl_feedback()），
+// 比其它按钮"成功了/失败了"这种一行提示需要更久才能读完/截图，用同一个
+// 2.5秒清掉不够看，起飞按钮单独给一个长得多的清除延迟。
+const TAKEOFF_ACTION_STATE_CLEAR_MS = 30000;
+
+function escAttr(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
+// escAttr只转义&和"，是给HTML属性值用的（属性值只需要防"提前闭合引号"）；
+// 这个是给要塞进标签*内容*区域的文本用的，多转义<和>——真机"启动flight"
+// 这类操作的message字段可能是原始docker compose命令输出(接口文档3.4节：
+// "截断到最后2000字符")，那种文本什么字符都可能有，塞进innerHTML前必须
+// 完整转义，不能只挡引号。
+function escHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// 2026-08-28新增：ROSLIB.Service.callService()本身不带超时机制，rosbridge/
+// DDS链路卡住时success/error回调可能永远都不触发（历史事故：锁定起飞点按钮
+// 卡住好几分钟不解锁，见DEBUG_JOURNAL.md 2026-08-28条——根因就是withBusy()
+// 的actionBusy只有等callService回调触发才会复位，回调永远不来就永远卡死）。
+// 这里包一层超时兜底：到点了还没得到任何回调，就当失败处理，让调用方
+// （withBusy()/hwFleetRow()）能正常复位，不再需要用户手动刷新页面才能
+// 解锁按钮。settled标记防止超时之后真正的回调又姗姗来迟触发第二次。
+const SERVICE_CALL_TIMEOUT_MS = 12000;
+function callServiceWithTimeout(srv, request, onOk, onErr, timeoutMs) {
+  let settled = false;
+  const ms = timeoutMs || SERVICE_CALL_TIMEOUT_MS;
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    onErr(`请求超时（${(ms / 1000).toFixed(0)}秒无响应，请检查rosbridge/ROS2连接）`);
+  }, ms);
+  srv.callService(request, (res) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    onOk(res);
+  }, (err) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    onErr(err);
+  });
+}
+
+// 2026-09-07新增：给常驻输出框拼一句"哪个按钮：什么结果"，不只是裸的
+// msg文本——四个按钮共用一个输出框，不带动作名字的话上一次操作是哪个
+// 按钮的结果会分不清。
+const ACTION_LABEL = { lock: "锁定起飞点", takeoff: "起飞", hover: "悬停", land: "降落" };
+
+function withBusy(ns, action, fn) {
+  const st = fleet[ns];
+  if (!st || st.actionBusy) return;
+  st.actionBusy = true;
+  st.actionStates[action] = { cls: "busy", msg: "" };
+  // 2026-09-07新增：常驻输出框（跟真机outputBox同一个设计，见fleet[ns]
+  // 初始化处msg/msgCls字段的说明）——故意不设自动清除定时器，跟按钮
+  // 自身颜色（还是2.5秒/30秒后回中性色，见下面那个定时器）分开处理，
+  // 让用户有充足时间看清"到底有没有效果"，不用赶在颜色褪色前瞄一眼。
+  st.msg = `${ACTION_LABEL[action] || action}：执行中...`; st.msgCls = "";
+  render();
+  fn((ok, msg) => {
+    st.actionBusy = false;
+    st.actionStates[action] = { cls: ok === false ? "err" : ok === true ? "ok" : "", msg: msg || "" };
+    st.msg = `${ACTION_LABEL[action] || action}：${msg || (ok ? "已完成" : "失败")}`;
+    st.msgCls = ok === false ? "err" : ok === true ? "ok" : "";
+    render();
+    const clearMs = action === "takeoff" ? TAKEOFF_ACTION_STATE_CLEAR_MS : ACTION_STATE_CLEAR_MS;
+    setTimeout(() => {
+      // busy状态是新一轮操作马上又开始了才会出现——那种情况不该被这个
+      // 定时器打断，只清理"上一次操作结果"这种终态。注意这里只清按钮
+      // 自身的颜色状态(actionStates)，不碰上面新增的st.msg常驻文字框——
+      // 文字框要一直留着直到下一次操作覆盖它，这正是用户要的"看得出来
+      // 有没有效果"，不能跟着颜色一起2.5秒后清空。
+      if (st.actionStates[action] && st.actionStates[action].cls !== "busy") {
+        st.actionStates[action] = { cls: "", msg: "" };
+        render();
+      }
+    }, clearMs);
+  });
+}
+
+function doLockOrigin(ns) {
+  withBusy(ns, "lock", (done) => {
+    callServiceWithTimeout(fleet[ns].lockOriginSrv, {}, (res) => {
+      done(!!res.success, res.message || (res.success ? "已锁定" : "失败"));
+    }, (err) => done(false, `调用失败: ${err}`));
+  });
+}
+
+function doTakeoff(ns) {
+  // 2026-08-21改为走后端（容器B）而不是直接对rosbridge发话题——起飞后的
+  // 自标定动作（局部系里前进1.1米再退回，给θ*估计攒样本，跟tmux版
+  // launch_control.py的do_takeoff()对齐）必须靠docker exec在flight-stack
+  // 容器里拉起脚本，浏览器做不到；顺带把"按CONTROLLER环境变量分流该发
+  // 话题还是touch文件"这条逻辑也一起搬过来了，不再假设所有部署都是
+  // REPEATABLE_CONTROLLERS——只支持仿真场景，见gcs/backend/app.py
+  // sim_takeoff()的注释。
+  if (!confirm(`确认让 ${ns} 起飞？（起飞成功后会自动开始一段局部坐标系里的标定飞行——前进1.1米再退回起飞点，约十几秒，飞机会自己动，不用管它）`)) return;
+  withBusy(ns, "takeoff", (done) => {
+    backendFetch(`${BACKEND_URL}/api/sim/${ns}/takeoff`, { method: "POST" })
+      .then(async (r) => {
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        done(true, d.message || "起飞指令已发送");
+      })
+      .catch((e) => done(false, `起飞失败: ${e.message || e}`));
+  });
+}
+
+function doLand(ns) {
+  withBusy(ns, "land", (done) => {
+    fleet[ns].takeoffLandPub.publish({ takeoff_land_cmd: 2 });
+    setTimeout(() => done(true, "降落指令已发送"), 800);
+  });
+}
+
+// 2026-08-25新增：悬停——之前只能通过"规划地图"页签的"取消航点队列"
+// 间接达到，没有一个独立、随时能点的"悬停"按钮，跟起飞/降落放在一起
+// 更符合直觉。底层就是mapCancelQueue()同一个话题(waypointCancelPub)，
+// 这里不复用那个函数是因为它的确认文案假设了"当前有在跑的航点队列"，
+// 这个按钮是通用悬停，文案不一样，发布的消息本身是同一个空Empty消息。
+function doHover(ns) {
+  withBusy(ns, "hover", (done) => {
+    fleet[ns].waypointCancelPub.publish({});
+    setTimeout(() => done(true, "悬停指令已发送"), 500);
+  });
+}
+
+// ---- GCS网络设置面板（改cyclonedds_gcs.xml + 重启gcs容器自己，走容器B）----
+
+function toggleSettings(linkEl) {
+  toggleLinkPanel(linkEl, "settingsPanel", loadGcsNetwork);
+}
+
+function loadGcsNetwork() {
+  backendFetch(`${BACKEND_URL}/api/gcs-network`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => {
+      document.getElementById("gcsIfaceInput").value = d.interface_address || "";
+      document.getElementById("gcsPeerInput").value = d.peer_addresses || "";
+    })
+    .catch((e) => {
+      document.getElementById("gcsNetworkMsg").textContent = `读取失败: ${e.message || e}`;
+      document.getElementById("gcsNetworkMsg").className = "actionMsg err";
+    });
+}
+
+function saveGcsNetwork() {
+  const iface = document.getElementById("gcsIfaceInput").value.trim();
+  const peer = document.getElementById("gcsPeerInput").value.trim();
+  if (!iface) { alert("网卡IP不能为空"); return; }
+  // 2026-08-30改：这里保存的是"真机网络参数快照"，不一定立刻生效——只有
+  // 当前确实处于真机模式时后端才会顺带实时应用+重建容器，见后端
+  // POST /api/gcs-network的applied_live字段处理。
+  if (!confirm(`确认保存真机网络参数：网卡地址 ${iface}${peer ? `，Peer ${peer}` : ""}？`
+    + `\n如果当前正处于真机模式，会立刻应用并重建GCS容器；如果当前是仿真模式，只会保存，等下次点"真机模式"按钮时才生效。`)) return;
+  const btn = document.getElementById("gcsSaveBtn");
+  const msgEl = document.getElementById("gcsNetworkMsg");
+  btn.disabled = true;
+  msgEl.textContent = "保存中...";
+  msgEl.className = "actionMsg";
+  backendFetch(`${BACKEND_URL}/api/gcs-network`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ interface_address: iface, peer_addresses: peer }),
+  })
+    .then(async (r) => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      msgEl.textContent = d.message || "已保存";
+      msgEl.className = "actionMsg ok";
+      if (d.applied_live) {
+        clearFleetCaches();
+        return waitForRosbridgeReady(25000).then(() => { msgEl.textContent += "（rosbridge已确认可用）"; });
+      }
+    })
+    .catch((e) => { msgEl.textContent = `保存失败: ${e.message || e}`; msgEl.className = "actionMsg err"; })
+    .finally(() => { btn.disabled = false; });
+}
+
+// ---- 机队启停：GCS主机/本地仿真/远程真机三个独立面板（方案文档阶段6，
+// 走容器B）----
+// 2026-08-21拆分：原来是一个"🚀机队启停"链接下面塞GCS本机/仿真机队/
+// 真机机队三块，用户要求拆成三个独立入口——三者是完全不相关的操作对象
+// （GCS自己的容器 / 本机仿真容器 / 远程Jetson），合在一个面板里点开
+// 一次要看完三块不相关的内容，拆开之后想看哪个点哪个。
+
+// 2026-08-25：原来这里还有个HW_FLEET_TARGETS/fleetCtl.hw（SSH到固定
+// NX01/NX02两台机身的"远程真机"面板），已删除——功能被"🛰️真机模式"
+// (UDP发现+HTTP直连control_server.py，见"真机集群远程控制"那节)取代，
+// 不再依赖SSH，也不限定固定两台机身。fleetCtl.sim.status现在还多一个
+// 用途：nsSource()判定"这个命名空间是不是运行中的仿真容器"要用它，
+// 不再只在"本地仿真"面板展开时才轮询，见下面的常驻setInterval。
+const fleetCtl = {
+  sim: { status: {}, params: null, busy: false, msg: "", msgCls: "", singleAgent: false },
+  gcs: { busy: false, msg: "", msgCls: "" },
+};
+
+// 2026-08-21新增：仿真启动前先在网页上选LOCALIZATION_SOURCE/PLANNER/
+// CONTROLLER——这几个值是容器*创建*时通过环境变量烤进去的，`docker
+// start`不会重新读取新值，"启动仿真机队"这个按钮改成调用后端的
+// `docker compose up -d`动态传参（见gcs/backend/app.py的start_sim_fleet
+// 和它上面的大段注释），必要时会重建容器应用新值。取值范围、下拉框选项
+// 都跟后端SIM_PARAM_CHOICES白名单保持一致，前端这份只用来渲染选项、
+// 真正的校验在后端做，不能只信前端。
+// 2026-09-07新增slam_backend字段——此前这里只有3个字段，跟"🛰️真机集群"
+// 面板"融合模式/定位器/规划器/控制器"四列设计（LOCALIZATION_SOURCE/
+// SLAM_BACKEND/PLANNER/CONTROLLER，见hwFleetStackSelectHtml()）不一致，
+// 落后了，补齐成同样的四字段。SLAM_BACKEND只在localization_source=
+// uwb_slam时才真正生效（gt/uwb_imu两个模式entrypoint.sh完全不读这个
+// 变量），这里不做联动隐藏——真机集群那个四字段面板也是平铺展示、不做
+// 互斥禁用，选了不生效的组合无害，保持两边交互一致。fast_lio是
+// 2026-09-07新增的第三个可选SLAM后端（hku-mars/FAST_LIO官方ROS2分支，
+// 见docker/Dockerfile.flight-stack"7c. FAST-LIO2"一节），目前仅sim、
+// 只做过patch可应用性/colcon build层面验证，还没有实际跑过仿真起飞。
+const SIM_PARAM_LABELS = {
+  localization_source: "定位模式",
+  slam_backend: "定位器",
+  planner: "规划器",
+  controller: "控制器",
+};
+const SIM_PARAM_CHOICES = {
+  localization_source: [["gt", "gt"], ["uwb_slam", "uwb_slam"], ["uwb_imu", "uwb_imu"]],
+  slam_backend: [["dlio", "dlio"], ["point_lio", "point_lio"], ["fast_lio", "fast_lio"]],
+  planner: [["mighty", "mighty"], ["ego_planner", "ego_planner"]],
+  controller: [["px4ctrl", "px4ctrl"], ["pt4ctrl", "pt4ctrl"], ["so3ctrl", "so3ctrl"]],
+};
+// 2026-09-07新增：单机彩排模式（README"单机仿真彩排"一节，Jetson Orin
+// NX单机真机移植前验证用）——只起sim-world+flight-stack-nx01。这个模式
+// 下"定位模式"下拉框不能沿用上面双机场景的gt/uwb_slam/uwb_imu三个值，
+// entrypoint.sh强制要求这三个single_*专用值配合NUM_AGENTS=1，跟后端
+// SIM_SINGLE_AGENT_LOCALIZATION_CHOICES白名单保持一致。
+const SIM_SINGLE_AGENT_LOCALIZATION_CHOICES = [
+  ["single_slam_only", "single_slam_only"],
+  ["single_uwb_imu", "single_uwb_imu"],
+  ["single_uwb_slam", "single_uwb_slam"],
+];
+
+function toggleGcsHostPanel(linkEl) {
+  toggleLinkPanel(linkEl, "gcsHostPanel", renderGcsHostPanel);
+}
+
+// 2026-08-31新增：把"本地仿真启停/可视化窗口/资源消耗/记录文件"合并收进
+// 一个默认折叠的面板——笔记本屏幕两架飞机的卡片已经占了不少高度，这几个
+// 不是时刻要盯的控制/工具类功能不需要常驻展开。跟toggleSettings()/
+// toggleGcsHostPanel()同一套toggleLinkPanel()写法，不用传onOpen——里面
+// 的refreshSimFleetStatus()/refreshResourceStats()等函数本来就是无条件
+// 周期轮询更新（不看这个面板是不是展开着），折叠只是CSS层面隐藏，数据
+// 该刷新还是照常刷新，展开那一刻看到的不会是过期数据。
+function toggleSimUtilPanel(linkEl) {
+  toggleLinkPanel(linkEl, "simUtilPanel", null);
+}
+
+function refreshSimFleetStatus() {
+  backendFetch(`${BACKEND_URL}/api/fleet/sim/status`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => { fleetCtl.sim.status = d; renderSimFleetPanel(); })
+    .catch((e) => { fleetCtl.sim.msg = `状态读取失败: ${e.message || e}`; fleetCtl.sim.msgCls = "err"; renderSimFleetPanel(); });
+}
+
+function refreshSimFleetParams() {
+  backendFetch(`${BACKEND_URL}/api/fleet/sim/params`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => { fleetCtl.sim.params = d; renderSimFleetPanel(); })
+    .catch((e) => { fleetCtl.sim.msg = `参数读取失败: ${e.message || e}`; fleetCtl.sim.msgCls = "err"; renderSimFleetPanel(); });
+}
+
+// 2026-09-07新增：切换单机彩排模式——只是改前端状态+重新渲染面板，
+// 不发任何请求（真正生效要等用户点"启动仿真机队"），renderSimFleetPanel()
+// 里会根据这个状态把"定位模式"下拉框的选项换成single_*那三个值。
+function toggleSimSingleAgent(el) {
+  fleetCtl.sim.singleAgent = !!el.checked;
+  renderSimFleetPanel();
+}
+
+function doFleetSimStart() {
+  if (fleetCtl.sim.busy) return;
+  const chosen = {};
+  for (const field of Object.keys(SIM_PARAM_CHOICES)) {
+    const el = document.getElementById(`simParam_${field}`);
+    if (el) chosen[field] = el.value;
+  }
+  chosen.single_agent = fleetCtl.sim.singleAgent;
+  const summary = Object.entries(chosen)
+    .map(([k, v]) => (k === "single_agent" ? null : `${SIM_PARAM_LABELS[k]}=${v}`))
+    .filter(Boolean).join("\n");
+  const scopeText = fleetCtl.sim.singleAgent
+    ? "只会启动sim-world+flight-stack-nx01（单机彩排，NX02如果在跑会被停掉）"
+    : "会用这几个新值重建sim-world+双机flight-stack三个容器";
+  if (!confirm(`确认用以下参数启动仿真机队？\n${summary}\n\n如果容器已经在跑，${scopeText}（docker compose up -d），正在进行的仿真会中断、重新初始化。`)) return;
+  fleetCtl.sim.busy = true;
+  fleetCtl.sim.msg = "启动中，换参数时会重建容器、仿真世界+PX4 SITL要重新初始化，可能要一两分钟...";
+  fleetCtl.sim.msgCls = "";
+  renderSimFleetPanel();
+  backendFetch(`${BACKEND_URL}/api/fleet/sim/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(chosen),
+  })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); fleetCtl.sim.msg = d.message || "已启动"; fleetCtl.sim.msgCls = "ok"; })
+    .catch((e) => { fleetCtl.sim.msg = `启动失败: ${e.message || e}`; fleetCtl.sim.msgCls = "err"; })
+    .finally(() => { fleetCtl.sim.busy = false; refreshSimFleetStatus(); refreshSimFleetParams(); });
+}
+
+function doFleetSimStop() {
+  if (fleetCtl.sim.busy) return;
+  if (!confirm("确认停止仿真机队？正在进行的仿真飞行会被直接终止。")) return;
+  fleetCtl.sim.busy = true; fleetCtl.sim.msg = "停止中..."; fleetCtl.sim.msgCls = ""; renderSimFleetPanel();
+  backendFetch(`${BACKEND_URL}/api/fleet/sim/stop`, { method: "POST" })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); fleetCtl.sim.msg = d.message || "已停止"; fleetCtl.sim.msgCls = "ok"; })
+    .catch((e) => { fleetCtl.sim.msg = `停止失败: ${e.message || e}`; fleetCtl.sim.msgCls = "err"; })
+    .finally(() => { fleetCtl.sim.busy = false; refreshSimFleetStatus(); });
+}
+
+
+function doGcsStop() {
+  // 关闭GCS自己（gcs-gcs-1的rosbridge+前端、gcs-backend-1这个后端）——
+  // 跟仿真/真机机队不一样，这个操作没有对应的"启动"按钮：一旦两个容器
+  // 都停了，就不会再有任何进程能响应这个网页的请求，没法在同一个网页
+  // 上再点一次开，只能回宿主机终端手动docker start或重新跑
+  // scripts/up_gcs.sh，见后端/api/gcs/stop的注释。
+  if (fleetCtl.gcs.busy) return;
+  if (!confirm("确认关闭GCS本机服务（rosbridge+前端+这个后端自己）？\n关闭后这个网页会失去连接，需要在宿主机终端手动重新拉起，网页上没有对应的\"重新打开\"按钮。")) return;
+  fleetCtl.gcs.busy = true; fleetCtl.gcs.msg = "关闭中，网页即将失去连接..."; fleetCtl.gcs.msgCls = ""; renderGcsHostPanel();
+  backendFetch(`${BACKEND_URL}/api/gcs/stop`, { method: "POST" })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); fleetCtl.gcs.msg = d.message || "已发送关闭指令"; fleetCtl.gcs.msgCls = "ok"; })
+    .catch((e) => { fleetCtl.gcs.msg = `关闭失败: ${e.message || e}`; fleetCtl.gcs.msgCls = "err"; fleetCtl.gcs.busy = false; })
+    .finally(() => { renderGcsHostPanel(); });
+    // 故意不在.finally()里把busy重置回false——发送成功后按钮应该保持
+    // disabled状态（GCS马上就要停了，没有"再点一次"的意义），只有失败
+    // 分支才重新启用按钮允许重试。
+}
+
+function renderGcsHostPanel() {
+  const panel = document.getElementById("gcsHostPanel");
+  if (!panel.classList.contains("open")) return;
+  panel.innerHTML = `
+    <div class="row"><span class="k">gcs-gcs-1</span><span class="v">前端 + rosbridge</span></div>
+    <div class="row"><span class="k">gcs-backend-1</span><span class="v">这个后端自己</span></div>
+    <div class="row"><span class="k">说明</span><span class="v">只有停止，没有启动按钮</span></div>
+    <div class="actions">
+      <button ${fleetCtl.gcs.busy ? "disabled" : ""} class="danger" onclick="doGcsStop()">关闭 GCS</button>
+    </div>
+    <div class="actionMsg ${fleetCtl.gcs.msgCls}">${fleetCtl.gcs.msg}</div>`;
+}
+
+// 2026-08-21新增：docker-compose.yml的USE_GAZEBO_GUI/USE_RVIZ默认改成
+// false了（之前写死true是调试GUI崩溃时的验证残留，见docker-compose.yml
+// 里那两行的注释），仿真默认不再自动弹出这两个窗口。这两个按钮负责
+// "万一想看"时按需现起，不用重启整个sim-world容器（那样会把PX4/UWB
+// 节点也一起重启，代价太大）——对应后端gcs/backend/app.py新增的
+// launch_gazebo_gui()/launch_rviz()。
+const guiCtl = {
+  gazebo: { busy: false, msg: "", msgCls: "" },
+  rviz: { busy: false, msg: "", msgCls: "" },
+};
+
+function doLaunchGazeboGui() {
+  if (guiCtl.gazebo.busy) return;
+  guiCtl.gazebo.busy = true; guiCtl.gazebo.msg = "启动中..."; guiCtl.gazebo.msgCls = ""; renderSimFleetPanel();
+  backendFetch(`${BACKEND_URL}/api/sim/gazebo-gui`, { method: "POST" })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); guiCtl.gazebo.msg = d.message || "已启动"; guiCtl.gazebo.msgCls = "ok"; })
+    .catch((e) => { guiCtl.gazebo.msg = `启动失败: ${e.message || e}`; guiCtl.gazebo.msgCls = "err"; })
+    .finally(() => { guiCtl.gazebo.busy = false; renderSimFleetPanel(); });
+}
+
+function doLaunchRviz() {
+  if (guiCtl.rviz.busy) return;
+  guiCtl.rviz.busy = true; guiCtl.rviz.msg = "启动中..."; guiCtl.rviz.msgCls = ""; renderSimFleetPanel();
+  backendFetch(`${BACKEND_URL}/api/gcs/rviz`, { method: "POST" })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); guiCtl.rviz.msg = d.message || "已启动"; guiCtl.rviz.msgCls = "ok"; })
+    .catch((e) => { guiCtl.rviz.msg = `启动失败: ${e.message || e}`; guiCtl.rviz.msgCls = "err"; })
+    .finally(() => { guiCtl.rviz.busy = false; renderSimFleetPanel(); });
+}
+
+function renderSimFleetPanel() {
+  // 2026-08-25：这个面板现在是"仿真模式"pane里常驻展示的内容，不再是
+  // 点链接才展开的可折叠面板，删掉原来的.open门槛检查。
+  const panel = document.getElementById("simFleetPanel");
+  const simEntries = Object.entries(fleetCtl.sim.status);
+  const simRows = simEntries.length
+    ? simEntries.map(([name, status]) => `<div class="row"><span class="k">${name}</span><span class="v">${status}</span></div>`).join("")
+    : `<div class="row"><span class="k">状态</span><span class="v">加载中...</span></div>`;
+  const p = fleetCtl.sim.params;
+  const paramNote = !p ? "参数加载中..."
+    : p.running ? "以下是当前运行中容器的实际值" : "容器未运行，以下是docker-compose.yml的默认值（不代表当前真实状态）";
+  // 2026-09-07新增：单机彩排模式下"定位模式"下拉框的选项整个换成
+  // single_*那三个值（entrypoint.sh强制要求，见SIM_SINGLE_AGENT_
+  // LOCALIZATION_CHOICES定义处的说明）——运行中容器查到的p.localization_
+  // source（双机场景值，比如uwb_slam）在这三个选项里找不到匹配项，
+  // 默认选中第一个（single_slam_only），不假装能带回一个不存在的选中值。
+  const selects = Object.entries(SIM_PARAM_CHOICES).map(([field, options]) => {
+    if (field === "localization_source" && fleetCtl.sim.singleAgent) {
+      options = SIM_SINGLE_AGENT_LOCALIZATION_CHOICES;
+    }
+    const running = p ? p[field] : null;
+    const current = (running && options.some(([v]) => v === running)) ? running : options[0][0];
+    const optHtml = options.map(([v, label]) => `<option value="${v}" ${v === current ? "selected" : ""}>${label}</option>`).join("");
+    return `<div class="field"><label>${SIM_PARAM_LABELS[field]}</label><select id="simParam_${field}">${optHtml}</select></div>`;
+  }).join("");
+  const html = `
+    ${simRows}
+    <div style="margin-top:10px;">
+      <div class="row"><span class="k">${paramNote}</span></div>
+      <div class="row">
+        <label style="font-size:13px;">
+          <input type="checkbox" ${fleetCtl.sim.singleAgent ? "checked" : ""} onchange="toggleSimSingleAgent(this)">
+          单机模式
+        </label>
+      </div>
+      ${selects}
+    </div>
+    <div class="actions">
+      <button ${fleetCtl.sim.busy ? "disabled" : ""} onclick="doFleetSimStart()">${fleetCtl.sim.singleAgent ? "用以上参数启动单机仿真(仅NX01)" : "用以上参数启动仿真机队"}</button>
+      <button ${fleetCtl.sim.busy ? "disabled" : ""} class="danger" onclick="doFleetSimStop()">停止仿真机队</button>
+    </div>
+    <div class="actionMsg ${fleetCtl.sim.msgCls}">${fleetCtl.sim.msg}</div>
+    <div style="margin-top:14px;">
+      <div class="row"><span class="k">可视化窗口</span></div>
+      <div class="actions">
+        <button ${guiCtl.gazebo.busy ? "disabled" : ""} onclick="doLaunchGazeboGui()">启动Gazebo图形界面</button>
+        <button ${guiCtl.rviz.busy ? "disabled" : ""} onclick="doLaunchRviz()">启动RViz</button>
+      </div>
+      <div class="actionMsg ${guiCtl.gazebo.msgCls}">${guiCtl.gazebo.msg}</div>
+      <div class="actionMsg ${guiCtl.rviz.msgCls}">${guiCtl.rviz.msg}</div>
+    </div>`;
+  // 内容没变就不碰innerHTML——不加这道防抖的话，refreshSimFleetStatus()
+  // 每5秒无条件重建一次会把用户刚在下拉框里选好、还没点"启动仿真机队"
+  // 提交的值连带整个select节点一起冲掉，见lastSimFleetPanelHtml声明处
+  // 的完整说明。
+  if (html !== lastSimFleetPanelHtml) {
+    panel.innerHTML = html;
+    lastSimFleetPanelHtml = html;
+  }
+}
+
+
+// ---- 真机集群远程控制（《单机接口描述文件.md》，2026-08-24新增，走
+// 容器B代理，不经过SSH）----
+// 跟上面HW_FLEET_TARGETS(NX01/NX02固定SSH)是独立的另一条通路——这里的
+// 飞机列表不写死，靠后端/api/hw-fleet/discovered转发飞机UDP广播心跳
+// 动态得到。
+//
+// ⚠️ 这个面板每3秒轮询一次后端刷新在线飞机表，但轮询触发的重建会跳过
+// 正在展开的行（renderHwFleetDiscoverPanel内部判断）——原因见render()
+// 函数(2026-08-22那次修复)的注释：无条件定时重建会在用户填令牌/改名等
+// 输入框打字过程中把还没保存的内容和焦点一起冲掉，也会撞上"点击途中
+// 节点被替换导致click事件丢失"这个坑，这里直接复用同一个"展开的行=
+// 暂停被动重建，只有用户自己触发的操作才强制重建(force=true)"的方案，
+// 不重新踩一遍那个坑。
+const hwFleetDiscover = {
+  drones: {},   // namespace -> discovered.py条目 { ip, control_port, hostname, flight_up, vision_up, age_sec, configured }
+  targets: {},  // namespace -> { ip, control_port }（后端配置）
+  rows: {},     // namespace -> 本行UI状态（展开/忙/消息/表单默认值）
+  msg: "", msgCls: "",
+};
+
+// 2026-08-25：飞机端接口breaking change（见docs/单机接口描述文件.md
+// 2026-08-25条目）——第二路相机接上后，视觉检测从"单路摄像头三选一"
+// 改成"cam0(前视)/cam1(下视)两路各自独立三选一"，POST /vision/mode
+// 新增必填字段cam；RTP(stream_mode/gcs_ip/stream_port/bitrate_kbps)
+// 整个删掉，只剩MJPEG拉流。这里的默认字段跟着换成按摄像头分的
+// cam0Mode/cam0MjpegPort/cam1Mode/cam1MjpegPort，不再有streamMode/
+// gcsIp/streamPort这几个已经不存在的概念。
+function newHwFleetRow() {
+  return {
+    // 2026-08-26：原来叫open，控制整张卡片(遥测/健康/频率/飞行控制/
+    // 启停容器按钮全部一起)展开或收起——用户反馈"收起"把这些操作性
+    // 信息也一起收没了，很不好，只想收"本地配置"表单那一块。改名
+    // configOpen，只控制下面"📝 本地配置"这个configBox的展开/收起，
+    // 其余内容（遥测/健康/频率/飞行控制/启停容器/改名）一律常驻显示，
+    // 不再受这个字段影响，见renderHwFleetRow()。默认收起——配置表单
+    // 不是天天要看的东西，默认露出来反而占地方。
+    configOpen: false, busy: false, msg: "", msgCls: "",
+    // 2026-09-04新增：见renderHwFleetDiscoverPanel()里的说明——"更新
+    // NameSpace"这个改名输入框之前完全没有防抖保护，1.5秒轮询只要遥测
+    // 数字变了(几乎每次都变)就会把整个行的HTML重建一遍，输入框节点被
+    // 换成新的、刚打的字直接消失。这个字段把输入框当前内容镜像进JS状态，
+    // 配合下面的<input value="...">回填 + 被动重建的跳过条件，做法上
+    // 跟configOpen是同一个思路（用户正在操作某个输入就跳过被动重建）。
+    renameDraft: "",
+    cam0Mode: "yolo", cam0MjpegPort: 8080,
+    cam1Mode: "yolo", cam1MjpegPort: 8081,
+    planner: "ego_planner",  // 2026-08-26续35：默认ego_planner——真机首飞组合本来
+                              // 就锁定用这个规划器（docker-compose.hw.yml的PLANNER
+                              // 默认值同款），不该让用户每次先手动选一遍才有默认
+                              // 行为，见ensureOccAndTrajSubscribed()里同一个默认值。
+    // 2026-08-29新增：飞行栈模式（LOCALIZATION_SOURCE/SLAM_BACKEND/PLANNER/
+    // CONTROLLER）读取与设置，对应飞机端control_server.py同日新增的
+    // GET /api、GET /status的stack_pending/stack_mismatch、POST /stack/mode
+    // 三个接口，见ensureHwFleetStackContract()/doHwFleetRefreshStackStatus()/
+    // doHwFleetApplyStackMode()。stackContract是GET /api契约缓存（含合法
+    // 取值表stack_choices/真机禁用表hw_forbidden），懒加载一次，不高频轮询
+    // ——这份契约几乎不会变，没必要每次渲染都请求。
+    stackContract: null, stackContractLoading: false,
+    stackPending: null, stackMismatch: null,  // GET /status查到的待生效值/差异，懒加载
+    // 2026-08-29新增：①容器状态/②飞机状态/③控制面板这三段各自能收起，
+    // 但默认展开（true）——跟④配置面板反过来：配置表单不常看，默认收起；
+    // 这三段是操作/监控时天天要看的东西，不该默认藏起来，只是允许手动
+    // 收起腾地方（比如一次盯很多架飞机时，收起暂时不关心的部分）。
+    containerOpen: true, vehicleOpen: true, controlOpen: true,
+  };
+}
+
+function hwFleetRow(ns) {
+  return hwFleetDiscover.rows[ns] || (hwFleetDiscover.rows[ns] = newHwFleetRow());
+}
+
+function refreshHwFleetDiscover(force) {
+  Promise.all([
+    backendFetch(`${BACKEND_URL}/api/hw-fleet/discovered`).then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; }),
+    backendFetch(`${BACKEND_URL}/api/hw-fleet/targets`).then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; }),
+  ]).then(([disc, targets]) => {
+    hwFleetDiscover.drones = Object.fromEntries(disc.drones.map((d) => [d.namespace, d]));
+    hwFleetDiscover.targets = targets;
+    for (const ns of new Set([...Object.keys(hwFleetDiscover.drones), ...Object.keys(targets)])) {
+      // 2026-08-25新增：第一次见到这个命名空间时，如果后端已经存过这架
+      // 飞机的检测模式/推流参数默认值(保存配置存的，见set_hw_fleet_
+      // target())，就用它们初始化这一行的表单默认值——只在"第一次创建
+      // 这一行"这一刻做一次，之后每3秒的轮询不会再覆盖，不然用户在
+      // 表单里改了还没保存的内容会被下一次轮询悄悄冲掉。
+      const isNewRow = !hwFleetDiscover.rows[ns];
+      const row = hwFleetRow(ns);
+      if (isNewRow) {
+        const cfg = targets[ns];
+        if (cfg) {
+          if (cfg.cam0_mode) row.cam0Mode = cfg.cam0_mode;
+          if (cfg.cam0_mjpeg_port) row.cam0MjpegPort = cfg.cam0_mjpeg_port;
+          if (cfg.cam1_mode) row.cam1Mode = cfg.cam1_mode;
+          if (cfg.cam1_mjpeg_port) row.cam1MjpegPort = cfg.cam1_mjpeg_port;
+          if (cfg.planner) row.planner = cfg.planner;
+        }
+      }
+    }
+    hwFleetDiscover.msg = ""; hwFleetDiscover.msgCls = "";
+    renderHwFleetDiscoverPanel(force);
+  }).catch((e) => {
+    hwFleetDiscover.msg = `刷新失败: ${e.message || e}`; hwFleetDiscover.msgCls = "err";
+    renderHwFleetDiscoverPanel(force);
+  });
+}
+
+function toggleHwFleetConfig(ns) {
+  hwFleetRow(ns).configOpen = !hwFleetRow(ns).configOpen;
+  renderHwFleetDiscoverPanel(true);
+}
+
+// 2026-08-29新增：①容器状态/②飞机状态/③控制面板三段通用的收起/展开
+// 切换——跟toggleHwFleetConfig()是同一个写法，field传containerOpen/
+// vehicleOpen/controlOpen三者之一，不用为每段各写一个函数。
+function toggleHwFleetSection(ns, field) {
+  hwFleetRow(ns)[field] = !hwFleetRow(ns)[field];
+  renderHwFleetDiscoverPanel(true);
+}
+
+// 2026-08-25：这两个函数覆盖这一整架飞机的全部本地配置：手动IP、手动
+// 端口、cam0检测模式/MJPEG端口、cam1检测模式/MJPEG端口，五项一起保存/
+// 一起删除。跟后端HW_FLEET_TARGET_FIELDS是同一份字段清单。字段从
+// "单路检测模式+推流方式/地面站IP/RTP端口"换成按摄像头分的cam0/cam1，
+// 是跟飞机端接口breaking change同步的，见newHwFleetRow()上面的注释。
+// 令牌(X-Control-Token)这次应用户要求彻底删掉了（地面站和飞机端都
+// 删了，见control_server.py同日改动），不再是这里的字段之一。
+
+const HW_FLEET_SAVE_FIELDS_DESC = "手动IP / 手动端口 / 规划器类型 / cam0检测模式 / cam0 MJPEG端口 / cam1检测模式 / cam1 MJPEG端口";
+
+function doHwFleetSaveTarget(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy) return;
+  const ip = document.getElementById(`hwFleetIpInput_${ns}`).value.trim();
+  const portStr = document.getElementById(`hwFleetPortInput_${ns}`).value.trim();
+  const cam0Mode = document.getElementById(`hwFleetCam0Mode_${ns}`).value;
+  const cam0MjpegPort = parseInt(document.getElementById(`hwFleetCam0MjpegPort_${ns}`).value, 10) || st.cam0MjpegPort;
+  const cam1Mode = document.getElementById(`hwFleetCam1Mode_${ns}`).value;
+  const cam1MjpegPort = parseInt(document.getElementById(`hwFleetCam1MjpegPort_${ns}`).value, 10) || st.cam1MjpegPort;
+  const planner = document.getElementById(`hwFleetPlanner_${ns}`).value;
+  // 2026-08-25修复"点保存后输入框自己空了"：下面马上要
+  // renderHwFleetDiscoverPanel(true)显示"保存中..."，这个force渲染会
+  // 用st.*这几个字段重新生成对应输入框的value——不在渲染前先把刚读到的
+  // 表单值同步进st.*，渲染用的还是旧值，视觉上就是"一点保存，输入框里
+  // 刚打的内容瞬间被冲空"（实际请求发出去的值是对的，只是界面显示滞后
+  // 一整个网络往返）。提前同步之后不管请求成功失败，这一行显示的内容
+  // 都跟用户刚才看到的输入保持一致。
+  // 规划器类型改了的话，撤掉fleet[ns]上已经订阅的旧障碍物栏格/轨迹话题
+  // ——ensureOccAndTrajSubscribed()只在occSuffix还没定下来时才会重新
+  // 判断，不清掉这两个字段的话，中途改规划器类型不会生效，要刷新页面
+  // 才能看到新话题的数据。
+  if (planner !== st.planner && fleet[ns]) {
+    if (fleet[ns].occSuffix && fleet[ns].subs[fleet[ns].occSuffix]) fleet[ns].subs[fleet[ns].occSuffix].unsubscribe();
+    if (fleet[ns].trajSuffix && fleet[ns].subs[fleet[ns].trajSuffix]) fleet[ns].subs[fleet[ns].trajSuffix].unsubscribe();
+    delete fleet[ns].occSuffix; delete fleet[ns].trajSuffix;
+  }
+  Object.assign(st, { cam0Mode, cam0MjpegPort, cam1Mode, cam1MjpegPort, planner });
+  st.busy = true; st.msg = "保存中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/targets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      namespace: ns, ip: ip || null, control_port: portStr ? parseInt(portStr, 10) : null,
+      cam0_mode: cam0Mode, cam0_mjpeg_port: cam0MjpegPort,
+      cam1_mode: cam1Mode, cam1_mjpeg_port: cam1MjpegPort,
+      planner: planner || null,
+    }),
+  })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); st.msg = d.message || "已保存"; st.msgCls = "ok"; })
+    .catch((e) => { st.msg = `保存失败: ${e.message || e}`; st.msgCls = "err"; })
+    .finally(() => { st.busy = false; refreshHwFleetDiscover(true); });
+}
+
+function doHwFleetDeleteTarget(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy) return;
+  if (!confirm(`确认删除 ${ns} 在本地保存的完整配置？（${HW_FLEET_SAVE_FIELDS_DESC}，这七项会一起清空，不会影响飞机本身，只是这个网页忘掉怎么连它/怎么控制它）`)) return;
+  st.busy = true; st.msg = "删除中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/targets/${encodeURIComponent(ns)}`, { method: "DELETE" })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); delete hwFleetDiscover.rows[ns]; })
+    .catch((e) => { st.msg = `删除失败: ${e.message || e}`; st.msgCls = "err"; })
+    .finally(() => { if (hwFleetDiscover.rows[ns]) hwFleetDiscover.rows[ns].busy = false; refreshHwFleetDiscover(true); });
+}
+
+function doHwFleetQueryStatus(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy) return;
+  st.busy = true; st.msg = "查询中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/status`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); st.msg = `namespace=${d.namespace} flight_up=${d.flight_up} vision_up=${d.vision_up} ip=${d.ip} hostname=${d.hostname}`; st.msgCls = "ok"; })
+    .catch((e) => { st.msg = `查询失败: ${e.message || e}`; st.msgCls = "err"; })
+    .finally(() => { st.busy = false; renderHwFleetDiscoverPanel(true); });
+}
+
+// 2026-08-25新增：飞行控制四个按钮——复用hwFleetRow(ns)的busy/msg/
+// msgCls+outputBox反馈，跟这张卡片其它按钮同一套视觉语言(不是sim卡片
+// 那套actionStates+按钮变色)；底层动作是直接对rosbridge发话题/调
+// service，不走GCS后端，跟doLockOrigin()/doLand()是同一份fleet[ns]
+// 对象上的同一批pub/service。
+//
+// 这几个函数是SSH进NX01实测确认过的，不是照抄仿真那套改改名字：
+// - 起飞/降落走同一个/{ns}/takeoff_land话题(cmd=1/2)——`ros2 topic info
+//   -v`确认真机px4ctrl节点确实订阅这个话题(真机当前CONTROLLER=px4ctrl,
+//   `docker exec ... printenv CONTROLLER`验证过)，走法跟仿真、跟
+//   scripts/launch_control.sh里px4ctrl分支完全一致，不需要
+//   control_server.py参与——control_server.py只管容器生命周期(启停/
+//   查状态)的HTTP接口，从来不参与ROS话题收发，起飞/降落这两个ROS层面
+//   的指令天然就不归它管。
+// - launch_control.sh里"连发3次，间隔0.2秒"是为了防止DDS discovery还
+//   没跑完时第一条消息丢失——那是`ros2 topic pub --once`每次现建一个
+//   临时publisher导致的，GCS这边的publisher(fleet[ns]的ROSLIB.Topic)
+//   是页面加载时就建好、长期存活的，理论上没这个问题，但真机隔着网络
+//   桥接(不是launch_control.sh那种本机docker exec)，保险起见还是照抄
+//   这个防御写法，成本很低。
+// - 起飞不会像仿真那样自动接一段θ*标定飞行——sim_takeoff()那段自标定
+//   靠docker exec在本机仿真容器里跑auto_calibration_flight.py，真机
+//   没有这条路（GCS后端已经没有SSH能力），这里如实在确认框里说明，
+//   不假装做了。真机上origin_setter节点本身还在跑
+//   (/NX01/origin_setter/yaw_estimate等话题SSH实测确认存在)，标定还是
+//   能做，只是攒样本的机动需要另外安排（比如飞手手动飞一段），不是
+//   起飞这个动作被卡住了。
+// - 悬停发的是/{ns}/waypoint_cancel话题——SSH进容器用`ros2 topic list`
+//   实测确认：真机现在部署的ego_planner_bridge(rviz_goal_bridge_node.py，
+//   查过~/ai_uav/docker_sim/{src,live_src}/两份拷贝，内容一致)是较旧
+//   版本，只有term_goal/rviz_goal_world这对老话题，根本没有waypoint_
+//   queue/waypoint_cancel的订阅——跟这台机器上sim那份代码(已经在
+//   2026-08-22加了航点队列执行器)不是同一个版本。这意味着现在点这个
+//   按钮，指令发出去了但真机上没有任何节点在听，不会有任何效果，属于
+//   飞机端ROS包版本落后，不是GCS这边能修的问题——已经在确认框里如实
+//   写明，等飞机端那个包同步更新、重新colcon build后这个按钮自动就能
+//   用（话题名/消息类型都对得上，不需要再改GCS这边代码）。
+function doHwFleetLockOrigin(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy || !fleet[ns]) return;
+  st.busy = true; st.msg = "锁定起飞点中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  callServiceWithTimeout(fleet[ns].lockOriginSrv, {}, (res) => {
+    st.busy = false; st.msg = res.message || (res.success ? "已锁定" : "失败"); st.msgCls = res.success ? "ok" : "err";
+    renderHwFleetDiscoverPanel(true);
+  }, (err) => {
+    st.busy = false; st.msg = `调用失败: ${err}`; st.msgCls = "err";
+    renderHwFleetDiscoverPanel(true);
+  });
+}
+
+// 连发几次防丢包，模拟launch_control.sh的"for i in 1 2 3; do ... sleep 0.2"。
+function publishRetried(topic, msg, times, gapMs) {
+  for (let i = 0; i < times; i++) {
+    setTimeout(() => topic.publish(msg), i * gapMs);
+  }
+}
+
+// landed_state取值跟mavros_msgs/msg/ExtendedState.msg里的常量定义对应：
+// 0=UNDEFINED 1=ON_GROUND 2=IN_AIR 3=TAKEOFF 4=LANDING。
+function landedStateText(v) {
+  return { 0: "未知", 1: "地面", 2: "空中", 3: "起飞中", 4: "降落中" }[v] ?? `?(${v})`;
+}
+
+function mavrosSnapshot(ns) {
+  const state = fleet[ns].fields["mavros/state"];
+  const ext = fleet[ns].fields["mavros/extended_state"];
+  return {
+    armed: state ? state.armed : null,
+    mode: state ? state.mode : null,
+    landed: ext ? landedStateText(ext.landed_state) : null,
+  };
+}
+
+// 2026-08-27新增——用CDP对着真实NX01实测出来的根因：RC接收机已连接
+// (mavros/rc/in有数据、rssi满格)时，px4ctrl(no_RC=false，真机部署launch
+// 文件里定的)要求"自动悬停"+"指令控制"两个开关都拨到位、摇杆居中，否则
+// 会拒绝AUTO_TAKEOFF并卡在一个阻塞等待循环里（PX4CtrlFSM.cpp:98-115），
+// 不会自己恢复。这不是GCS/代码的问题，是操作层面——但原来"起飞失败"的
+// 提示完全猜不到是这个原因，专门读mavros/rc/in把这一关的判定结果也摆
+// 出来，用户不用再靠SSH进Jetson看ROS日志才知道是开关没拨对。
+function rcGateText(ns) {
+  const rcFresh = Date.now() - (fleet[ns].lastSeen["mavros/rc/in"] || 0) < STALE_MS;
+  if (!rcFresh) {
+    return "RC开关检查：最近没收到mavros/rc/in（接收机可能未连接/未开机）——" +
+      "px4ctrl这种情况下会跳过开关检查，只要odom/静止/已落地这几个条件满足就会放行起飞";
+  }
+  const rc = fleet[ns].rcState;
+  const problems = [];
+  if (!rc.isHoverMode) problems.push(`"自动悬停"开关未拨到位（当前归一值${rc.rawMode?.toFixed(2)}，需要>0.75）`);
+  if (!rc.isCommandMode) problems.push(`"指令控制"开关未拨到位（当前归一值${rc.rawGear?.toFixed(2)}，需要>0.75，且必须先拨好上面那个开关）`);
+  if (!rc.centered) problems.push("摇杆未居中");
+  if (problems.length === 0) {
+    return "RC开关检查：已连接，悬停/指令控制开关已拨到位、摇杆居中——这一关满足条件";
+  }
+  return "RC开关检查：已连接，但" + problems.join("；") +
+    "——px4ctrl会因此拒绝起飞并一直等到开关/摇杆状态满足条件为止，需要有人拿遥控器现场拨";
+}
+
+function doHwFleetTakeoff(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy || !fleet[ns]) return;
+  if (!confirm(`确认让 ${ns} 起飞？\n⚠️真机上不会像仿真那样自动接一段θ*标定飞行（那段自动化脚本目前只能在本机仿真容器里跑），起飞后飞机会在原地悬停，标定需要另外安排。`)) return;
+  st.busy = true; st.msg = "起飞指令发送中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  const before = mavrosSnapshot(ns);
+  publishRetried(fleet[ns].takeoffLandPub, { takeoff_land_cmd: 1 }, 3, 200);
+  // 原来固定等800ms就报"已发送"，不管PX4有没有真的响应——真机场景GCS
+  // 后端没有SSH到Jetson的能力，读不到px4ctrl的ROS日志，只能靠mavros/
+  // state(armed/mode)和mavros/extended_state(landed_state)这两个PX4/
+  // mavros自己汇报的标准话题当"飞控反馈"。2.5秒是给px4ctrl的FSM周期+
+  // PX4执行arm/切offboard的服务调用留出往返时间，不是随便定的。
+  setTimeout(() => {
+    const after = mavrosSnapshot(ns);
+    const feedback = `armed: ${before.armed}→${after.armed}；mode: ${before.mode}→${after.mode}；`
+      + `着陆状态: ${before.landed ?? "?"}→${after.landed ?? "?"}`;
+    const armedOk = after.armed === true;
+    st.busy = false;
+    st.msg = `起飞指令已发送（连发3次防DDS发现延迟丢包）\n飞控反馈：${feedback}\n${rcGateText(ns)}`
+      + (armedOk ? "" : "\n⚠️armed仍为false，飞控没有解锁——除了上面RC开关这一关，也检查PX4预检查"
+        + "(GPS/电量/传感器校准)、安全开关等，这些GCS这边看不到原因");
+    st.msgCls = armedOk ? "ok" : "err";
+    renderHwFleetDiscoverPanel(true);
+  }, 2500);
+}
+
+function doHwFleetHover(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy || !fleet[ns]) return;
+  if (!confirm(`确认让 ${ns} 立即悬停？（取消当前正在执行的航点/目标点，飞机会沿当前速度方向顺延一小段距离后就近悬停，不是精确停在原地）`)) return;
+  st.busy = true; st.msg = "悬停指令发送中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  publishRetried(fleet[ns].waypointCancelPub, {}, 3, 200);
+  setTimeout(() => {
+    st.busy = false; st.msg = "悬停指令已发送（连发3次防DDS发现延迟丢包）"; st.msgCls = "ok";
+    renderHwFleetDiscoverPanel(true);
+  }, 800);
+}
+
+function doHwFleetLand(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy || !fleet[ns]) return;
+  if (!confirm(`确认让 ${ns} 降落？`)) return;
+  st.busy = true; st.msg = "降落指令发送中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  publishRetried(fleet[ns].takeoffLandPub, { takeoff_land_cmd: 2 }, 3, 200);
+  setTimeout(() => {
+    st.busy = false; st.msg = "降落指令已发送（连发3次防DDS发现延迟丢包）"; st.msgCls = "ok";
+    renderHwFleetDiscoverPanel(true);
+  }, 800);
+}
+
+function doHwFleetStackAction(ns, stack, action) {
+  const st = hwFleetRow(ns);
+  if (st.busy) return;
+  const needConfirm = stack === "flight" && (action === "down" || action === "restart");
+  if (needConfirm && !confirm(`确认对 ${ns} 的 flight-stack 执行 ${action}？会直接掐断飞控软件。`)) return;
+  st.busy = true;
+  // 2026-08-25：flight+up在真机上实测经常超过之前给的30秒（起
+  // flight-stack-hw容器包含PX4 SITL/MAVLink桥接等初始化，不是"秒开"），
+  // 后端超时已经统一放宽到130秒（见app.py hw_fleet_stack()），这里的
+  // 提示文案跟着放宽，不再只提醒vision+up一种情况，用户等待时至少知道
+  // "慢是正常的"，不会误以为卡死。
+  st.msg = (action === "up")
+    ? `启动中，${stack === "vision" ? "会顺带colcon build，" : ""}真机上可能要十几秒到一两分钟...`
+    : "执行中...";
+  st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/stack`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ stack, action, confirm: needConfirm }),
+  })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); st.msg = d.message || "已执行"; st.msgCls = "ok"; })
+    .catch((e) => { st.msg = `执行失败: ${e.message || e}`; st.msgCls = "err"; })
+    .finally(() => { st.busy = false; refreshHwFleetDiscover(true); });
+}
+
+// 2026-08-29新增：飞行栈模式（LOCALIZATION_SOURCE/SLAM_BACKEND/PLANNER/
+// CONTROLLER）读取与设置——对应飞机端control_server.py同日新增的三个接口
+// （见该文件"接口契约"第2/1/3节）。短key(localization/slam/planner/
+// controller)跟完整环境变量名的映射关系两边(GCS后端/飞机端)各自维护
+// 一份，字面量必须一致，这是接口契约的一部分，不是能随便改的内部细节。
+const STACK_FIELD_MAP = {
+  localization: "LOCALIZATION_SOURCE", slam: "SLAM_BACKEND",
+  planner: "PLANNER", controller: "CONTROLLER",
+};
+
+// 契约(合法取值表/真机禁用表)懒加载一次并缓存到hwFleetRow(ns).stackContract
+// ——这份表几乎不会变(只有飞机端固件/entrypoint校验规则升级才会变)，不用
+// 跟着遥测一起高频轮询，只在这一行"📝本地配置"展开时才会被触发去查
+// (见renderHwFleetRow()调用处)。故意不在GCS这边照抄一份取值表，见
+// app.py hw_fleet_contract()的注释：现查一次的成本远低于两份取值表
+// 漂移的风险。
+function ensureHwFleetStackContract(ns) {
+  const st = hwFleetRow(ns);
+  if (st.stackContract || st.stackContractLoading) return;
+  st.stackContractLoading = true;
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/contract`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => { st.stackContract = d; })
+    .catch(() => { st.stackContract = null; })  // 离线/查询失败——下拉框退化成"加载中/离线，先查一次状态"提示，不假装有取值表
+    .finally(() => { st.stackContractLoading = false; renderHwFleetDiscoverPanel(true); });
+}
+
+// 查一次GET /status，只取跟模式相关的三个字段（stack_pending/stack_mismatch/
+// stack）存起来供只读展示——UDP心跳(hwFleetDiscover.drones[ns].stack)已经
+// 免费带了"当前运行值"，这里只是为了拿心跳里没有的"待生效值"和"差异"，
+// 不追求高频，用户手动点"刷新待生效值"才查一次。
+function doHwFleetRefreshStackStatus(ns) {
+  const st = hwFleetRow(ns);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/status`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => { st.stackPending = d.stack_pending || null; st.stackMismatch = d.stack_mismatch || null; })
+    .catch((e) => { st.msg = `查询模式状态失败: ${e.message || e}`; st.msgCls = "err"; })
+    .finally(() => renderHwFleetDiscoverPanel(true));
+}
+
+// 读4个下拉框当前选中的值，POST给飞机端写.env——这一步只改配置文件，
+// 不碰容器，所以不需要confirm(跟"重启flight"那个真正掐断飞控的操作不
+// 一样)，但仍然用confirm()跟用户确认一遍要改成什么，避免手滑选错还没
+// 看清楚就提交。
+function doHwFleetApplyStackMode(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy) return;
+  const body = {};
+  for (const short of Object.keys(STACK_FIELD_MAP)) {
+    const el = document.getElementById(`hwFleetStackSel_${short}_${ns}`);
+    if (el) body[short] = el.value;
+  }
+  const summary = Object.entries(body).map(([k, v]) => `${STACK_FIELD_MAP[k]}=${v}`).join("\n");
+  if (!confirm(`确认把 ${ns} 的飞行栈模式设定为：\n${summary}\n\n这一步只写.env，不会碰容器、不影响正在运行的飞控——要让新模式真正生效，还需要之后另外点"重启flight"（会掐断飞控）。`)) return;
+  st.busy = true; st.msg = "写入飞行栈模式中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/stack-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => {
+      st.stackPending = d.pending || null; st.stackMismatch = d.mismatch || null;
+      st.msg = d.note || "已写入"; st.msgCls = "ok";
+    })
+    .catch((e) => { st.msg = `写入失败: ${e.message || e}`; st.msgCls = "err"; })
+    .finally(() => { st.busy = false; renderHwFleetDiscoverPanel(true); });
+}
+
+function doHwFleetRename(ns) {
+  const st = hwFleetRow(ns);
+  if (st.busy) return;
+  const newNs = document.getElementById(`hwFleetRenameInput_${ns}`).value.trim();
+  if (!newNs) { alert("新命名空间不能为空"); return; }
+  if (!confirm(`确认把 ${ns} 改名为 ${newNs}？会重启flight-stack和vision-stack两个容器（vision还会重新colcon build），耗时可能到几十秒，期间这架飞机不接受其它请求。`)) return;
+  st.busy = true; st.msg = "改名中，可能要几十秒..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ namespace: newNs, confirm: true }),
+  })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => { delete hwFleetDiscover.rows[ns]; hwFleetRow(newNs).msg = d.message || "已改名"; hwFleetRow(newNs).msgCls = "ok"; })
+    .catch((e) => { st.busy = false; st.msg = `改名失败: ${e.message || e}`; st.msgCls = "err"; renderHwFleetDiscoverPanel(true); })
+    .finally(() => { refreshHwFleetDiscover(true); });
+}
+
+function renderHwFleetDiscoverPanel(force) {
+  const panel = document.getElementById("hwFleetDiscoverPanel");
+  const realEmptyEl = document.getElementById("realEmpty");
+  // 2026-08-25调整：只在"展开了但没在busy"的行存在时才跳过被动轮询
+  // 重建——这种情况下用户可能正在往输入框里打字，冲掉会很烦。但如果
+  // 展开的行正在busy(比如刚点了"启动flight"、真机上可能要等一两分钟)，
+  // 这段时间用户不可能在打字（表单按钮都是disabled状态），跳过反而会
+  // 让心跳/在线状态在这一两分钟里整个冻结不动，看起来像卡死——之前
+  // 用户反馈过"flight启动成功了但网页一直显示离线"，一部分原因就是这里
+  // 挡住了被动刷新，busy期间放行不再挡，能实时看到心跳/flight_up变化。
+  // 2026-08-26修复真正的大坑：这个判断原来读的是`st.open`——旧设计里
+  // `open`控制的是整张卡片（遥测/健康/频率数据全部在内），意味着只要
+  // 用户展开一张卡片去看实时数据，这条保护就会命中，导致整个真机集群
+  // 面板（不只是这一张卡片，是所有卡片）的遥测数据从此停止刷新，直到
+  // 用户收起/重开强制渲染一次——用户反馈"地面站数据不刷新/数据都不动"
+  // 根因就是这个：展开卡片看数据这个动作本身把数据刷新给冻住了。改成
+  // 只读`st.configOpen`（现在只表示"本地配置"表单是不是打开的）之后，
+  // 这条保护只在用户真的在编辑IP/端口这类输入框时才生效，不会再因为
+  // "只是展开着看遥测"就把刷新整个挡死。
+  // 2026-09-04新增renameDraft：跟configOpen同样的道理，"更新NameSpace"
+  // 输入框只要打了字（renameDraft非空）就跳过被动重建，见newHwFleetRow()
+  // 里的说明——这个输入框之前完全没有防抖，是个遗留的漏网之鱼。
+  if (!force && Object.values(hwFleetDiscover.rows).some((st) => (st.configOpen || st.renameDraft) && !st.busy)) return;
+  const names = Array.from(new Set([...Object.keys(hwFleetDiscover.drones), ...Object.keys(hwFleetDiscover.targets)])).sort();
+  realEmptyEl.style.display = names.length ? "none" : "block";
+  const rowsHtml = names.map(renderHwFleetRow).join("");
+  // 2026-08-25新增：DDS能看到、但既不是运行中的仿真容器、也没在真机
+  // 通道注册过的命名空间——大概率是"真机已经在广播DDS但还没配置UDP/
+  // HTTP控制通道"这种过渡态，只读展示遥测，不提供任何操作按钮（没有
+  // 令牌/IP，操作也无从谈起）。
+  const unknownNames = Object.keys(fleet).filter((ns) => nsSource(ns) === "unknown").sort();
+  const unknownHtml = unknownNames.length ? `
+    <h3 style="margin-top:18px;">⚠️ 仅发现DDS遥测，未接入控制通道</h3>
+    ${unknownNames.map((ns) => `
+      <div class="droneCard">
+        <b class="cardTitle">${ns}</b><span class="cardSub">未知来源——不是运行中的仿真容器，也没在下面配置过真机令牌</span>
+        ${connSummaryHtml(ns)}
+        ${telemetryFieldsHtml(ns, false, true)}
+        ${healthFieldsHtml(ns)}
+        ${freqFieldsHtml(ns)}
+        ${rcStatusHtml(ns)}
+        ${thrustCalibHtml(ns)}
+        <div class="row"><span class="v" style="color:#9aa4b2;">如果这是一架真机，去上面配置它的控制令牌才能启停/切模式/改名</span></div>
+      </div>`).join("")}` : "";
+  const fullHtml = rowsHtml + unknownHtml
+    + `<div class="actionMsg ${hwFleetDiscover.msgCls}">${hwFleetDiscover.msg}</div>`;
+  // 2026-08-29新增：刷新间隔提速到1.5秒后，照抄sim卡片render()里已经
+  // 验证过的防抖写法——只有真正要写进DOM的内容变了才碰innerHTML，没变
+  // 就什么都不做。跟sim卡片同一个道理：这个面板里"锁定起飞点/起飞/
+  // 悬停/降落/启停容器"这些按钮都是真交互控件，无条件定时重建会有
+  // 概率撞上正在进行中的一次点击(mousedown~mouseup跨越了重建那一刻)，
+  // 导致click事件凭空丢失，见2026-08-22那次sim卡片同款bug的完整分析。
+  if (fullHtml !== lastHwFleetPanelHtml) {
+    panel.innerHTML = fullHtml;
+    lastHwFleetPanelHtml = fullHtml;
+  }
+}
+
+// 4个模式下拉框各自的渲染——选中值优先级：GET /status查到的待生效值
+// (st.stackPending，最新的"打算是什么状态") > UDP心跳里的当前运行值
+// (disc.stack，免费、每2秒刷新一次) > 空。contract没加载出来(离线/还
+// 没展开过配置)时整个select disabled，显示"加载中/未获取到"，不假装
+// 有一份取值表可选。真机禁用的取值(hw_forbidden)保留在列表里但disabled
+// +tooltip说明原因，而不是直接从列表隐藏——用户能看到"为什么不能选"，
+// 不是纳闷这个选项去哪了。
+function hwFleetStackSelectHtml(ns, short) {
+  const st = hwFleetRow(ns);
+  const full = STACK_FIELD_MAP[short];
+  const disc = hwFleetDiscover.drones[ns];
+  const contract = st.stackContract;
+  const running = disc && disc.stack ? disc.stack[full] : null;
+  const pending = st.stackPending ? st.stackPending[full] : null;
+  const current = pending || running || "";
+  if (!contract) {
+    return `<select id="hwFleetStackSel_${short}_${ns}" disabled><option>${st.stackContractLoading ? "加载取值表中..." : "未获取到取值表(离线?)"}</option></select>`;
+  }
+  const choices = contract.stack_choices[full] || [];
+  const forbidden = (contract.hw_forbidden && contract.hw_forbidden[full]) || {};
+  const opts = choices.map((v) => {
+    const isForbidden = Object.prototype.hasOwnProperty.call(forbidden, v);
+    const label = v + (v === running ? "（运行中）" : "") + (isForbidden ? " ⚠️真机禁用" : "");
+    const titleAttr = isForbidden ? ` title="${escAttr(forbidden[v])}"` : "";
+    return `<option value="${v}" ${v === current ? "selected" : ""} ${isForbidden ? "disabled" : ""}${titleAttr}>${label}</option>`;
+  }).join("");
+  return `<select id="hwFleetStackSel_${short}_${ns}">${opts}</select>`;
+}
+
+// 卡片顶部常驻一张表——直接读UDP心跳自带的disc.stack，不需要额外请求
+// (跟下面容器状态/连接信息同一个数据来源、同一个刷新节奏)。2026-08-29
+// 改成跟telemetryFieldsHtml()那几张表同一套.telemetryTable样式(表头加粗/
+// 居中/分隔线/固定列宽)，不再用" · "拼一长串文字——四个模式本来就是并列
+// 的四个维度，表格比文字串更容易一眼对齐扫读。列头用户指定的说法
+// "融合模式/定位器/规划器/控制器"分别对应LOCALIZATION_SOURCE(定位数据
+// 融合方案，如single_slam_only)/SLAM_BACKEND(具体跑哪个SLAM算法，如
+// dlio)/PLANNER/CONTROLLER。没收到过心跳(disc为空或disc.stack为空，
+// 比如飞机端还是2026-08-29之前的旧版control_server.py、心跳里没带这个
+// 字段)时每格如实显示"--"，不编造。
+function hwFleetStackSummaryHtml(ns) {
+  const disc = hwFleetDiscover.drones[ns];
+  const s = disc && disc.stack;
+  const cell = (v) => v ?? "--";
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr><th>融合模式</th><th>定位器</th><th>规划器</th><th>控制器</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>${cell(s && s.LOCALIZATION_SOURCE)}</td>
+          <td>${cell(s && s.SLAM_BACKEND)}</td>
+          <td>${cell(s && s.PLANNER)}</td>
+          <td>${cell(s && s.CONTROLLER)}</td>
+        </tr>
+      </tbody>
+    </table>
+    ${s ? "" : `<div class="row"><span class="v" style="color:#9aa4b2;font-size:12px;">未知（没收到心跳，或飞机端control_server.py版本较旧不带这个字段）</span></div>`}`;
+}
+
+function hwFleetStackMismatchText(ns) {
+  const st = hwFleetRow(ns);
+  if (st.stackMismatch == null) return "还没查询过待生效值——点\"刷新待生效值\"";
+  if (!st.stackMismatch.length) return "当前运行值与.env一致，无需重启";
+  return `⚠️ ${st.stackMismatch.join("/")} 已改但未生效——需要点下面"重启flight"才能应用新模式`;
+}
+
+// 2026-08-29：原来的hwFleetStatusBadges()拼一整串"flight UPvision DOWN"
+// 文字，改成表格化布局后flight/vision分别是独立的列，需要各自单独一个
+// 徽章而不是拼在一起的字符串，改成这个单值版本。
+function hwFleetUpBadge(up) {
+  if (up == null) return "未知";
+  return `<span class="badge ${up ? "up" : "down"}">${up ? "UP" : "DOWN"}</span>`;
+}
+
+// isUp为null(不知道当前是否在跑，比如没收到心跳)时不上色，交给默认按钮
+// 样式；知道的话，wantUp=true(这个按钮是"启动")在isUp=false时高亮，
+// wantUp=false(这个按钮是"停止"/"重启")在isUp=true时高亮。
+function hwFleetStackBtnClass(isUp, wantUp) {
+  if (isUp == null) return "";
+  const relevant = wantUp ? !isUp : isUp;
+  return relevant ? "stateOn" : "stateOff";
+}
+
+// 2026-08-29用户要求：每个单机面板明确分四个部分，从上到下固定顺序
+// 容器状态→飞机状态→控制面板→配置面板，都用表格形式表示（对齐前面
+// "推力/油门表/健康表统一样式"那条思路，不要一部分是表格一部分是拼
+// 文字/裸按钮）。原来这几块内容混杂交织（容器状态和飞行栈模式摘要插在
+// 最前面、遥测和飞行控制绑在一起、配置表单又拆成两个独立configBox）
+// ——这次按四段重新组织，每段一个小标题(复用.configBoxTitle这个纯文字
+// 样式，不依赖.configBox那层容器)+一张或多张.telemetryTable。
+
+// ①②③三段共用的小标题+收起/展开按钮，跟④配置面板已有的
+// configOpenBtn是同一个视觉语言，只是这三段默认展开(见newHwFleetRow()
+// 里containerOpen/vehicleOpen/controlOpen默认true的说明)。
+function hwFleetSectionTitleHtml(ns, field, title) {
+  const open = hwFleetRow(ns)[field];
+  return `<div class="configBoxTitle" style="display:flex;justify-content:space-between;align-items:center;">
+    <span>${title}</span>
+    <button style="width:auto;padding:2px 8px;margin:0;font-size:11px;" onclick="toggleHwFleetSection('${ns}','${field}')">${open ? "收起" : "展开"}</button>
+  </div>`;
+}
+
+// 2026-09-04新增：从renderHwFleetRow()里抽出来的纯只读遥测内容(飞行栈
+// 摘要/连接状态/位置/姿态/健康/频率/RC/推力标定)，两处调用——①这里
+// renderHwFleetRow()自己1.5秒节奏的完整重建（首次创建<div id="hwTelemetry_
+// ${ns}">节点，或者面板结构变化比如收起/展开③控制面板时），②下面
+// refreshHwFleetTelemetryOnly()的5Hz独立刷新（只重写这一个<div>的
+// innerHTML，不碰旁边③控制面板的按钮）。抽成共用函数避免两处各写一份
+// 容易改漏其中一处。
+function hwTelemetryBlockHtml(ns) {
+  // 2026-09-04：用户要求"连接/模式"+"解锁"这张表(connSummaryHtml)挪到
+  // "融合模式"表(hwFleetStackSummaryHtml)上面，作为②飞机状态的第一张表
+  // ——原来的顺序是融合模式在前，用户反馈这个顺序不对，应该先看"这架
+  // 飞机连没连上/解锁没解锁"这个最基本的状态，融合模式这类配置性信息
+  // 放后面。
+  return `
+    ${connSummaryHtml(ns)}
+    ${hwFleetStackSummaryHtml(ns)}
+    ${telemetryFieldsHtml(ns, false, true)}
+    ${healthFieldsHtml(ns)}
+    ${freqFieldsHtml(ns)}
+    ${hwTimingHtml(ns)}
+    ${rcStatusHtml(ns)}
+    ${thrustCalibHtml(ns)}`;
+}
+
+// 2026-09-04新增：5Hz定时器专用——只找已经存在的<div id="hwTelemetry_
+// ${ns}">节点重写内容，找不到就跳过（比如卡片"②飞机状态"正收起、或者
+// 这架飞机还没接遥测，本来就没建过这个节点），不负责创建新节点/不碰
+// ①③④其它几段。每个ns各自跟hwTelemetryLastHtml[ns]比较，没变化就不碰
+// innerHTML，跟render()/renderHwFleetDiscoverPanel()同一套防抖写法。
+function refreshHwFleetTelemetryOnly() {
+  for (const el of document.querySelectorAll('[id^="hwTelemetry_"]')) {
+    const ns = el.id.slice("hwTelemetry_".length);
+    const html = hwTelemetryBlockHtml(ns);
+    if (html !== hwTelemetryLastHtml[ns]) {
+      el.innerHTML = html;
+      hwTelemetryLastHtml[ns] = html;
+    }
+  }
+}
+
+function renderHwFleetRow(ns) {
+  const disc = hwFleetDiscover.drones[ns];
+  const cfg = hwFleetDiscover.targets[ns];
+  const st = hwFleetRow(ns);
+  // 契约只在"配置面板"展开时才需要（4个模式下拉框在那里面），懒加载、
+  // 有缓存/正在加载时直接跳过，不会每次渲染都发请求。
+  if (st.configOpen) ensureHwFleetStackContract(ns);
+  const online = !!disc;
+  const hasManualAddr = !!(cfg && cfg.ip && cfg.control_port);
+  const reachable = online || hasManualAddr;
+  const disabledBase = st.busy || !reachable;
+  // null=不知道(没收到心跳)，交给hwFleetStackBtnClass()决定要不要上色
+  const flightUp = online ? disc.flight_up : null;
+  const visionUp = online ? disc.vision_up : null;
+  // 只有这个命名空间被nsSource()判定为"真机"(不是恰好撞名的运行中仿真
+  // 容器)、且这台机器上恰好也接了DDS(fleet[ns]存在，即GCS网络设置配好
+  // 了这架真机的桥接)时才显示遥测——两个条件缺一个都不显示，宁可少显示
+  // 也不要在命名撞车时把仿真数据错标成真机数据，见nsSource()的注释。
+  const hasTelemetry = nsSource(ns) === "real" && !!fleet[ns];
+  const configOpenBtn = st.configOpen
+    ? `<button style="width:auto;padding:4px 10px;margin:0;" onclick="toggleHwFleetConfig('${ns}')">收起配置面板</button>`
+    : `<button style="width:auto;padding:4px 10px;margin:0;" onclick="toggleHwFleetConfig('${ns}')">⚙️ 配置面板</button>`;
+
+  // ---- 1. 容器状态 ----
+  // 2026-08-29用户要求拆成两张3列表（原来是一张5列表）——DDS遥测状态
+  // (原来挂在卡片标题旁边的cardSub文字"已接DDS遥测")也一并收进表格里，
+  // 6个字段正好3+3分成两张对称的表，不是硬凑。
+  const containerStatusHtml = `
+    ${hwFleetSectionTitleHtml(ns, "containerOpen", "① 容器状态")}
+    ${st.containerOpen ? `
+    <table class="telemetryTable">
+      <thead><tr><th>FlightStack</th><th>VisionStack</th><th>DDS遥测</th></tr></thead>
+      <tbody><tr>
+        <td>${hwFleetUpBadge(flightUp)}</td>
+        <td>${hwFleetUpBadge(visionUp)}</td>
+        <td>${hasTelemetry ? `<span class="badge up">已接入</span>` : `<span class="badge down">未接入</span>`}</td>
+      </tr></tbody>
+    </table>
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr><th>IP:端口</th><th>主机名</th><th>心跳</th></tr></thead>
+      <tbody><tr>
+        <td>${online ? `${disc.ip}:${disc.control_port}` : (hasManualAddr ? `${cfg.ip}:${cfg.control_port}(手动)` : "--")}</td>
+        <td>${online ? disc.hostname : "--"}</td>
+        <td>${online ? `${disc.age_sec}s前` : (hasManualAddr ? "未收到，用手动地址" : "未发现")}</td>
+      </tr></tbody>
+    </table>
+    <div class="actions" style="margin-top:4px;">
+      <button ${disabledBase ? "disabled" : ""} style="width:auto;padding:4px 10px;margin:0;" onclick="doHwFleetQueryStatus('${ns}')">查状态</button>
+    </div>` : ""}`;
+
+  // ---- 2. 飞机状态 ----
+  // 2026-08-25：锁定起飞点/起飞/悬停/降落这几个飞行控制动作——跟仿真
+  // 卡片是同一套rosbridge直连机制(fleet[ns].lockOriginSrv/takeoffLandPub/
+  // waypointCancelPub)，不经过GCS后端，SSH进NX01实测确认过：真机当前
+  // CONTROLLER=px4ctrl，/{ns}/takeoff_land确实被px4ctrl订阅，起飞(cmd=1)/
+  // 降落(cmd=2)走这条路完全可行，不需要control_server.py参与（它只管
+  // 容器生命周期HTTP接口，从不参与ROS话题收发）——这几个按钮挪到下面
+  // "③控制面板"，跟遥测数据分开，这里只放"状态"。
+  // 2026-09-04：hasTelemetry为真时这一段(连接/位置/姿态/健康/频率/RC/
+  // 推力标定)全部是纯只读表格、不含任何按钮/输入框，包一层带固定id的
+  // <div>，配合下面refreshHwFleetTelemetryOnly()按5Hz单独刷新——用户
+  // 反馈把这块提到5Hz后"控制面板按钮反应很慢/没反应"，根因是之前直接
+  // 5Hz整panel(renderHwFleetDiscoverPanel)重建，会把③控制面板那一整排
+  // 飞行/启停/改名按钮也跟着每200ms摧毁重建一次，点击的mousedown~mouseup
+  // 窗口有很大概率正好撞上重建，事件跟着丢。改成只重建这一个子树之后，
+  // ③控制面板的按钮节点不会再被这个5Hz定时器碰到，只由renderHwFleetRow()
+  // 自己那套1.5秒节奏重建，跟提速之前完全一样，不再有丢点击的风险。
+  const vehicleStatusHtml = `
+    ${hwFleetSectionTitleHtml(ns, "vehicleOpen", "② 飞机状态")}
+    ${st.vehicleOpen ? `
+    ${hasTelemetry ? `
+    <div id="hwTelemetry_${ns}">${hwTelemetryBlockHtml(ns)}</div>` : `
+    ${hwFleetStackSummaryHtml(ns)}
+    <div class="row" style="margin-top:4px;"><span class="v" style="color:#6b7684;">这架飞机还没接DDS遥测——去"GCS网络设置"配好网络桥接就能在这里多看到位置/姿态/健康状态，见realModePane说明</span></div>`}` : ""}`;
+
+  // ---- 3. 控制面板 ----
+  // 2026-08-29用户曾要求"取消控制面板"、把按钮分派进①②两段，随后又
+  // 明确要求"回退刚才那次改动"——恢复成独立的控制面板。三排按钮：
+  // 飞行控制（锁定/起飞/悬停/降落，只有接了遥测才显示）、flight容器控制、
+  // vision容器控制，都挂在"③控制面板"这个小标题下面。
+  const flightControlHtml = hasTelemetry ? `
+    <div class="actions" style="margin-top:6px;">
+      <button ${st.busy ? "disabled" : ""} onclick="doHwFleetLockOrigin('${ns}')">锁定起飞点</button>
+      <button ${st.busy ? "disabled" : ""} onclick="doHwFleetTakeoff('${ns}')">起飞</button>
+      <button ${st.busy ? "disabled" : ""} onclick="doHwFleetHover('${ns}')">悬停</button>
+      <button ${st.busy ? "disabled" : ""} class="danger" onclick="doHwFleetLand('${ns}')">降落</button>
+    </div>` : "";
+  const controlPanelHtml = `
+    ${hwFleetSectionTitleHtml(ns, "controlOpen", "③ 控制面板")}
+    ${st.controlOpen ? `
+    ${flightControlHtml}
+    <div class="actions" style="margin-top:6px;">
+      <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(flightUp, true)}" onclick="doHwFleetStackAction('${ns}','flight','up')">启动&nbsp;&nbsp;Flight</button>
+      <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(flightUp, false)}" onclick="doHwFleetStackAction('${ns}','flight','down')">停止&nbsp;&nbsp;Flight</button>
+      <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(flightUp, false)}" onclick="doHwFleetStackAction('${ns}','flight','restart')">重启&nbsp;&nbsp;Flight</button>
+    </div>
+    <div class="actions">
+      <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(visionUp, true)}" onclick="doHwFleetStackAction('${ns}','vision','up')">启动&nbsp;&nbsp;Vision</button>
+      <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(visionUp, false)}" onclick="doHwFleetStackAction('${ns}','vision','down')">停止&nbsp;&nbsp;Vision</button>
+      <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(visionUp, false)}" onclick="doHwFleetStackAction('${ns}','vision','restart')">重启&nbsp;&nbsp;Vision</button>
+    </div>
+    <div class="actions" style="margin-top:8px;">
+      <button ${disabledBase ? "disabled" : ""} class="danger" onclick="doHwFleetRename('${ns}')">更新&nbsp;&nbsp;NameSpace</button>
+      <div></div>
+      <input id="hwFleetRenameInput_${ns}" class="renameSlotInput" placeholder="新命名空间，如NX03"
+        value="${escAttr(st.renameDraft)}" oninput="hwFleetRow('${ns}').renameDraft = this.value">
+    </div>
+    <div class="outputBox ${st.msgCls}">${st.msg ? escHtml(st.msg) : "（还没有操作记录——点上面任意按钮后，结果或原始命令输出会显示在这里）"}</div>` : ""}`;
+
+  // ---- 4. 配置面板（原"本地配置"改名）----
+  // 2026-08-29用户反馈"配置面板搞太拥挤了，适当拆分，也无需表格形式"——
+  // 上一版把7个字段挤进一张表的一行，横向挤得很紧；改回原来的.field
+  // (label在左、控件在右、纵向堆叠)布局，同时按用途拆成三个小盒子
+  // （连接与规划器/cam0/cam1），而不是一个大盒子塞七样东西。"保存配置/
+  // 删除本地配置"这两个按钮实际提交的是这三组字段的整体(doHwFleetSaveTarget
+  // 一次性读全部5个输入框)，所以放在三个小盒子外面统一一份，不是每个
+  // 小盒子各自一份保存按钮（那样会让人误以为可以分别保存）。
+  const configPanelHtml = st.configOpen ? `
+    <div class="configBox">
+      <div class="configBoxTitle">④ 配置面板 · 连接与规划器（本地）</div>
+      <div class="field"><label>手动IP</label>
+        <input id="hwFleetIpInput_${ns}" value="${escAttr((cfg && cfg.ip) || "")}" placeholder="留空=只用UDP发现结果"></div>
+      <div class="field"><label>手动端口</label>
+        <input id="hwFleetPortInput_${ns}" value="${cfg && cfg.control_port ? cfg.control_port : ""}" placeholder="默认8890"></div>
+      <div class="field"><label>规划器类型(本地)</label>
+        <select id="hwFleetPlanner_${ns}">
+          <option value="ego_planner" ${st.planner !== "mighty" ? "selected" : ""}>ego_planner（默认）</option>
+          <option value="mighty" ${st.planner === "mighty" ? "selected" : ""}>mighty</option>
+        </select></div>
+      <div class="row" style="margin-top:4px;"><span class="v" style="color:#6b7684;font-size:12px;">"规划器类型(本地)"只是GCS本地用来决定订阅哪个障碍物/轨迹话题的设置，跟下面"飞行栈模式"里下发给飞机的PLANNER是两回事，两边独立，不会互相覆盖。</span></div>
+    </div>
+    <div class="configBox">
+      <div class="configBoxTitle">④ 配置面板 · cam0(前视)检测模式</div>
+      <div class="field"><label>检测模式</label>
+        <select id="hwFleetCam0Mode_${ns}">
+          <option value="yolo" ${st.cam0Mode === "yolo" ? "selected" : ""}>yolo</option>
+          <option value="qr" ${st.cam0Mode === "qr" ? "selected" : ""}>qr</option>
+          <option value="apriltag" ${st.cam0Mode === "apriltag" ? "selected" : ""}>apriltag</option>
+          <option value="stop" ${st.cam0Mode === "stop" ? "selected" : ""}>stop</option>
+        </select></div>
+      <div class="field"><label>MJPEG端口</label><input id="hwFleetCam0MjpegPort_${ns}" value="${st.cam0MjpegPort}"></div>
+    </div>
+    <div class="configBox">
+      <div class="configBoxTitle">④ 配置面板 · cam1(下视)检测模式</div>
+      <div class="field"><label>检测模式</label>
+        <select id="hwFleetCam1Mode_${ns}">
+          <option value="yolo" ${st.cam1Mode === "yolo" ? "selected" : ""}>yolo</option>
+          <option value="qr" ${st.cam1Mode === "qr" ? "selected" : ""}>qr</option>
+          <option value="apriltag" ${st.cam1Mode === "apriltag" ? "selected" : ""}>apriltag</option>
+          <option value="stop" ${st.cam1Mode === "stop" ? "selected" : ""}>stop</option>
+        </select></div>
+      <div class="field"><label>MJPEG端口</label><input id="hwFleetCam1MjpegPort_${ns}" value="${st.cam1MjpegPort}"></div>
+    </div>
+    <div class="actions" style="margin-top:4px;">
+      <button ${st.busy ? "disabled" : ""} onclick="doHwFleetSaveTarget('${ns}')">保存配置（连接+规划器+cam0+cam1一起提交）</button>
+      ${cfg ? `<button ${st.busy ? "disabled" : ""} class="danger" onclick="doHwFleetDeleteTarget('${ns}')">删除本地配置</button>` : ""}
+    </div>
+    <div class="configBox">
+      <div class="configBoxTitle">④ 配置面板 · 飞行栈模式（读取自飞机，写入只改.env、不碰容器）</div>
+      <div class="field"><label>融合模式</label>${hwFleetStackSelectHtml(ns, "localization")}</div>
+      <div class="field"><label>定位器</label>${hwFleetStackSelectHtml(ns, "slam")}</div>
+      <div class="field"><label>规划器(下发真机)</label>${hwFleetStackSelectHtml(ns, "planner")}</div>
+      <div class="field"><label>控制器</label>${hwFleetStackSelectHtml(ns, "controller")}</div>
+      <div class="row" style="margin-top:4px;"><span class="v" style="color:#9aa4b2;font-size:12px;">${hwFleetStackMismatchText(ns)}</span></div>
+      <div class="actions" style="margin-top:8px;">
+        <button ${st.busy ? "disabled" : ""} style="width:auto;padding:4px 10px;margin:0;" onclick="doHwFleetRefreshStackStatus('${ns}')">刷新待生效值</button>
+        <button ${st.busy || !st.stackContract ? "disabled" : ""} onclick="doHwFleetApplyStackMode('${ns}')">应用模式（只写.env）</button>
+      </div>
+      <div class="row"><span class="v" style="color:#6b7684;font-size:12px;">改完模式只是写了.env，飞控还在按旧模式跑——要生效需要再去上面"③控制面板"点"flight重启"（会掐断飞控）。</span></div>
+    </div>` : "";
+
+  // 2026-08-29用户要求"不同面板用不同底色"——四段各包一层.panelSection+
+  // 对应的颜色修饰class，纯视觉分区，不影响里面已有的内容/交互逻辑。
+  return `
+    <div class="droneCard">
+      <b class="cardTitle">${ns}</b>
+      <div class="panelSection panelSection-container">${containerStatusHtml}</div>
+      <div class="panelSection panelSection-vehicle">${vehicleStatusHtml}</div>
+      <div class="panelSection panelSection-control">${controlPanelHtml}</div>
+      <div class="actions" style="margin-top:10px;">${configOpenBtn}</div>
+      ${st.configOpen ? `<div class="panelSection panelSection-config">${configPanelHtml}</div>` : ""}
+    </div>`;
+}
+
+// 2026-08-25：原来这里是"飞行栈调参面板"整节（改.env+SSH重建flight-
+// stack-hw，含toggleParamsPanel/loadHwParams/saveHwParams/
+// renderParamsPanel/HW_PARAM_LABELS）——用户要求彻底删除，已经全部
+// 移除，后端对应的/api/hw-params/{ns}也一并删了（见app.py原"2. 真机
+// flight-stack规划/避障参数白名单"那节的说明）。
+
+// ---- 双机UWB坐标系对齐（全局，不属于任何一张卡片，跟status_monitor.py
+// 的uwb_pair同一个逻辑：两机命名空间按字典序排序取前两个，两机场景下
+// 只有这一对，uwb_ground_truth_node.py发布这条TransformStamped）----
+
+const uwbAlign = { pair: null, lastSeen: 0 };
+
+function ensureUwbAlignSubscribed() {
+  const names = Object.keys(fleet).sort();
+  if (names.length < 2) return;
+  const pairKey = `${names[0]}/${names[1]}`;
+  if (uwbAlign.pair === pairKey) return;
+  uwbAlign.pair = pairKey;
+  const topic = new ROSLIB.Topic({ ros, name: `/frame_align/${pairKey}`, messageType: "geometry_msgs/msg/TransformStamped" });
+  topic.subscribe(() => { uwbAlign.lastSeen = Date.now(); });
+}
+
+function renderUwbBanner() {
+  const el = document.getElementById("uwbBanner");
+  if (!uwbAlign.pair) { el.textContent = ""; return; }
+  const state = subsystemState(uwbAlign.lastSeen || null, HEALTH_THRESHOLDS_MS.uwb);
+  el.innerHTML = `双机坐标系对齐 (${uwbAlign.pair})：<span style="color:${HEALTH_COLOR[state]}">${HEALTH_LABEL[state]}</span>`;
+}
+
+// ---- 清空记录文件（tmux版launch_control.py第7个按钮同款，双击5秒内确认，
+// 走后端POST /api/clear-logs——宿主机侧非root用户对这些文件没有写权限，
+// 只能容器内root身份删，浏览器做不到）----
+
+let clearLogsArmedUntil = 0;
+let clearLogsBusy = false;
+
+function renderClearLogsMsg(text, cls) {
+  const el = document.getElementById("clearLogsMsg");
+  el.textContent = text;
+  el.className = `actionMsg ${cls || ""}`;
+}
+
+function doClearLogs() {
+  if (clearLogsBusy) return;
+  const now = Date.now();
+  if (now >= clearLogsArmedUntil) {
+    clearLogsArmedUntil = now + 5000;
+    renderClearLogsMsg("再点一次确认清空（5秒内有效）——会删除rosbag/容器持久化日志/姿态推力调试日志/health_events.log，不会删除incidents/下手动留证的文件夹");
+    return;
+  }
+  clearLogsArmedUntil = 0;
+  clearLogsBusy = true;
+  renderClearLogsMsg("清空中...");
+  backendFetch(`${BACKEND_URL}/api/clear-logs`, { method: "POST" })
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); renderClearLogsMsg(d.message || "已清空", "ok"); })
+    .catch((e) => { renderClearLogsMsg(`清空失败: ${e.message || e}`, "err"); })
+    .finally(() => { clearLogsBusy = false; });
+}
+
+// ---- 资源消耗面板（CPU/内存/网络I/O/GPU，走后端POST /api/container-stats，
+// 容器间因PID/cgroup namespace隔离互相看不到，只有能看到宿主机全貌的
+// 后端能查）----
+
+let resourceStats = null;
+let resourceMsg = "";
+
+// 2026-08-25：这个面板现在是"仿真模式"pane里常驻展示的内容，不再是
+// 点链接才展开的可折叠面板；只在gcsMode==='sim'时才真的发请求——用户
+// 在真机模式里不关心仿真容器的资源占用，没必要一直轮询。
+function refreshResourceStats() {
+  if (gcsMode !== "sim") return;
+  backendFetch(`${BACKEND_URL}/api/container-stats`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => { resourceStats = d; resourceMsg = ""; renderResourcePanel(); })
+    .catch((e) => { resourceMsg = `读取失败: ${e.message || e}`; renderResourcePanel(); });
+}
+
+function renderResourcePanel() {
+  const panel = document.getElementById("resourcePanel");
+  if (!resourceStats) { panel.innerHTML = `<div class="row"><span class="v">${resourceMsg || "加载中..."}</span></div>`; return; }
+  const rows = ["sim-world", "NX01", "NX02"].map((name) => {
+    const c = resourceStats.containers[name];
+    if (!c) return `<div class="row"><span class="k">${name}</span><span class="v">未采集到</span></div>`;
+    const gpu = (name === "sim-world" && resourceStats.gpu)
+      ? `${resourceStats.gpu.util_pct}%util ${resourceStats.gpu.mem_used_mib}/${resourceStats.gpu.mem_total_mib}MiB` : "-";
+    return `<div class="row"><span class="k">${name}</span>
+      <span class="v">CPU ${c.cpu} · 内存 ${c.mem} · 网络 ${c.netio} · GPU ${gpu}</span></div>`;
+  }).join("");
+  panel.innerHTML = rows + (resourceMsg ? `<div class="actionMsg err">${resourceMsg}</div>` : "");
+}
+
+// ---- 俯视示意图（画各机世界坐标位置+朝向+拖尾，叠加选中那架飞机的
+// 障碍物栏格，点画布发目标点）----
+// 世界坐标系用origin_setter_node的world->{ns}/map这条TF换算（见前面
+// localToWorld/worldToLocal/mapTf），起飞点没锁定的飞机不会出现在图上
+// ——不是bug，是没有可信的世界坐标可画，硬凑一个假坐标比不画更危险。
+// 发目标点复用跟tmux版scripts/dual_goal_input.py完全相同的机制：算出
+// 局部坐标后发布/{ns}/term_goal（geometry_msgs/msg/PoseStamped，
+// frame_id="map"，跟桌面版rviz_goal_bridge_node.py殊途同归，见调研
+// 记录），不是另起一套指令通道。高度(z)取该飞机当前DLIO里程计的z——
+// 2D画布点击本身给不出高度，默认"保持当前飞行高度"，不强行猜一个值。
+
+const mapView = {
+  ns: null,          // 当前显示障碍物栏格的飞机("NX01"/"NX02"/null=不叠加)
+  scale: 20,          // 像素/米，autoFit时会覆盖
+  centerWorld: { x: 0, y: 0 },
+  autoFit: true,
+  pendingClick: null,  // 点击后待确认的世界坐标{x,y}，null=没有待确认的点
+  sendNs: null,        // 待确认目标点要发给哪架飞机
+  // "uwb"=uwb/pose_abs原始绝对坐标(默认，2026-09-01改，不需要任何标定
+  // 就能看到位置——UWB本身在仿真里就是共享的地面真值系，免标定，跟
+  // "world"理论上是同一个物理原点，只是不经过DLIO+θ*这条链路)；
+  // "world"=θ*标定换算出的世界坐标(跟发目标点用的是同一套换算，起飞点
+  // 没锁定的飞机不会出现)；"slam"=单机SLAM局部系直接当world用(2026-08-29
+  // 新增，见effectiveTf()说明，single_slam_only部署专用，不需要mapTf/
+  // 起飞点锁定)。"world"/"uwb"两种坐标来源只影响"画哪个点"，发目标点
+  // (doMapSendGoal)换算局部坐标时始终需要mapTf——不管当前在看哪种坐标，
+  // 起飞点没锁定一样发不出目标点，这是物理上绕不开的限制，不是显示模式
+  // 的问题；"slam"模式下effectiveTf()返回单位变换，不受这条限制影响。
+  coordSource: "uwb",
+  // 2026-08-22新增：航线规划模式——开启后画布单击不再弹"发目标点"面板，
+  // 改成往routePoints里追加一个折线顶点，见onMapMouseUp()里的分支。
+  routeMode: false,
+  routePoints: [],   // [{x,y}, ...] 世界坐标，还没发送的待确认航线
+  routeNs: null,     // 航线要发给哪架飞机
+};
+const mapTrails = {};   // ns -> [{x,y}, ...] 世界坐标历史，最近MAP_TRAIL_MAX个
+const mapRoutes = {};   // ns -> 发送出去那一刻的完整航点世界坐标数组，
+                         // 画布上实际显示"剩余还没到达的"要在drawMap()里
+                         // 按fleet[ns].fields["waypoint_progress"]实时
+                         // 切片——到一个消失一个，不是发送完就整条线一起
+                         // 消失，也不是等全部飞完才消失。
+const MAP_TRAIL_MAX = 60;
+
+function mapWorldToCanvas(canvas, wx, wy) {
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  // 屏幕y向下为正、世界y照数学习惯向上为正，画的时候要翻一次符号。
+  return { x: cx + (wx - mapView.centerWorld.x) * mapView.scale, y: cy - (wy - mapView.centerWorld.y) * mapView.scale };
+}
+
+function mapCanvasToWorld(canvas, px, py) {
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  return { x: mapView.centerWorld.x + (px - cx) / mapView.scale, y: mapView.centerWorld.y - (py - cy) / mapView.scale };
+}
+
+function onMapWheel(evt) {
+  evt.preventDefault();
+  const canvas = document.getElementById("mapCanvas");
+  const rect = canvas.getBoundingClientRect();
+  const px = (evt.clientX - rect.left) * (canvas.width / rect.width);
+  const py = (evt.clientY - rect.top) * (canvas.height / rect.height);
+  // 缩放锚定在鼠标光标下的世界坐标点——先记下光标当前指向的世界坐标，
+  // 改完scale后再把centerWorld补偿回去，让光标下的点缩放前后保持不动，
+  // 不然每次滚轮都会把视角悄悄推移，体验会很别扭。
+  const before = mapCanvasToWorld(canvas, px, py);
+  mapView.autoFit = false;
+  const factor = evt.deltaY < 0 ? 1.15 : 1 / 1.15;
+  mapView.scale = Math.max(2, Math.min(300, mapView.scale * factor));
+  const after = mapCanvasToWorld(canvas, px, py);
+  mapView.centerWorld.x += before.x - after.x;
+  mapView.centerWorld.y += before.y - after.y;
+  drawMap();
+}
+
+function mapSelectOccupancy(ns) {
+  mapView.ns = ns || null;
+}
+
+function mapSetCoordSource(v) {
+  mapView.coordSource = v;
+  drawMap();
+}
+
+// ---- 拖动画布平移 + 点击发目标点，共用同一套鼠标事件——用mousedown记录
+// 起点，mousemove期间按位移量平移centerWorld，mouseup时按"有没有真的
+// 移动过"区分这一次是"拖动平移"还是"单纯点一下要发目标点"：移动距离
+// 超过一个小阈值(3像素)才算拖动，否则按点击处理，不然正常点击时鼠标
+// 难免有一两像素的抖动，会被误判成"拖动"从而吞掉点击。mousemove/mouseup
+// 绑在window上而不是canvas上——拖动过程中鼠标很容易滑出canvas边界，
+// 只绑在canvas上会导致"松手在canvas外"时收不到mouseup、拖动状态卡死。
+let mapDrag = null; // {startClientX, startClientY, startCenter, moved} | null
+
+function onMapMouseDown(evt) {
+  if (evt.button !== 0) return; // 只认左键
+  mapDrag = {
+    startClientX: evt.clientX,
+    startClientY: evt.clientY,
+    startCenter: { x: mapView.centerWorld.x, y: mapView.centerWorld.y },
+    moved: false,
+  };
+  const canvas = document.getElementById("mapCanvas");
+  if (canvas) canvas.style.cursor = "grabbing";
+}
+
+function onMapMouseMove(evt) {
+  if (!mapDrag) return;
+  const canvas = document.getElementById("mapCanvas");
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const pxPerCss = canvas.width / rect.width; // CSS显示尺寸跟canvas固有像素分辨率不一定1:1，先换算
+  const dxPx = (evt.clientX - mapDrag.startClientX) * pxPerCss;
+  const dyPx = (evt.clientY - mapDrag.startClientY) * pxPerCss;
+  if (!mapDrag.moved && Math.hypot(dxPx, dyPx) > 3) mapDrag.moved = true;
+  if (!mapDrag.moved) return;
+  mapView.autoFit = false;
+  // 世界y朝上、屏幕像素y朝下——往右拖(dxPx>0)要让画面内容跟着右移，
+  // 等价于centerWorld往左移，y同理反一次号。
+  mapView.centerWorld.x = mapDrag.startCenter.x - dxPx / mapView.scale;
+  mapView.centerWorld.y = mapDrag.startCenter.y + dyPx / mapView.scale;
+  drawMap();
+}
+
+function onMapMouseUp(evt) {
+  if (!mapDrag) return;
+  const wasDrag = mapDrag.moved;
+  // 2026-08-22加固：mapDrag=null原来放在函数最后、在下面这段"按点击处理"
+  // 逻辑之后——如果这段逻辑中途抛异常(不管什么原因)，mapDrag永远清不掉，
+  // 表现就是"点一下画布之后，鼠标随便怎么移动、画布都跟着动"（因为
+  // onMapMouseMove只看mapDrag是不是null，不看鼠标按键是否按住）。改成
+  // try/finally，不管中间是正常走完还是抛了异常，mapDrag都保证被清空
+  // ——这是不管这次真正抛异常的根因是什么都该有的兜底，不是绕过问题
+  // 不查了，下面canvas尺寸相关的CSS这次也一并从容易引入布局异常的
+  // object-fit+flex-grow组合改回更简单可靠的width驱动方案。
+  try {
+    const canvas = document.getElementById("mapCanvas");
+    if (canvas) canvas.style.cursor = "grab";
+    if (!wasDrag && canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const px = (evt.clientX - rect.left) * (canvas.width / rect.width);
+      const py = (evt.clientY - rect.top) * (canvas.height / rect.height);
+      const world = mapCanvasToWorld(canvas, px, py);
+      if (mapView.routeMode) {
+        // 航线规划模式——单击追加折线顶点，不弹单点发目标点面板。
+        mapView.routePoints.push(world);
+        renderMapRoutePanel();
+      } else {
+        // 没有真的拖动过，按点击处理——弹出"发目标点"确认面板。
+        mapView.pendingClick = world;
+        mapView.sendNs = Object.keys(fleet).sort()[0] || null;
+        renderMapClickPanel();
+      }
+      drawMap();
+    }
+  } finally {
+    mapDrag = null;
+  }
+}
+
+// ---- 航线规划（2026-08-22新增）——画折线顺序航点、指定统一飞行高度，
+// 发给机载rviz_goal_bridge_node.py的航点队列执行器（见该文件2026-08-22
+// 注释）按序飞完；取消队列时机载侧会沿当前速度方向顺延一小段距离就近
+// 悬停，不是这里的前端逻辑负责的，前端只负责发一个空的取消信号。
+
+function mapToggleRouteMode() {
+  mapView.routeMode = !mapView.routeMode;
+  if (mapView.routeMode) {
+    mapView.pendingClick = null; // 两种"点画布"模式互斥，清掉另一种待确认状态
+    renderMapClickPanel();
+    if (!mapView.routeNs) mapView.routeNs = Object.keys(fleet).sort()[0] || null;
+  }
+  renderMapRoutePanel();
+  drawMap();
+}
+
+function mapRouteUndo() {
+  mapView.routePoints.pop();
+  renderMapRoutePanel();
+  drawMap();
+}
+
+function mapRouteClear() {
+  mapView.routePoints = [];
+  renderMapRoutePanel();
+  drawMap();
+}
+
+function mapSetRouteNs(ns) {
+  mapView.routeNs = ns;
+  renderMapRoutePanel();
+}
+
+function mapSendRoute() {
+  const ns = mapView.routeNs;
+  const pts = mapView.routePoints;
+  if (!ns || !pts.length) return;
+  const tf = effectiveTf(ns);
+  if (!tf) {
+    alert(`${ns} 还没有world->${ns}/map这条变换（起飞点还没锁定），无法把世界坐标换算成局部坐标，指令不会发送——先点表格下方"锁定起飞点"`);
+    return;
+  }
+  const altInput = document.getElementById("mapRouteAlt");
+  const alt = altInput ? parseFloat(altInput.value) : NaN;
+  if (!isFinite(alt)) { alert("飞行高度必须填一个数字（单位：米，相对起飞点的本地高度）"); return; }
+  if (!confirm(`确认让 ${ns} 按顺序飞过这 ${pts.length} 个航点？统一飞行高度 ${alt.toFixed(2)}m（相对起飞点）。`)) return;
+  const poses = pts.map((w) => {
+    const local = worldToLocal(tf, w.x, w.y, 0); // z由下面alt统一指定，这里只要xy
+    return {
+      header: { frame_id: "map", stamp: { sec: 0, nanosec: 0 } },
+      pose: { position: { x: local.x, y: local.y, z: alt }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
+    };
+  });
+  fleet[ns].waypointQueuePub.publish({ header: { frame_id: "map", stamp: { sec: 0, nanosec: 0 } }, poses });
+  // 记下发送出去那一刻的完整世界坐标，供drawMap()按waypoint_progress
+  // 实时切片显示"剩余还没到达的航点"——到一个消失一个。
+  mapRoutes[ns] = pts.slice();
+  mapView.routeMode = false;
+  mapView.routePoints = [];
+  renderMapRoutePanel();
+  drawMap();
+}
+
+function mapCancelQueue(ns) {
+  if (!ns || !fleet[ns]) return;
+  if (!confirm(`确认让 ${ns} 取消当前航点队列？无人机会沿当前速度方向顺延一小段距离后就近悬停，不会立即停在原地（悬停位置取决于当前飞行速度，速度越快顺延越远，最多3米）。`)) return;
+  fleet[ns].waypointCancelPub.publish({});
+}
+
+// renderMapRoutePanel()画"规划航线"表单（含高度输入框）。2026-08-22
+// 踩过一次坑：这个函数原来只在用户操作(开始/撤销/清空/切换飞机/画点)
+// 时才重建，指望页面加载时手动调一次垫底——但那一次调用时fleet还是空
+// 的（discover()是异步的，飞机还没被发现），函数直接清空返回，之后
+// 飞机数据到齐了也没有第二次触发，"开始规划航线"这个入口按钮就一直
+// 是空白，等于整个航线规划功能从页面加载起就没有入口。改成跟
+// refreshMapOccSelect()同一套"算一个状态签名，没变就不碰DOM"的保护，
+// 允许跟着drawMap()每500ms一起被调用——签名只覆盖会影响这个表单渲染
+// 结果的状态(飞机列表/规划模式/画了几个点/选中哪架飞机)，不包含高度
+// 输入框的内容，所以用户在输入框里打字这段时间只要上面这几个状态没变
+// （通常不会变），签名不变、不会重建，不会重蹈"重建吞掉输入"的坑；
+// 一旦飞机列表或规划状态真的变了，能立刻重建挂上新内容，不需要用户
+// 手动做点什么才能触发。
+let lastRoutePanelSig = null;
+function renderMapRoutePanel() {
+  const el = document.getElementById("mapRoutePanel");
+  if (!el) return;
+  const names = currentModeNames();
+  const pts = mapView.routePoints;
+  const sig = `${names.join(",")}|${mapView.routeMode}|${pts.length}|${mapView.routeNs}`;
+  if (sig === lastRoutePanelSig) return;
+  lastRoutePanelSig = sig;
+  if (!names.length) { el.innerHTML = ""; return; }
+  const opts = names.map((ns) => `<option value="${ns}" ${ns === mapView.routeNs ? "selected" : ""}>${ns}</option>`).join("");
+  el.innerHTML = `
+    <div class="row"><span class="k">规划航线</span><span class="v">
+      <button onclick="mapToggleRouteMode()">${mapView.routeMode ? "退出规划" : "开始规划航线"}</button>
+      ${mapView.routeMode ? `<button onclick="mapRouteUndo()" ${pts.length ? "" : "disabled"}>撤销上一点</button>
+      <button class="danger" onclick="mapRouteClear()" ${pts.length ? "" : "disabled"}>清空</button>` : ""}
+    </span></div>
+    ${mapView.routeMode ? `
+    <div class="row"><span class="k">已画航点</span><span class="v">${pts.length} 个（点击画布继续加点）</span></div>
+    <div class="field"><label>发给哪架飞机</label><select onchange="mapSetRouteNs(this.value)">${opts}</select></div>
+    <div class="field"><label>统一飞行高度(m，相对起飞点)</label><input id="mapRouteAlt" type="number" step="0.1" value="1.5"></div>
+    <div class="actions"><button onclick="mapSendRoute()" ${pts.length ? "" : "disabled"}>发送航线</button></div>
+    ` : ""}`;
+}
+
+function renderMapQueueStatus() {
+  const el = document.getElementById("mapQueueStatus");
+  if (!el) return;
+  const names = currentModeNames();
+  if (!names.length) { el.innerHTML = ""; return; }
+  const stateForNs = (ns) => {
+    const st = fleet[ns] && fleet[ns].fields["waypoint_state"];
+    const prog = fleet[ns] && fleet[ns].fields["waypoint_progress"];
+    if (!st) return "";
+    const idx = prog ? prog.data : -1;
+    return st.data === "executing" ? `执行中（第${idx + 1}个航点）` :
+      st.data === "cancelled" ? "已取消（就近悬停中）" :
+      st.data === "completed" ? "已完成" : "空闲";
+  };
+  el.innerHTML = `
+    <div class="row"><span class="k">取消队列</span><span class="v">
+      ${names.map((ns) => `<button class="danger" onclick="mapCancelQueue('${ns}')">${ns} ${stateForNs(ns) ? "(" + stateForNs(ns) + ")" : ""}</button>`).join(" ")}
+    </span></div>`;
+}
+
+function mapCancelClick() {
+  mapView.pendingClick = null;
+  renderMapClickPanel();
+  drawMap();
+}
+
+function mapSetSendNs(ns) {
+  mapView.sendNs = ns;
+  renderMapClickPanel();
+}
+
+function doMapSendGoal() {
+  const world = mapView.pendingClick;
+  const ns = mapView.sendNs;
+  if (!world || !ns) return;
+  const tf = effectiveTf(ns);
+  if (!tf) {
+    alert(`${ns} 还没有world->${ns}/map这条变换（起飞点还没锁定），无法把世界坐标换算成局部坐标，指令不会发送——先点表格下方"锁定起飞点"`);
+    return;
+  }
+  // 2026-08-22改为要求操作员明确填一个高度数字，不再"默默读取点击那一刻
+  // 的当前里程计高度"——ego_planner核心代码原来z轴硬编码成1.0、不管
+  // term_goal.z传什么都无效，那次修复之前"读到什么高度都无所谓"；改完
+  // 之后z轴是真的会被采纳，实测暴露出一个真事故：飞机还没爬升稳定（比如
+  // 刚起飞爬到一半）时点了这个按钮，读到的瞬时高度(比如0.59米)被当成
+  // 目标老实执行，飞机被这个新目标"截胡"定在一个从没在这个高度测试过的
+  // 位置，直接撞了障碍物。现在这个数字必须是操作员在输入框里明确看到、
+  // 确认过的值，不会再有"点击时机不巧就锁死一个坏高度"这种看不见的陷阱，
+  // 跟"规划航线"面板的"统一飞行高度"输入框是同一个设计。
+  const altInput = document.getElementById("mapClickAlt");
+  const alt = altInput ? parseFloat(altInput.value) : NaN;
+  if (!isFinite(alt)) { alert("飞行高度必须填一个数字（单位：米，相对起飞点的本地高度）"); return; }
+  const local = worldToLocal(tf, world.x, world.y, 0); // z由上面alt明确指定，这里只要xy
+  if (!confirm(`确认让 ${ns} 飞往世界坐标 (${world.x.toFixed(2)}, ${world.y.toFixed(2)})，飞行高度 ${alt.toFixed(2)}m（相对起飞点）？\n换算成局部坐标：(${local.x.toFixed(2)}, ${local.y.toFixed(2)}, ${alt.toFixed(2)})。`)) return;
+  // 统一走waypointQueuePub（单点goal视为1个点的航点队列）——机载
+  // rviz_goal_bridge_node.py新增的航点队列执行器和这里共用同一个
+  // term_goal发布者，两条路径都直接写term_goal的话会互相覆盖打架，统一
+  // 入口之后"发一个新目标点"天然就是"打断旧队列、执行新的"。
+  fleet[ns].waypointQueuePub.publish({
+    header: { frame_id: "map", stamp: { sec: 0, nanosec: 0 } },
+    poses: [{
+      header: { frame_id: "map", stamp: { sec: 0, nanosec: 0 } },
+      pose: { position: { x: local.x, y: local.y, z: alt }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
+    }],
+  });
+  mapView.pendingClick = null;
+  renderMapClickPanel();
+  drawMap();
+}
+
+function renderMapClickPanel() {
+  const el = document.getElementById("mapClickPanel");
+  if (!el) return;
+  if (!mapView.pendingClick) { el.innerHTML = ""; return; }
+  const names = currentModeNames();
+  const w = mapView.pendingClick;
+  const opts = names.map((ns) => `<option value="${ns}" ${ns === mapView.sendNs ? "selected" : ""}>${ns}</option>`).join("");
+  // 高度输入框预填当前里程计高度，只是省得操作员每次都要自己心算/输入
+  // ——预填值仍然要经操作员肉眼看到、确认或修改之后才会真的发送，不是
+  // 静默生效，跟改之前那种"点确认框里一行小字，容易扫过去没细看"的
+  // 风险不是一回事。拿不到里程计（还没收到消息）时留空，不瞎猜一个值。
+  // 2026-08-22修复：这里原来手滑写成了fleet[ns]——ns在这个函数里根本没
+  // 定义(只在下面opts那行map()回调参数里局部存在，跟这里不是同一个)，
+  // 应该用mapView.sendNs。这个ReferenceError一直没在浏览器里显式弹出来
+  // 过，但会让这个函数在mapView.pendingClick非空时必定抛异常——真正的
+  // 后果比"这个输入框预填不出高度"严重得多：这个函数是从onMapMouseUp()
+  // 的"点击(非拖动)"分支里调用的，异常会让那个分支后面的`mapDrag=null`
+  // 永远执行不到，导致mapDrag卡死在非null状态；window上的mousemove
+  // 监听器只要看到mapDrag非null就会持续把地图跟着鼠标移动，不需要按住
+  // 鼠标键——表现正是用户反馈的"点一下画布之后，画布像粘在鼠标上一样
+  // 一直跟着挪"，同时"发送目标点/取消"这两个按钮也因为异常提前中断、
+  // 从没被真正写进DOM，看起来就是"按钮菜单不见了"——两个反馈其实是
+  // 同一个bug的两个表现，不是布局改动引入的CSS问题。
+  const odom = fleet[mapView.sendNs] && fleet[mapView.sendNs].fields["dlio/odom_node/odom"];
+  const altDefault = odom ? odom.pose.pose.position.z.toFixed(2) : "";
+  el.innerHTML = `
+    <div class="row"><span class="k">目标点(世界系)</span><span class="v">${w.x.toFixed(2)}, ${w.y.toFixed(2)}</span></div>
+    <div class="field"><label>发给哪架飞机</label><select onchange="mapSetSendNs(this.value)">${opts}</select></div>
+    <div class="field"><label>飞行高度(m，相对起飞点)</label><input id="mapClickAlt" type="number" step="0.1" value="${altDefault}"></div>
+    <div class="actions">
+      <button onclick="doMapSendGoal()">发送目标点</button>
+      <button class="danger" onclick="mapCancelClick()">取消</button>
+    </div>`;
+}
+
+function drawMapGrid(ctx, canvas) {
+  // 每1米一条淡色网格线，帮助判断画布上的实际尺度——线太密(缩得很小)时
+  // 跳过不画，避免糊成一片。
+  if (mapView.scale < 4) return;
+  ctx.strokeStyle = "rgba(42,49,64,0.6)";
+  ctx.lineWidth = 1;
+  const left = mapCanvasToWorld(canvas, 0, 0).x, right = mapCanvasToWorld(canvas, canvas.width, 0).x;
+  const top = mapCanvasToWorld(canvas, 0, 0).y, bottom = mapCanvasToWorld(canvas, 0, canvas.height).y;
+  for (let x = Math.ceil(left); x <= right; x++) {
+    const c1 = mapWorldToCanvas(canvas, x, top), c2 = mapWorldToCanvas(canvas, x, bottom);
+    ctx.beginPath(); ctx.moveTo(c1.x, c1.y); ctx.lineTo(c2.x, c2.y); ctx.stroke();
+  }
+  for (let y = Math.ceil(bottom); y <= top; y++) {
+    const c1 = mapWorldToCanvas(canvas, left, y), c2 = mapWorldToCanvas(canvas, right, y);
+    ctx.beginPath(); ctx.moveTo(c1.x, c1.y); ctx.lineTo(c2.x, c2.y); ctx.stroke();
+  }
+}
+
+const MAP_NS_COLOR = { NX01: "#7cd992", NX02: "#ff9a9a" };
+
+function extractTrajectoryPoints(msg) {
+  // ego_planner的optimal_list是单个Marker，msg.points直接就是点数组；
+  // mighty的traj_committed_colored是MarkerArray，每次发布第一条是
+  // DELETEALL(没有points)用来清掉上一次的线段，真正的LINE_LIST在后面
+  // ——找第一个有points的marker就行，不用严格校验action/type的数值常量。
+  if (!msg) return { points: [], frameId: null };
+  if (msg.points) return { points: msg.points, frameId: msg.header && msg.header.frame_id };
+  if (msg.markers) {
+    const m = msg.markers.find((mk) => mk.points && mk.points.length);
+    return { points: m ? m.points : [], frameId: m && m.header && m.header.frame_id };
+  }
+  return { points: [], frameId: null };
+}
+
+function drawTrajectory(ctx, canvas, ns) {
+  const st = fleet[ns];
+  const suffix = st && st.trajSuffix;
+  const msg = suffix ? st.fields[suffix] : null;
+  const { points, frameId } = extractTrajectoryPoints(msg);
+  if (points.length < 2) return;
+  // 2026-08-21更正：设计阶段查ego_planner源码得出"optimal_list的
+  // header.frame_id硬编码是world"这个结论，实测起飞发目标点后拿到的
+  // 真实消息frame_id其实是"NX01/map"（飞机自己的局部系），跟静态代码
+  // 分析的结论对不上——这次直接相信实测拿到的真实数据，不是漏了改。
+  // 只认两种能确认的frame：字面量"world"(不用换算)、"{ns}/map"(飞机
+  // 自己的局部系，套mapTf[ns]换算成世界坐标)；mighty的traj_committed_
+  // colored在仿真模式下frame_id是未加命名空间的字面量"map"，跟这个
+  // 项目的"world"(UWB地面真值系)是不是同一个原点没有查到证据，也没能
+  // 实测confirm(没切到PLANNER=mighty测过)，这两种都不认识、不画——
+  // 不确定就不画，比画错更负责任。
+  let toWorld;
+  if (frameId === "world") {
+    toWorld = (p) => p;
+  } else if (frameId === `${ns}/map`) {
+    const tf = effectiveTf(ns);
+    if (!tf) return; // 未标定，没法换算
+    toWorld = (p) => localToWorld(tf, p.x, p.y, p.z);
+  } else {
+    return;
+  }
+  ctx.strokeStyle = MAP_NS_COLOR[ns] || "#7bb8ff";
+  ctx.globalAlpha = 0.85;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const w = toWorld(p);
+    const c = mapWorldToCanvas(canvas, w.x, w.y);
+    if (i === 0) ctx.moveTo(c.x, c.y); else ctx.lineTo(c.x, c.y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+}
+
+function drawMap() {
+  const canvas = document.getElementById("mapCanvas");
+  if (!canvas || !canvas.offsetParent) return; // 面板没展开，不做无谓渲染
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#12161c";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const names = Object.keys(fleet).sort();
+  const worldPos = {};
+  names.forEach((ns) => {
+    if (mapView.coordSource === "uwb") {
+      // UWB绝对坐标——不需要mapTf/起飞点锁定，实测确认UWB读数减去DLIO
+      // 局部位置正好等于θ*标定出的平移量(在噪声范围内)，两者是同一个
+      // 物理原点，UWB是免标定就能用的那条路。
+      const uwb = fleet[ns].fields["uwb/pose_abs"];
+      if (uwb) worldPos[ns] = uwb.pose.position;
+    } else if (mapView.coordSource === "slam") {
+      // 单机SLAM局部系直接当world用，见effectiveTf()说明——只要SLAM有
+      // 里程计数据就能画，不经过mapTf，不需要起飞点锁定这一步。
+      const odom = fleet[ns].fields["dlio/odom_node/odom"];
+      if (odom) worldPos[ns] = odom.pose.pose.position;
+    } else {
+      const tf = mapTf[ns];
+      const odom = fleet[ns].fields["dlio/odom_node/odom"];
+      if (tf && odom) {
+        const p = odom.pose.pose.position;
+        worldPos[ns] = localToWorld(tf, p.x, p.y, p.z);
+      }
+    }
+  });
+
+  if (mapView.autoFit) {
+    const pts = Object.values(worldPos);
+    if (pts.length) {
+      const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+      mapView.centerWorld = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+      const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), 4) * 1.8;
+      mapView.scale = Math.min(canvas.width, canvas.height) / span;
+    }
+  }
+
+  drawMapGrid(ctx, canvas);
+
+  // 选中飞机的障碍物栏格——只画一架，避免两机地图叠在一起既难看又费性能
+  if (mapView.ns && effectiveTf(mapView.ns) && fleet[mapView.ns]) {
+    const ns = mapView.ns;
+    const occSuffix = fleet[ns].occSuffix;
+    const msg = occSuffix ? fleet[ns].fields[occSuffix] : null;
+    if (msg) {
+      const tf = effectiveTf(ns);
+      ctx.fillStyle = "rgba(123,184,255,0.55)";
+      for (const pt of decodePointCloudXY(msg)) {
+        const w = localToWorld(tf, pt.x, pt.y, 0);
+        const c = mapWorldToCanvas(canvas, w.x, w.y);
+        ctx.fillRect(c.x - 1, c.y - 1, 2, 2);
+      }
+    }
+  }
+
+  // 拖尾
+  names.forEach((ns) => {
+    const w = worldPos[ns];
+    const trail = mapTrails[ns] || (mapTrails[ns] = []);
+    if (w) {
+      const last = trail[trail.length - 1];
+      if (!last || Math.hypot(last.x - w.x, last.y - w.y) > 0.05) trail.push(w);
+      if (trail.length > MAP_TRAIL_MAX) trail.shift();
+    }
+    if (trail.length > 1) {
+      ctx.strokeStyle = MAP_NS_COLOR[ns] || "#7bb8ff";
+      ctx.globalAlpha = 0.35;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      trail.forEach((p, i) => {
+        const c = mapWorldToCanvas(canvas, p.x, p.y);
+        if (i === 0) ctx.moveTo(c.x, c.y); else ctx.lineTo(c.x, c.y);
+      });
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  });
+
+  // 当前规划轨迹——虚线区分"接下来要飞去哪"(规划轨迹)和"刚才飞过哪"
+  // (上面的实线拖尾)。见TRAJECTORY_TOPICS定义处注释：mighty那条线目前
+  // 因为frame_id没验证清楚会被下面的严格检查挡住，只有ego_planner会画。
+  names.forEach((ns) => drawTrajectory(ctx, canvas, ns));
+
+  // 飞机图标（三角形指向朝向，朝向未知时画成圆点）+ 没有坐标可画的飞机
+  // 单独列出来提示，不画在图上。
+  const uncalibrated = [];
+  names.forEach((ns) => {
+    const w = worldPos[ns];
+    if (!w) { uncalibrated.push(ns); return; }
+    // 朝向换算需要mapTf[ns]（局部yaw转世界yaw要加θ*）——UWB坐标模式下
+    // 就算位置能画（不需要标定），朝向还是需要标定才知道，两者是独立的
+    // 前提条件，没有mapTf时退化成画一个圆点，不假装知道朝向；"slam"模式
+    // 走effectiveTf()返回单位变换，θ*=0，局部yaw直接当世界yaw用。
+    const tf = effectiveTf(ns);
+    const c = mapWorldToCanvas(canvas, w.x, w.y);
+    ctx.fillStyle = MAP_NS_COLOR[ns] || "#7bb8ff";
+    if (tf) {
+      const odom = fleet[ns].fields["dlio/odom_node/odom"];
+      const q = odom.pose.pose.orientation;
+      const [, , localYawDeg] = quatToEulerDeg(q.x, q.y, q.z, q.w);
+      const theta = quatYaw(tf.rotation.z, tf.rotation.w);
+      const worldYaw = (localYawDeg * Math.PI) / 180 + theta;
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(-worldYaw); // canvas顺时针为正，跟数学角度方向相反，配合前面y轴翻转
+      ctx.beginPath();
+      ctx.moveTo(11, 0); ctx.lineTo(-7, 6); ctx.lineTo(-7, -6); ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 6, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#e6e6e6";
+    ctx.font = "12px sans-serif";
+    ctx.fillText(ns, c.x + 13, c.y - 9);
+  });
+
+  if (mapView.pendingClick) {
+    const c = mapWorldToCanvas(canvas, mapView.pendingClick.x, mapView.pendingClick.y);
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(c.x, c.y, 8, 0, 2 * Math.PI); ctx.stroke();
+  }
+
+  // 规划航线模式下正在画的折线——画成实心黄点+连线+序号，跟"飞机图标"
+  // (三角形)和"规划轨迹"(虚线)明显区分开，不容易看混。
+  if (mapView.routePoints.length) {
+    const pts = mapView.routePoints;
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const c = mapWorldToCanvas(canvas, p.x, p.y);
+      if (i === 0) ctx.moveTo(c.x, c.y); else ctx.lineTo(c.x, c.y);
+    });
+    ctx.stroke();
+    pts.forEach((p, i) => {
+      const c = mapWorldToCanvas(canvas, p.x, p.y);
+      ctx.fillStyle = "#ffd166";
+      ctx.beginPath(); ctx.arc(c.x, c.y, 4, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillStyle = "#e6e6e6";
+      ctx.font = "11px sans-serif";
+      ctx.fillText(String(i + 1), c.x + 6, c.y - 6);
+    });
+  }
+
+  // 已发送、正在执行的航线——按waypoint_progress实时切片，只画"还没
+  // 到达的"，飞机每到一个航点、序号推进一次，前面已经到过的点就从画布
+  // 上消失，不是发送完立刻整条线消失，也不是等全部飞完才一次性消失。
+  // 不是executing状态(空闲/已取消/已完成)时剩余部分自然是空数组，等价于
+  // "取消/飞完之后画布上什么都不剩"。
+  Object.keys(mapRoutes).forEach((ns) => {
+    const full = mapRoutes[ns];
+    if (!full || !full.length) return;
+    const stMsg = fleet[ns] && fleet[ns].fields["waypoint_state"];
+    const progMsg = fleet[ns] && fleet[ns].fields["waypoint_progress"];
+    const idx = progMsg ? progMsg.data : -1;
+    const remaining = (stMsg && stMsg.data === "executing" && idx >= 0) ? full.slice(idx) : [];
+    if (!remaining.length) return;
+    const color = MAP_NS_COLOR[ns] || "#ffd166";
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    remaining.forEach((p, i) => {
+      const c = mapWorldToCanvas(canvas, p.x, p.y);
+      if (i === 0) ctx.moveTo(c.x, c.y); else ctx.lineTo(c.x, c.y);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+    remaining.forEach((p, i) => {
+      const c = mapWorldToCanvas(canvas, p.x, p.y);
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(c.x, c.y, i === 0 ? 6 : 4, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillStyle = "#e6e6e6";
+      ctx.font = "11px sans-serif";
+      ctx.fillText(String(idx + i + 1), c.x + 7, c.y - 7);
+    });
+  });
+
+  renderMapRoutePanel();
+  renderMapQueueStatus();
+
+  const statusEl = document.getElementById("mapStatus");
+  if (statusEl) {
+    statusEl.textContent = uncalibrated.length
+      ? (mapView.coordSource === "uwb"
+          ? `${uncalibrated.join("/")} 还没收到UWB绝对坐标数据，不在图上显示`
+          : mapView.coordSource === "slam"
+            ? `${uncalibrated.join("/")} 还没收到SLAM里程计数据(dlio/odom_node/odom)，不在图上显示`
+            : `${uncalibrated.join("/")} 起飞点未锁定，不在图上显示——先在下方点"锁定起飞点"，或者把上面的坐标来源切成"UWB绝对坐标"（不需要标定）`)
+      : "";
+  }
+}
+
+// 2026-08-22新增：右侧"大幅面视图"区改成分栏+标签页布局（用户反馈原来
+// 单栏从上到下堆叠，俯视图一展开就把参数/按钮挤到屏幕外看不到）——俯视图
+// 从"点链接展开/收起的面板"变成右侧常驻可见的标签页内容，不再需要开关，
+// switchRightTab()是给以后加第二个标签页（比如视频回传）留的通用切换
+// 逻辑，即使现在只有一个标签也先按"多标签"的方式实现，不是过度设计——
+// 用户明确要求了右侧要分页。
+function switchRightTab(id) {
+  document.querySelectorAll(".rightTab").forEach((el) => el.classList.toggle("active", el.dataset.tab === id));
+  document.querySelectorAll(".rightTabPage").forEach((el) => el.classList.toggle("active", el.id === `rightTabPage-${id}`));
+  drawMap(); // 切回俯视图tab时立即重绘一次，不用等下一个500ms tick才有画面
+}
+
+// ---- 俯视/前视相机——MJPEG推流(2026-08-22新增) ----
+// multipart/x-mixed-replace是浏览器原生支持的格式，<img src="...">直接
+// 播放，不需要转码/后端中转；地址存localStorage，不经过后端。topcam
+// 先填一个实测能打开的默认地址(用户2026-08-22给的)，frontcam暂时留空
+// ——没有现成地址可以预填，硬填一个假地址反而
+// 会先弹一次连接失败。
+//
+// 2026-08-22追加第二路信号源：RTP+H.264硬编码推流，浏览器没有任何API
+// 能直接播放原始RTP包（跟MJPEG完全不是一回事，RTP连HTTP都不是），必须
+// 先转码——写了个独立脚本scripts/rtp_h264_to_mjpeg.py，在本机(这台
+// 开发机自己的局域网IP 192.168.43.7，实测确认就是RTP流被推过来的那个
+// 地址)用gst-launch-1.0解码RTP+H.264、转JPEG，再用跟现有MJPEG完全
+// 同一套multipart/x-mixed-replace协议吐出来——转码之后浏览器这边看到
+// 的还是一路普通MJPEG，前端不需要为H.264单独写任何播放逻辑，"H264模式"
+// 在这里只是"帮用户预填/记住另一个已经转好码的MJPEG地址"，底层播放
+// 机制跟MJPEG模式完全一样，用同一个renderCamView()。这个脚本需要手动
+// 在宿主机上跑起来（`python3 scripts/rtp_h264_to_mjpeg.py`），不是
+// GCS容器自动管理的服务——转码依赖的gst-launch-1.0只装在宿主机上，
+// 不在任何docker镜像里，装进镜像属于要改Dockerfile+重新build的范畴，
+// 这次没有做。
+const CAM_MODE_DEFAULT_URL = {
+  topcam: {
+    mjpeg: "http://192.168.43.19:8080/stream.mjpg",
+    h264: "http://192.168.43.7:8081/stream.mjpg",
+  },
+  frontcam: { mjpeg: "", h264: "" },
+};
+function camUrlStorageKey(key, mode) { return `gcsCamUrl_${key}_${mode}`; }
+// 滚轮缩放+拖动平移的状态，跟俯视图画布(mapView.scale/centerWorld)
+// 是同一个思路，只是这里缩放的是CSS transform而不是重画canvas——图片
+// 默认(scale=1)已经靠.camView的object-fit:contain+flex居中撑满。
+// 2026-08-22用户要求"滚轮缩小不设限"：放大依然有上限(6倍，太大了看
+// 不清也没意义)，缩小去掉了原来卡在1倍(=object-fit:contain已经撑满
+// 的那个倍数)的下限——CAM_SCALE_SAFETY_MIN不是功能性限制，纯粹防止
+// scale缩到0或负数导致transform算出一个让图片彻底消失/出错的值，这个
+// 值本身小到可以认为是"事实上不设限"。CAM_SCALE_FIT=1这个值现在只
+// 用来判断"什么时候该把平移归零/该不该允许拖动"，不再是缩放范围的
+// 边界。
+const camViewState = { topcam: { scale: 1, tx: 0, ty: 0 }, frontcam: { scale: 1, tx: 0, ty: 0 } };
+const CAM_SCALE_FIT = 1, CAM_SCALE_SAFETY_MIN = 0.05, CAM_SCALE_MAX = 6;
+
+function applyCamTransform(key) {
+  const img = document.querySelector(`#camView-${key} img`);
+  if (!img) return;
+  const s = camViewState[key];
+  img.style.transform = `translate(${s.tx}px, ${s.ty}px) scale(${s.scale})`;
+}
+
+function renderCamView(key, url) {
+  const el = document.getElementById(`camView-${key}`);
+  if (!el) return;
+  if (!url) {
+    el.innerHTML = `<div class="camPlaceholder">还没填推流地址</div>`;
+    return;
+  }
+  // <img>标签是浏览器唯一支持multipart/x-mixed-replace原生播放的元素；
+  // onerror兜底——地址填错/相机没开机时至少给个能看懂的提示，不是一直
+  // 显示浏览器默认的"图片裂开"图标。MJPEG流连接上之后中途断流，浏览器
+  // 不一定会触发onerror(取决于是四层连接直接断还是应用层一直不发新
+  // frame)，这种情况目前没有自动重连，见camApply()的"应用"按钮当手动
+  // 重连用。
+  el.innerHTML = `<img src="${escAttr(url)}" alt="视频流"
+    onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'camPlaceholder',textContent:'连接失败——检查地址是否正确、这台机器能不能连到该地址（浏览器出于安全限制看不到更具体的错误原因）'}))">`;
+  // 换了新地址/重新应用，缩放平移状态归零重来，不留着上一路流的视角。
+  camViewState[key] = { scale: CAM_SCALE_FIT, tx: 0, ty: 0 };
+  applyCamTransform(key);
+}
+
+function onCamWheel(key, evt) {
+  if (!document.querySelector(`#camView-${key} img`)) return; // 还没有画面(占位文字状态)，滚轮不用处理
+  evt.preventDefault();
+  const s = camViewState[key];
+  const factor = evt.deltaY < 0 ? 1.15 : 1 / 1.15;
+  s.scale = Math.max(CAM_SCALE_SAFETY_MIN, Math.min(CAM_SCALE_MAX, s.scale * factor));
+  if (s.scale <= CAM_SCALE_FIT) { s.tx = 0; s.ty = 0; } // 不比"撑满"倍数大就没有平移的意义，顺带清零避免视角跑偏
+  applyCamTransform(key);
+}
+
+// 拖动平移——跟俯视图画布onMapMouseDown/Move/Up同一个模式：mousedown
+// 绑在.camView上(按下时才开始)，mousemove/mouseup绑在window上(拖动
+// 途中鼠标很容易滑出这个不大的相机画面区域，只绑在.camView上会导致
+// "松手在区域外"时收不到mouseup、拖动状态卡死——这次会话前面刚踩过
+// 一次同类bug，这里从一开始就按加固过的方式写)。scale==1(没有放大)
+// 时禁止拖动——图片本来就撑满显示，拖了也看不出效果，还会让人误以为
+// 坏了。
+let camDrag = null; // {key, startClientX, startClientY, startTx, startTy} | null
+function onCamMouseDown(key, evt) {
+  if (evt.button !== 0 || camViewState[key].scale <= CAM_SCALE_FIT) return;
+  camDrag = { key, startClientX: evt.clientX, startClientY: evt.clientY, startTx: camViewState[key].tx, startTy: camViewState[key].ty };
+  const el = document.getElementById(`camView-${key}`);
+  if (el) el.classList.add("dragging");
+}
+function onCamMouseMove(evt) {
+  if (!camDrag) return;
+  const s = camViewState[camDrag.key];
+  s.tx = camDrag.startTx + (evt.clientX - camDrag.startClientX);
+  s.ty = camDrag.startTy + (evt.clientY - camDrag.startClientY);
+  applyCamTransform(camDrag.key);
+}
+function onCamMouseUp() {
+  if (!camDrag) return;
+  const el = document.getElementById(`camView-${camDrag.key}`);
+  if (el) el.classList.remove("dragging");
+  camDrag = null;
+}
+
+function camApply(key) {
+  const input = document.getElementById(`camUrl-${key}`);
+  const modeSelect = document.getElementById(`camMode-${key}`);
+  if (!input) return;
+  const url = input.value.trim();
+  const mode = modeSelect ? modeSelect.value : "mjpeg";
+  // 按"这个摄像头位+这个模式"两维分别存，切模式不会覆盖掉另一个模式
+  // 记的地址——MJPEG和H264(转码后)大概率是两个完全不同的地址，不能
+  // 共用一个localStorage key。
+  localStorage.setItem(camUrlStorageKey(key, mode), url);
+  renderCamView(key, url);
+}
+
+// 切信号源——直接从localStorage(或没存过时用CAM_MODE_DEFAULT_URL的
+// 默认值)取出这个模式上次填的地址、直接应用，不需要用户切完模式还要
+// 再点一次"应用"，体感上更像切标签页而不是要填两步表单。
+function camModeChange(key, mode) {
+  localStorage.setItem(`gcsCamMode_${key}`, mode);
+  const saved = localStorage.getItem(camUrlStorageKey(key, mode));
+  const url = saved !== null ? saved : ((CAM_MODE_DEFAULT_URL[key] || {})[mode] || "");
+  const input = document.getElementById(`camUrl-${key}`);
+  if (input) input.value = url;
+  renderCamView(key, url);
+}
+
+function initCamTabs() {
+  Object.keys(CAM_MODE_DEFAULT_URL).forEach((key) => {
+    const mode = localStorage.getItem(`gcsCamMode_${key}`) || "mjpeg";
+    const modeSelect = document.getElementById(`camMode-${key}`);
+    if (modeSelect) modeSelect.value = mode;
+    const saved = localStorage.getItem(camUrlStorageKey(key, mode));
+    const url = saved !== null ? saved : ((CAM_MODE_DEFAULT_URL[key] || {})[mode] || "");
+    const input = document.getElementById(`camUrl-${key}`);
+    if (input) input.value = url;
+    renderCamView(key, url);
+    const el = document.getElementById(`camView-${key}`);
+    if (el) {
+      el.addEventListener("wheel", (evt) => onCamWheel(key, evt), { passive: false });
+      el.addEventListener("mousedown", (evt) => onCamMouseDown(key, evt));
+    }
+  });
+  window.addEventListener("mousemove", onCamMouseMove);
+  window.addEventListener("mouseup", onCamMouseUp);
+}
+
+// mapOccSelect下拉框原来只在"打开面板"那一刻重建一次；俯视图现在常驻
+// 可见，没有"打开"这个触发时机了，改成跟controlsEl同款"内容没变就不
+// 重建"的保护——不然每次调用都reset会把用户正在选的那一项弹回"不叠加
+// 障碍物"，体验上等于选了立刻被清空。
+let lastMapOccNames = null;
+// 2026-09-01改：原来（无论是2026-08-31的"lastMapOccNames===null"还是这次
+// 第一版改的"mapOccAutoSelectPending一次性标记"）都是"只在某一次特定的
+// 调用上生效一次"的设计，本质上是在赌discover()发现NX01的那一次调用
+// 恰好撞上判断条件为真的那个时机——只要中间多经历一次过渡状态（比如先
+// 发现别的命名空间、或者同一批话题分两次discover()周期到齐），这次机会
+// 就被过渡状态消耗掉，之后无论NX01再怎么出现都不会重试。改成"只要用户
+// 没有手动选过（mapOccUserPicked仍是false），每次真的重建选项时都尝试
+// 摆回NX01"——不再依赖"是不是第一次"这个易错的时序判断，只依赖"用户有
+// 没有手动选过"这个只会由onchange真实触发一次的状态，天然收敛：不管
+// discover()分几次发现完整机队，只要NX01最终出现在fleet里，下一次
+// refreshMapOccSelect()真的重建选项时就会摆回NX01；用户一旦自己选过
+// （见HTML里mapOccSelect的onchange），mapOccUserPicked变true后这条自动
+// 摆回逻辑永久停用，不会覆盖用户的手动选择。
+let mapOccUserPicked = false;
+function refreshMapOccSelect() {
+  const select = document.getElementById("mapOccSelect");
+  if (!select) return;
+  const names = Object.keys(fleet).sort();
+  const key = names.join(",");
+  if (key === lastMapOccNames) return;
+  lastMapOccNames = key;
+  const current = select.value;
+  select.innerHTML = `<option value="">不叠加障碍物</option>` +
+    names.map((ns) => `<option value="${ns}">${ns}</option>`).join("");
+  if (!mapOccUserPicked && names.includes("NX01")) {
+    select.value = "NX01";
+    mapSelectOccupancy("NX01");
+  } else if (names.includes(current)) {
+    select.value = current;
+  }
+}
+
+function discover() {
+  const rosapiTopics = new ROSLIB.Service({ ros, name: "/rosapi/topics", serviceType: "rosapi/Topics" });
+  callServiceWithTimeout(rosapiTopics, {}, (res) => {
+    const found = new Set();
+    (res.topics || []).forEach((t) => { const ns = extractNamespace(t); if (ns) found.add(ns); });
+    found.forEach(ensureSubscribed);
+    ensureUwbAlignSubscribed();
+    render();
+  }, (err) => console.error("rosapi/topics 调用失败", err));
+}
+
+function fmt(n) { return typeof n === "number" ? n.toFixed(2) : "--"; }
+
+// 2026-08-25重构：原来"表格(飞机=行,字段=列)+独立controlBar"四处分散
+// （renderFlightTable/renderCalibTable/renderHealthTable/renderControlBar）
+// 拆成共享的字段渲染小函数，仿真卡片(renderSimDroneCard)和真机卡片
+// (renderHwFleetRow，见"真机集群远程控制"那节)都调用同一套，不用各写
+// 一遍；真机卡片只有在这架真机额外配好DDS桥接(fleet[ns]存在)时才会
+// 显示这几段，纯真机(只有HTTP控制通道)不显示。
+
+function staleClassFor(st, suffix) {
+  return (Date.now() - (st.lastSeen[suffix] || 0) > STALE_MS) ? "stale" : "";
+}
+
+function connSummaryHtml(ns) {
+  const st = fleet[ns];
+  const state = st.fields["mavros/state"];
+  const connText = state ? `${state.connected ? "已连接" : "未连接"} / ${state.mode}` : "--";
+  const armedBadge = state
+    ? `<span class="badge ${state.armed ? "armed" : "disarmed"}">${state.armed ? "ARMED" : "DISARMED"}</span>`
+    : "--";
+  const staleCls = staleClassFor(st, "mavros/state");
+  // 2026-08-29改成跟telemetryFieldsHtml()那几张表同一套.telemetryTable
+  // 样式——原来是.statusRow拼两组k/v文字，跟旁边一堆表格混在一起风格
+  // 不统一，用户明确要求"均以表格形式表示"。
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr><th>连接/模式</th><th>解锁</th></tr></thead>
+      <tbody><tr class="${staleCls}"><td>${connText}</td><td>${armedBadge}</td></tr></tbody>
+    </table>`;
+}
+
+// 2026-08-31新增：卡片折叠成紧凑摘要时用的单行位置摘要——只取UAV
+// (mavros/local_position/pose，EKF2融合值，飞控自己真正用来做控制的
+// 那个)一行，不像telemetryFieldsHtml()那样还带SLAM/UWB对比行。展开区
+// 里telemetryFieldsHtml()仍然会完整显示这行数据（重复展示一次没关系，
+// 常驻的是"一眼扫过去"用的最简形式，展开的是"深入分析对比"用的）。
+function positionSummaryHtml(ns) {
+  const st = fleet[ns];
+  const uavPose = st.fields["mavros/local_position/pose"];
+  const p = uavPose ? uavPose.pose.position : null;
+  const stale = staleClassFor(st, "mavros/local_position/pose");
+  return `
+    <table class="telemetryTable telemetryTable-highlight" style="margin-top:4px;">
+      <thead><tr><th>位置 (m)</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+      <tbody><tr class="${stale}"><td class="rowLabel">UAV</td><td>${p ? fmt(p.x) : "--"}</td><td>${p ? fmt(p.y) : "--"}</td><td>${p ? fmt(p.z) : "--"}</td></tr></tbody>
+    </table>`;
+}
+
+// 2026-08-29拆分：原来位置/姿态/目标油门三张表挤在一个函数里一起返回，
+// 用户要求"目标油门"这张表挪到RC状态表下面（跟位置/姿态不再挨在一起），
+// 拆成两个函数各自独立调用，调用方(renderHwFleetRow/renderSimDroneCard)
+// 决定先后顺序。
+// 2026-09-07新增第二个参数hideUavPosition（默认false，行为不变）——
+// 仿真卡片的positionSummaryHtml()已经常驻显示UAV位置，这张位置表里的
+// "UAV"行对仿真来说是重复信息，simTelemetryDetailHtml()传true隐藏它；
+// 真机卡片没有等价的常驻位置摘要，两处hw调用点(renderHwFleetRow()"未知
+// 来源"卡片、hwTelemetryBlockHtml())都不传，保持原有行为——这张表是
+// sim/hw共用函数，不能直接删掉这一行，否则hw会丢失UAV位置数据。
+// 2026-09-07又新增第三个参数showUwbAB（默认false）——UWB_A/UWB_B双标签
+// 原始坐标只有真机uwb_dual_tag_fusion节点会发布，仿真没有对应数据源；
+// 早前误从这个共用函数里整体删掉这两行，用户随后要求"恢复真机控制
+// 面板的UWB_A,UWB_B的位置显示"，改成参数控制，两处hw调用点传true，
+// sim调用点不传（保持隐藏）。
+function telemetryFieldsHtml(ns, hideUavPosition, showUwbAB) {
+  const st = fleet[ns];
+  const odom = st.fields["dlio/odom_node/odom"];
+  const uwb = st.fields["uwb/pose_abs"];
+  const imu = st.fields["mavros/imu/data"];
+  const uavPose = st.fields["mavros/local_position/pose"];
+  const p = odom ? odom.pose.pose.position : null;
+  const q = odom ? odom.pose.pose.orientation : null;
+  const u = uwb ? uwb.pose.position : null;
+  const uOri = uwb ? uwb.pose.orientation : null;
+  const pUav = uavPose ? uavPose.pose.position : null;
+  const uwbA = st.fields["uwb_a/pose_abs"];
+  const uwbB = st.fields["uwb_b/pose_abs"];
+  const uA = uwbA ? uwbA.pose.position : null;
+  const uB = uwbB ? uwbB.pose.position : null;
+  const uwbAStale = staleClassFor(st, "uwb_a/pose_abs");
+  const uwbBStale = staleClassFor(st, "uwb_b/pose_abs");
+  // 姿态以飞控自身IMU（mavros/imu/data.orientation）为准，SLAM(dlio odom)
+  // 的姿态只作为对比参考行，不能拿SLAM姿态当作飞机真实姿态显示。
+  const qImu = imu ? imu.orientation : null;
+  const rpy = q ? quatToEulerDeg(q.x, q.y, q.z, q.w) : null;
+  const rpyImu = qImu ? quatToEulerDeg(qImu.x, qImu.y, qImu.z, qImu.w) : null;
+  // 2026-09-04新增：UWB行的yaw——uwb/pose_abs（uwb_sim/uwb_dual_tag_fusion
+  // 都是这个话题）的姿态四元数只有yaw是有意义的，roll/pitch是节点侧强制
+  // 置0的占位值（单基线/双标签UWB测不出roll/pitch），所以这两列显示"--"，
+  // 只用quatYaw()（跟frame_align那批"仅偏航角"提取用的是同一个公式，不能
+  // 跟quatToEulerDeg()的yaw分量混用，见quatYaw()定义处的说明）解出yaw。
+  const uwbYawDeg = uOri ? (quatYaw(uOri.z, uOri.w) * 180) / Math.PI : null;
+  const slamStale = staleClassFor(st, "dlio/odom_node/odom");
+  const uwbStale = staleClassFor(st, "uwb/pose_abs");
+  const imuStale = staleClassFor(st, "mavros/imu/data");
+  const uavPoseStale = staleClassFor(st, "mavros/local_position/pose");
+  // 2026-08-25：位置/姿态原来是"1.23, 4.56, 0.78"这种逗号拼起来的一串
+  // 数字，用户反馈"谁知道那是什么玩意"——改成真正的表格，列头写清楚
+  // X/Y/Z、Roll/Pitch/Yaw是哪一维，不用再靠数问号数逗号猜第几个数是啥。
+  // 2026-08-29用户要求"位置和姿态读数通过字体/颜色/亮度等手段醒目
+  // 显示"——这两张表是飞行时最需要一眼盯住的数据，加telemetryTable-
+  // highlight这个修饰class单独放大字号+高亮色+发光，跟同一张卡片里
+  // 其它表格（健康/频率/RC/目标油门这些次要信息）拉开视觉层级。只加
+  // 在数据列(:not(.rowLabel))上，SLAM/UWB/UAV这几个行标签不需要跟着
+  // 变大变亮。2026-08-30新增：位置表补上"UAV"行(mavros/local_position/
+  // pose，PX4 EKF2融合后飞控自己真正用来做控制的位置估计)——跟姿态表
+  // 已有的UAV/SLAM对比模式看齐，之前位置表只有SLAM/UWB两行，缺UAV这行，
+  // 三张表的信源列不对称。
+  // 2026-09-04：曾经在这里加过线速度/角速度两张独立表，用户要求隐藏、
+  // 不再显示——遂删掉（连带上面不再用到的vUav/wUav/vSlam/wSlam/
+  // uavVelStale几个变量、DIAG_TOPICS里专门为线速度订阅的velocity_local
+  // 话题也一并删了，见DIAG_TOPICS上面的说明）。同一次改动里，用户要求
+  // 面板输出UWB带来的yaw角信息——姿态表补上"UWB"这一行，跟位置表已有的
+  // UAV/SLAM/UWB三行对齐；UWB只有yaw有意义（uwb_sim/uwb_dual_tag_fusion
+  // 都把roll/pitch强制置0），这一行Roll/Pitch两列固定显示"--"。
+  // 2026-09-07：hideUavPosition为true时（目前只有仿真卡片传）不渲染
+  // "UAV"这一行——simTelemetryTopHtml()里positionSummaryHtml()已经
+  // 常驻显示同一个mavros/local_position/pose数据，这里再摆一遍是重复
+  // 信息；真机卡片没有等价的常驻摘要，默认(false/未传)保留这一行。
+  // showUwbAB为true时（真机两处调用点传true）额外渲染UWB_A/UWB_B两行
+  // 双标签原始坐标——仿真没有对应数据源，默认(false/未传)不渲染。
+  // 2026-09-08：用户要求真机模式下把位置表拆成"局部位置"（UAV/SLAM，
+  // 两者都是从某个起飞/初始化时刻开始累积、会漂移的相对坐标系）和
+  // "全局位置"（UWB/UWB_A/UWB_B，UWB基站锚定的绝对坐标系，不会随时间
+  // 累积误差）两张表、颜色区分——这个拆分只在showUwbAB为true（真机）
+  // 时生效，仿真侧UWB是gt/uwb_sim伪造出来的绝对坐标，没有UWB_A/B这种
+  // "多个真实来源"的区分需求，继续用原来合并的单表布局，不强行拆分。
+  const positionTableHtml = showUwbAB ? `
+    <table class="telemetryTable telemetryTable-highlight">
+      <thead><tr><th>局部位置 (m)</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+      <tbody>
+        ${hideUavPosition ? "" : `<tr class="${uavPoseStale} row-highlight-uav"><td class="rowLabel">UAV</td><td>${pUav ? fmt(pUav.x) : "--"}</td><td>${pUav ? fmt(pUav.y) : "--"}</td><td>${pUav ? fmt(pUav.z) : "--"}</td></tr>`}
+        <tr class="${slamStale}"><td class="rowLabel">SLAM</td><td>${p ? fmt(p.x) : "--"}</td><td>${p ? fmt(p.y) : "--"}</td><td>${p ? fmt(p.z) : "--"}</td></tr>
+      </tbody>
+    </table>
+    <table class="telemetryTable telemetryTable-highlight-global" style="margin-top:4px;">
+      <thead><tr><th>全局位置 (m)</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+      <tbody>
+        <tr class="${uwbStale}"><td class="rowLabel">UWB</td><td>${u ? fmt(u.x) : "--"}</td><td>${u ? fmt(u.y) : "--"}</td><td>${u ? fmt(u.z) : "--"}</td></tr>
+        <tr class="${uwbAStale} row-highlight-global-light"><td class="rowLabel">UWB_A</td><td>${uA ? fmt(uA.x) : "--"}</td><td>${uA ? fmt(uA.y) : "--"}</td><td>${uA ? fmt(uA.z) : "--"}</td></tr>
+        <tr class="${uwbBStale} row-highlight-global-light"><td class="rowLabel">UWB_B</td><td>${uB ? fmt(uB.x) : "--"}</td><td>${uB ? fmt(uB.y) : "--"}</td><td>${uB ? fmt(uB.z) : "--"}</td></tr>
+      </tbody>
+    </table>` : `
+    <table class="telemetryTable telemetryTable-highlight">
+      <thead><tr><th>位置 (m)</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+      <tbody>
+        ${hideUavPosition ? "" : `<tr class="${uavPoseStale} row-highlight-uav"><td class="rowLabel">UAV</td><td>${pUav ? fmt(pUav.x) : "--"}</td><td>${pUav ? fmt(pUav.y) : "--"}</td><td>${pUav ? fmt(pUav.z) : "--"}</td></tr>`}
+        <tr class="${slamStale}"><td class="rowLabel">SLAM</td><td>${p ? fmt(p.x) : "--"}</td><td>${p ? fmt(p.y) : "--"}</td><td>${p ? fmt(p.z) : "--"}</td></tr>
+        <tr class="${uwbStale}"><td class="rowLabel">UWB</td><td>${u ? fmt(u.x) : "--"}</td><td>${u ? fmt(u.y) : "--"}</td><td>${u ? fmt(u.z) : "--"}</td></tr>
+      </tbody>
+    </table>`;
+  return `
+    ${positionTableHtml}
+    <table class="telemetryTable telemetryTable-highlight" style="margin-top:4px;">
+      <thead><tr><th>姿态 (deg)</th><th>Roll</th><th>Pitch</th><th>Yaw</th></tr></thead>
+      <tbody>
+        <tr class="${imuStale} row-highlight-uav"><td class="rowLabel">UAV</td><td>${rpyImu ? rpyImu[0].toFixed(1) : "--"}</td><td>${rpyImu ? rpyImu[1].toFixed(1) : "--"}</td><td>${rpyImu ? rpyImu[2].toFixed(1) : "--"}</td></tr>
+        <tr class="${slamStale}"><td class="rowLabel">SLAM</td><td>${rpy ? rpy[0].toFixed(1) : "--"}</td><td>${rpy ? rpy[1].toFixed(1) : "--"}</td><td>${rpy ? rpy[2].toFixed(1) : "--"}</td></tr>
+        <tr class="${uwbStale} row-highlight-global"><td class="rowLabel">UWB</td><td>--</td><td>--</td><td>${uwbYawDeg != null ? uwbYawDeg.toFixed(1) : "--"}</td></tr>
+      </tbody>
+    </table>`;
+}
+
+function thrustCalibHtml(ns) {
+  const st = fleet[ns];
+  const attitudeTarget = st.fields["mavros/setpoint_raw/target_attitude"];
+  // 2026-08-28改名"目标油门"：这个值是mavros/setpoint_raw/target_attitude.thrust，
+  // 板外控制器(px4ctrl)算出来发给飞控的目标推力（disarm/MANUAL_CTRL状态下会
+  // 退化成配置的悬停推力前馈值VEHICLE_HOVER_THRUST，跟电机是否真的在转无关），
+  // 不是电机实际输出反馈——原来叫"推力/油门"容易让人以为是电机实测值。
+  const thrustText = attitudeTarget ? `${(attitudeTarget.thrust * 100).toFixed(1)}%` : "--";
+  // θ*空间对齐——跟status_monitor.py的_format_calibration_table()同一套
+  // 判定：yaw_sample_count这个话题在攒够样本前从来不会发布过一次
+  // （origin_setter_node自己的设计如此），null表示"还没攒够"，不是"掉线"。
+  const yawEstMsg = st.fields["origin_setter/yaw_estimate"];
+  const yawCountMsg = st.fields["origin_setter/yaw_sample_count"];
+  const theta = yawEstMsg ? `${((yawEstMsg.data * 180) / Math.PI).toFixed(1)}°` : "--";
+  const calibStatus = yawCountMsg == null
+    ? `<span style="color:${HEALTH_COLOR.wait}">未标定(样本不足)</span>`
+    : `<span style="color:${HEALTH_COLOR.ok}">已标定(${yawCountMsg.data}段)</span>`;
+  const thrustStale = staleClassFor(st, "mavros/setpoint_raw/target_attitude");
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr><th>目标油门</th><th>θ*估计</th><th>标定状态</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="${thrustStale}">${thrustText}</td>
+          <td>${theta}</td>
+          <td>${calibStatus}</td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
+function healthFieldsHtml(ns) {
+  const st = fleet[ns];
+  // 2026-08-25：这几项原来是fieldGrid的"标签: 值"一行行摆，用户反馈要
+  // 跟位置/姿态那两张表统一成表格形式，不要一种数据两种展示方式。点云
+  // 频率/规划器频率/板外控制器三列已删——点云原始消息太大，光为了算个
+  // Hz数字走rosbridge拉一份不划算；后两项在真机上(env取不到)永远显示
+  // "?"，没有监控意义，见DIAG_TOPICS/computeHealth()上面的说明。新增
+  // 电池电压/电流——真机飞行最直接关系到安全的指标，电压低于
+  // BATTERY_LOW_VOLTAGE(跟px4ctrl自己的low_voltage阈值一致)标红。
+  // 2026-08-26：SLAM频率这一列搬去独立的freqFieldsHtml()了，用户要求
+  // "频率专门用一个表格显示"，这张表只保留非频率类的健康状态。
+  const battery = st.fields["mavros/battery"];
+  const battStale = staleClassFor(st, "mavros/battery");
+  const voltage = battery ? battery.voltage : null;
+  const voltageColor = voltage == null ? HEALTH_COLOR.unknown : voltage < BATTERY_LOW_VOLTAGE ? HEALTH_COLOR.fail : HEALTH_COLOR.ok;
+  const voltageText = voltage == null ? "--" : `${voltage.toFixed(2)}V`;
+  const currentText = battery && battery.current != null ? `${battery.current.toFixed(2)}A` : "--";
+  // 2026-08-25新增：故障保护/飞控状态——mavros/state本来就在订阅
+  // (connSummaryHtml已经用它取connected/armed/mode)，这里额外取
+  // system_status这个字段，不需要新订阅话题。
+  const mavState = st.fields["mavros/state"];
+  const sysStatus = mavState ? mavState.system_status : null;
+  const sysStatusText = sysStatus == null ? "--" : (MAV_STATE_LABEL[sysStatus] || `未知(${sysStatus})`);
+  const sysStatusColor = sysStatus == null ? HEALTH_COLOR.unknown : (MAV_STATE_COLOR[sysStatus] || HEALTH_COLOR.unknown);
+  const linkStale = staleClassFor(st, "mavros/state");
+  // 2026-09-07：用户要求删掉"MAVROS链路"这一列——connSummaryHtml()常驻
+  // 显示的"连接/模式"本来就是同一个mavros/state.connected字段，这里再
+  // 摆一遍是重复信息，删掉后这张表只保留电池电压/电流/故障保护三列
+  // （这三项不跟别的表重复，继续保留）。
+  // 2026-09-08新增：EKF2是否接受vision_pose融合——见上面STATUS_TOPICS
+  // 里mavros/vision_pose/pose_cov的注册注释(第一版用mavros/estimator_
+  // status的const_pos_mode_status_flag，实测证明这个bit会被"载具静止"
+  // 污染、跟是否融合vision无关，已改用这个更可靠的判据)。直接算
+  // vision_pose消息自带时间戳相对当前时刻的延迟，超过
+  // VISION_POSE_DELAY_FAIL_S判定"大概率被拒绝"。这次point_lio真机
+  // 排查(lidar_buffer积压导致odom时间戳滞后152秒、EKF2静默拒绝融合)
+  // 吃过没有这个可见性的亏，之前只能靠SSH手动订阅UAV/SLAM两个话题
+  // 对比数值/算时间戳差值才能判断。
+  const visionPose = st.fields["mavros/vision_pose/pose_cov"];
+  const visionPoseStale = staleClassFor(st, "mavros/vision_pose/pose_cov");
+  // 2026-09-08修正：原来用本机(GCS所在开发机)的Date.now()跟真机消息
+  // 时间戳相减，用户实测显示"4秒多"——SSH查了两台机器的系统时钟，
+  // 真机比本机快约5.35秒，量级完全对上，这是跨机器时钟偏差污染了
+  // 结果，不是真实处理延迟（之前所有验证都是SSH进真机内部跑脚本，
+  // 两边用的是真机自己同一个时钟，没暴露这个问题）。改成用真机自己
+  // 另一个话题(mavros/state，mavros收到FCU心跳几乎立即打时间戳
+  // 发布，延迟可忽略)的时间戳代替Date.now()——两者都是真机自己的
+  // 系统时钟打的，差值只反映vision_pose相对"真机当前时刻"的滞后，
+  // 不受GCS开发机时钟偏差影响。
+  // （mavState在上面第3786行已经声明过，这里不用重新声明——2026-09-08
+  // 加这段EKF2接受判据时手滑重复声明了同一个变量，导致
+  // `Identifier 'mavState' has already been declared`这个SyntaxError，
+  // 整个<script>解析失败，页面上所有按钮全部绑定不上事件、点了没反应，
+  // 仿真/真机模式按钮自然也进不去——不是这次改动本身的逻辑错，是重复
+  // 声明这个笔误，直接删掉这行重复声明即可，下面继续用上面已经算好的
+  // mavState。）
+  let ekf2Delay = null;
+  if (visionPose && visionPose.header && visionPose.header.stamp
+      && mavState && mavState.header && mavState.header.stamp) {
+    const visionSec = visionPose.header.stamp.sec + visionPose.header.stamp.nanosec * 1e-9;
+    const nowSec = mavState.header.stamp.sec + mavState.header.stamp.nanosec * 1e-9;
+    ekf2Delay = nowSec - visionSec;
+  }
+  const ekf2Accepted = ekf2Delay == null ? null : ekf2Delay < VISION_POSE_DELAY_FAIL_S;
+  const ekf2AcceptText = ekf2Delay == null ? "--" : `${ekf2Accepted ? "是" : "否"} (${ekf2Delay.toFixed(2)}s)`;
+  const ekf2AcceptColor = ekf2Accepted == null ? HEALTH_COLOR.unknown : ekf2Accepted ? HEALTH_COLOR.ok : HEALTH_COLOR.fail;
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr>
+        <th>电池电压</th><th>电池电流</th><th>故障保护</th><th>EKF2接受</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="${battStale}"><span style="color:${voltageColor}">${voltageText}</span></td>
+          <td class="${battStale}">${currentText}</td>
+          <td class="${linkStale}"><span style="color:${sysStatusColor}">${sysStatusText}</span></td>
+          <td class="${visionPoseStale}"><span style="color:${ekf2AcceptColor}">${ekf2AcceptText}</span></td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
+// 2026-08-26新增：独立的"发布频率"表——用户要求把频率类指标从健康状态表
+// 里拆出来单独放一张表，SLAM/UWB/飞控IMU/高度计四项。跟healthFieldsHtml()
+// 共用同一套computeHealth()状态和HEALTH_COLOR配色（掉线/启动中同样变色），
+// 只是这张表只关心"频率"这一个维度，不跟MAVROS链路/电池这些非频率指标
+// 混在一张表里。
+function freqFieldsHtml(ns) {
+  const h = computeHealth(ns);
+  const cell = (key) => `<span style="color:${HEALTH_COLOR[h[key]]}">${healthText(h[key], key, ns)}</span>`;
+  // SLAM频率单独处理——"收到"(healthText已有的、走rosbridge实际收到消息
+  // 算出来的)之外再拼一个"真实"（容器内原生ros2 topic hz查到的DLIO真实
+  // 发布速率，见refreshRealSlamHz()注释：nav_msgs/Odometry带协方差矩阵，
+  // rosbridge单线程转发跟不上会丢消息，"收到"因此常年低于"真实"，不代表
+  // SLAM本身变慢）；只在有Hz数字可拼的状态(ok/fail)才拼。
+  const slamState = h.slam;
+  const slamBase = healthText(slamState, "slam", ns);
+  const slamCell = (slamState === "ok" || slamState === "fail")
+    ? `${slamBase} / ${realSlamHz[ns] != null ? realSlamHz[ns].toFixed(1) : "--"}Hz`
+    : slamBase;
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr>
+        <th title="左边是网页通过rosbridge实际收到消息的速率，右边是容器内原生ros2 topic hz查到的DLIO真实发布速率，每隔20秒才刷新一次">SLAM频率</th>
+        <th>UWB频率</th><th>飞控IMU频率</th><th title="mavros/hrlv_ez4_pub——真机装的测距仪(rangefinder)，不是PX4气压计估计的高度">高度计频率</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><span style="color:${HEALTH_COLOR[slamState]}">${slamCell}</span></td>
+          <td>${cell("uwb")}</td>
+          <td>${cell("imu")}</td>
+          <td>${cell("alt")}</td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
+// 2026-09-04新增：ms转"HH:MM:SS"，ms为null/undefined时返回"--"（还没开始
+// 计时，比如飞行栈没在跑/当前在地面）。没做超过24小时的进位处理——真机
+// 飞行栈/单次飞行连续跑一整天不太现实，HH这一段直接允许超过23也不折算
+// 成天数，不是bug。
+function formatDurationHms(ms) {
+  if (ms == null) return "--";
+  const totalSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  const hh = Math.floor(totalSec / 3600);
+  const mm = Math.floor((totalSec % 3600) / 60);
+  const ss = totalSec % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)}`;
+}
+
+// 2026-09-04新增：监控"飞行栈启动时长/起飞后飞行时长/机载计算机温度/
+// 机载计算机CPU占用率"四项，放频率表下面，只在真机卡片出现（见
+// hwTelemetryBlockHtml()调用处）。起飞后飞行时长来自fleet[ns].airborneSinceMs
+// （本地算的，见makeStatusHandler()里mavros/extended_state那段说明，这个
+// 是纯前端能拿到准确边界的，不需要真机侧配合）。另外三项数据源都来自
+// control_server.py的UDP心跳(hwFleetDiscover.drones[ns])：
+// - 飞行栈启动时长：flight_started_at字段(docker inspect的
+//   State.StartedAt，ISO8601字符串)，比最早那版GCS本地近似计时准确得多
+//   （那版本刷新网页就会重新计时，已废弃删掉）。
+// - 机载计算机温度：cpu_temp_c字段(Jetson tj-thermal热区温度)。
+// - 机载计算机CPU占用率：cpu_usage_pct字段。这一列原计划放"飞控温度"，
+//   订阅mavros/imu/temperature_imu话题——SSH实测这个话题连续6秒的70多条
+//   消息数值一模一样(15.0)，没有真实传感器该有的量化噪声，判定是这颗IMU
+//   驱动/固件写死的占位值、不可信（见DEBUG_JOURNAL同日记录），用户要求
+//   换成这一项，不再订阅那个话题。
+// 这三个字段只有跑了2026-09-04这次更新的control_server.py才会有——旧版本
+// 心跳没有这几个key，disc.xxx会是undefined，下面用==null兜底成"--"，不会
+// 报错，也不需要前端判断"这架飞机的control_server.py是新是旧"。
+function hwTimingHtml(ns) {
+  const disc = hwFleetDiscover.drones[ns];
+  const flightStartedMs = disc && disc.flight_started_at != null ? Date.parse(disc.flight_started_at) : null;
+  const cpuTemp = disc && disc.cpu_temp_c != null ? `${disc.cpu_temp_c.toFixed(1)}°C` : "--";
+  const cpuUsage = disc && disc.cpu_usage_pct != null ? `${disc.cpu_usage_pct.toFixed(1)}%` : "--";
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr>
+        <th>飞行栈启动时长</th><th>起飞后飞行时长</th><th>机载计算机温度</th><th>机载计算机CPU占用率</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td>${formatDurationHms(flightStartedMs != null && Number.isFinite(flightStartedMs) ? flightStartedMs : null)}</td>
+          <td>${formatDurationHms(fleet[ns].airborneSinceMs)}</td>
+          <td>${cpuTemp}</td>
+          <td>${cpuUsage}</td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
+// 2026-08-27新增：遥控器通道5/6/8状态表——这三个通道是px4ctrl的"人工
+// 授权"开关(见makeRcInHandler()/input.cpp那套判定逻辑)，起飞/降落
+// 排查时经常要现场确认这三个开关到底拨没拨到位，之前只在起飞按钮的
+// 反馈文字里临时拼一次(rcGateText())，这次单独做成常驻表格，不用点
+// 起飞才能看到。
+function rcStatusHtml(ns) {
+  const st = fleet[ns];
+  const rc = st.rcState;
+  const rcStale = staleClassFor(st, "mavros/rc/in");
+  const fmtCh = (raw) => raw == null ? "--" : raw.toFixed(2);
+  const onOff = (raw, threshold) => raw == null ? "--" : (raw > threshold ? "开" : "关");
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr>
+        <th title="channels[4]，归一值>0.75算开——px4ctrl的is_hover_mode，决定要不要让px4ctrl接管飞控（总开关）">通道5(悬停)</th>
+        <th title="channels[5]，归一值>0.75算开，且要求通道5已经是开——px4ctrl的is_command_mode，决定要不要听规划器指挥（二级开关）">通道6(指令)</th>
+        <th title="channels[7]，归一值>0.5算高位——px4ctrl的reboot_cmd，只有悬停/指令两个开关都处于关闭状态时拨动这个才会真的触发重启飞控">通道8(重启)</th>
+      </tr></thead>
+      <tbody>
+        <tr class="${rcStale}">
+          <td>${fmtCh(rc.rawMode)} / ${onOff(rc.rawMode, RC_API_MODE_THRESHOLD)}</td>
+          <td>${fmtCh(rc.rawGear)} / ${onOff(rc.rawGear, RC_GEAR_SHIFT_THRESHOLD)}</td>
+          <td>${fmtCh(rc.rawReboot)} / ${onOff(rc.rawReboot, RC_REBOOT_THRESHOLD)}</td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
+// 2026-08-31新增：折叠/展开状态挂在fleet[ns]上，跟hwFleetRow()的
+// configOpen同一套思路——切换后调render()，字符串diff发现内容变了
+// 自然会重建这张卡片的DOM，不需要额外的force标记。
+function toggleSimCardExpand(ns) {
+  fleet[ns].expanded = !fleet[ns].expanded;
+  render();
+}
+
+// 2026-09-07新增：仿真卡片模拟真机集群卡片"①容器状态"的最简版本——只有
+// 一个flight-stack容器（没有真机那样flight/vision两个独立容器，仿真也
+// 没有Docker层面拆分视觉栈），直接读fleetCtl.sim.status（已经在常驻
+// setInterval里5秒轮询，见refreshSimFleetStatus()，这里不用再单独发
+// 请求）。跟真机不同：仿真三个容器（sim-world+两个flight-stack）是
+// 一体启停的（见start.sh/docker-compose.yml的说明），这里只做只读展示，
+// 不提供单独重启这一个容器的按钮——要重启请去"⚙ 仿真工具"面板。
+function simContainerBadgeHtml(ns) {
+  const name = `docker_sim-flight-stack-${ns.toLowerCase()}-1`;
+  const status = fleetCtl.sim.status[name];
+  const up = status === "running";
+  return `<span class="badge ${up ? "up" : "down"}" title="${escAttr(name)}: ${escAttr(status || "未知")}">容器${up ? "运行中" : (status || "未知")}</span>`;
+}
+
+// 跟真机ensureHwFleetStackContract()同一个"展开才查、查一次缓存"节奏——
+// 飞行栈模式在容器没被"仿真工具"面板重建之前不会变，不用跟着遥测一起
+// 高频轮询，只在这张卡片"展开详细数据"时才查一次。
+function ensureSimDroneStackParams(ns) {
+  const st = fleet[ns];
+  // 2026-09-07修复：catch分支原来把stackParams设成null——null是falsy，
+  // 下一次render()再调这个函数时`st.stackParams`这道守卫又会判定成
+  // "还没查过"，请求失败就会立即在下一个render tick(最快时几乎是
+  // 上一次fetch的.finally()同步触发的render()，不受任何轮询间隔限制)
+  // 重新发起，形成"失败->立即重试->还失败->立即重试"的死循环——2026-09-07
+  // 实测踩到过一次：新接口还没随docker restart一起生效时，这个循环几秒内
+  // 打了几十次404，每次都触发render()重建整张卡片，按钮节点被换得太
+  // 频繁，表现就是"按钮都点不动了"（跟2026-08-22"定时器重建吞点击"那次
+  // 是同一类根因，只是这次触发频率是失败重试速度而不是固定轮询间隔，
+  // 快得多、更容易踩上）。改成失败也缓存一个"查过、但失败了"的哨兵对象
+  // （true-y，能通过守卫），不再无限重试——用户想重新查的话，展开/收起
+  // 一次卡片会重新创建fleet[ns]吗？不会，这个哨兵只在整个页面刷新前
+  // 有效，跟hw那边ensureHwFleetStackContract()的"查一次缓存"哲学一致
+  // （hw那边理论上有同一类潜在问题，只是它平时很少失败，没被踩出来，
+  // 这次不顺带改hw那份，只保证这次新加的代码路径本身是安全的）。
+  if (!st || st.stackParams || st.stackParamsLoading) return;
+  st.stackParamsLoading = true;
+  backendFetch(`${BACKEND_URL}/api/fleet/sim/params/${encodeURIComponent(ns)}`)
+    .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+    .then((d) => { st.stackParams = d; })
+    .catch(() => { st.stackParams = { running: false, failed: true, localization_source: null, slam_backend: null, planner: null, controller: null }; })
+    .finally(() => { st.stackParamsLoading = false; render(); });
+}
+
+// 跟真机hwFleetStackSummaryHtml()同一个表格视觉设计（"融合模式/定位器/
+// 规划器/控制器"四列），数据来源换成这架飞机自己容器里查到的实际值，不是
+// UDP心跳。仿真两机的模式是"仿真工具"面板一次性下发给整个机队的同一组
+// 环境变量，理论上两机应该一致——这里仍然按每架飞机各自查、各自展示，
+// 如果哪天两机意外不一致（比如只重建了一个容器），能如实暴露出来，不是
+// 假设两机一定相同。跟真机不同：这里是纯只读展示，没有"应用模式"这个
+// 操作按钮——仿真没有真机control_server.py那种"单独给一架飞机下发新
+// 模式、只改.env"的机制，要改模式只能去"⚙ 仿真工具"面板整体重建两机。
+function simDroneStackSummaryHtml(ns) {
+  const st = fleet[ns];
+  const p = st && st.stackParams;
+  const cell = (v) => v ?? "--";
+  const loadingNote = st && st.stackParamsLoading ? "加载中..." : (p && p.failed ? "查询失败（后端接口不可用？）" : "");
+  return `
+    <table class="telemetryTable" style="margin-top:4px;">
+      <thead><tr><th>定位模式</th><th>定位器</th><th>规划器</th><th>控制器</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>${cell(p && p.localization_source)}</td>
+          <td>${cell(p && p.slam_backend)}</td>
+          <td>${cell(p && p.planner)}</td>
+          <td>${cell(p && p.controller)}</td>
+        </tr>
+      </tbody>
+    </table>
+    ${p && p.running ? "" : `<div class="row"><span class="v" style="color:#9aa4b2;font-size:12px;">${loadingNote || "容器未运行"}</span></div>`}`;
+}
+
+// 2026-09-07新增：卡片顶部常驻的连接/位置摘要——每次rosbridge消息进来
+// 都会变，是"壳"里最容易被高频重建的部分，抽出来给simTelemetryTop_${ns}
+// 这个独立子树用，见renderSimDroneCard()/refreshSimTelemetryOnly()。
+// 2026-09-07：用户要求"定位模式/定位器/规划器/控制器"这张表放在位置
+// 表格上面——挪到这里（连接摘要之后、位置摘要之前），常驻可见（不再
+// 只在"展开详细数据"里才看得到），跟真机card"先看连没连上、再看模式、
+// 再看位置"的信息层级顺序一致。既然常驻可见了，懒加载不再只在展开时
+// 触发，见renderSimDroneCard()/refreshSimTelemetryOnly()两处都无条件调
+// ensureSimDroneStackParams()。
+function simTelemetryTopHtml(ns) {
+  return `${connSummaryHtml(ns)}${simDroneStackSummaryHtml(ns)}${positionSummaryHtml(ns)}`;
+}
+
+// 2026-09-07新增：展开区里的完整诊断表格，同样是高频变化内容，抽出来给
+// simTelemetryDetail_${ns}用。跟真机hwTelemetryBlockHtml()对应，但有
+// 三处故意不搬：hwTimingHtml（Jetson温度/CPU占用，真机专属）、
+// rcStatusHtml（通道5/6/8遥控器开关状态——仿真下px4ctrl_docker_sim.
+// launch.py用no_RC=true启动，压根不读真实RC通道，这张表在仿真卡片上
+// 会一直显示空数据，用户要求删掉，2026-09-07）、healthFieldsHtml
+// （电池电压/电流/故障保护——用户要求删掉，仿真机不需要这张表，
+// 2026-09-07，hw那边的调用点不动，真机电池确实是安全相关的真实指标）；
+// 飞行栈模式表（simDroneStackSummaryHtml）已经挪到常驻可见的
+// simTelemetryTopHtml里，这里不再重复。
+function simTelemetryDetailHtml(ns) {
+  return `
+    ${telemetryFieldsHtml(ns, true)}
+    ${freqFieldsHtml(ns)}
+    ${thrustCalibHtml(ns)}`;
+}
+
+// 2026-09-07新增：跟真机refreshHwFleetTelemetryOnly()同一个模式——只找
+// 已经存在的simTelemetryTop_/simTelemetryDetail_子树重写内容，找不到就
+// 跳过（比如这架飞机的卡片还没建过，或者展开区当前收起着、
+// simTelemetryDetail_本来就不存在），不负责创建新节点、不碰按钮/展开
+// 链接这些结构性内容。每个子树各自跟simTelemetryLastHtml[元素id]比较，
+// 没变化就不碰innerHTML，跟render()/refreshHwFleetTelemetryOnly()同一套
+// 防抖写法。
+function refreshSimTelemetryOnly() {
+  for (const el of document.querySelectorAll('[id^="simTelemetryTop_"]')) {
+    const ns = el.id.slice("simTelemetryTop_".length);
+    if (!fleet[ns]) continue;
+    ensureSimDroneStackParams(ns);
+    const html = simTelemetryTopHtml(ns);
+    if (html !== simTelemetryLastHtml[el.id]) { el.innerHTML = html; simTelemetryLastHtml[el.id] = html; }
+  }
+  for (const el of document.querySelectorAll('[id^="simTelemetryDetail_"]')) {
+    const ns = el.id.slice("simTelemetryDetail_".length);
+    if (!fleet[ns]) continue;
+    const html = simTelemetryDetailHtml(ns);
+    if (html !== simTelemetryLastHtml[el.id]) { el.innerHTML = html; simTelemetryLastHtml[el.id] = html; }
+  }
+}
+
+function renderSimDroneCard(ns) {
+  const st = fleet[ns];
+  // 2026-08-22改版：状态只靠按钮自身颜色表示，不再额外占一行文字——
+  // 上次操作的结果消息(msg)没丢，放进title，鼠标悬停能看到，只是不再
+  // 常驻显示。
+  const btn = (action) => {
+    const s = st.actionStates[action] || {};
+    return { cls: s.cls || "", title: s.msg ? ` title="${escAttr(s.msg)}"` : "" };
+  };
+  const lock = btn("lock"), takeoff = btn("takeoff"), hover = btn("hover"), land = btn("land");
+  // 2026-08-31改版：用户反馈"两架飞机的卡片摞起来太长"（笔记本屏幕，
+  // 比赛现场也是笔记本，两栏并排宽度不够、tab切换又会看不到另一架飞机
+  // 的状态，比赛场景下同时监控两架飞机的安全相关信息比省空间更重要）
+  // ——改成默认折叠成紧凑摘要：连接/模式/解锁(connSummaryHtml，本来就
+  // 只有1行) + UAV位置摘要(positionSummaryHtml，新增，只取1行不带SLAM/
+  // UWB对比) + 4个操作按钮，常驻可见、高度固定，不会因为哪张诊断表格
+  // 内容变化而跳动。完整的位置对比/姿态/速度/健康/频率/RC/目标油门这些
+  // 诊断细节挪进展开区，默认收起，点"展开详细数据"才显示——跟真机卡片
+  // hwFleetRow()的"本地配置"展开区是同一套视觉语言(.toggleLink/.panel)。
+  // 2026-09-07刷新模式改版：连接/位置摘要、展开区详细数据这两块高频变化
+  // 内容分别包进simTelemetryTop_${ns}/simTelemetryDetail_${ns}两个独立
+  // 子树，交给refreshSimTelemetryOnly()按跟真机一致的200ms/5Hz节奏单独
+  // 刷新，这个函数本身（连同按钮/展开收起链接这些结构性内容）只由
+  // render()那条较慢的定时器或者用户操作后的直接调用来重建，不会被高频
+  // 变化的遥测数据拖着一起重建，参见2026-09-07"按钮都点不动了"事故记录。
+  const expanded = !!st.expanded;
+  // 飞行栈模式表现在挪进了常驻可见的simTelemetryTopHtml，不再只在展开时
+  // 才查，无条件调用（内部有stackParams/stackParamsLoading两道守卫，
+  // 已经查过/正在查都会直接return，不会重复发请求）。
+  ensureSimDroneStackParams(ns);
+  return `
+    <div class="droneCard">
+      <b class="cardTitle">${ns}</b><span class="cardSub">仿真</span> ${simContainerBadgeHtml(ns)}
+      <div id="simTelemetryTop_${ns}">${simTelemetryTopHtml(ns)}</div>
+      <div class="actions">
+        <button class="${lock.cls}"${lock.title} ${st.actionBusy ? "disabled" : ""} onclick="doLockOrigin('${ns}')">锁定起飞点</button>
+        <button class="${takeoff.cls}"${takeoff.title} ${st.actionBusy ? "disabled" : ""} onclick="doTakeoff('${ns}')">起飞</button>
+        <button class="${hover.cls}"${hover.title} ${st.actionBusy ? "disabled" : ""} onclick="doHover('${ns}')">悬停</button>
+        <button class="danger ${land.cls}"${land.title} ${st.actionBusy ? "disabled" : ""} onclick="doLand('${ns}')">降落</button>
+      </div>
+      <div class="outputBox ${st.msgCls}">${st.msg ? escHtml(st.msg) : "（还没有操作记录——点上面任意按钮后，结果会显示在这里）"}</div>
+      <span class="toggleLink ${expanded ? "active" : ""}" onclick="toggleSimCardExpand('${ns}')">${expanded ? "▲ 收起详细数据" : "▼ 展开详细数据"}</span>
+      ${expanded ? `
+      <div class="panel">
+        <div id="simTelemetryDetail_${ns}">${simTelemetryDetailHtml(ns)}</div>
+      </div>` : ""}
+    </div>`;
+}
+
+function render(force) {
+  // 2026-08-25：卡片改造后不再有"调参面板"挂在fleet[ns]上（挪到真机卡片
+  // 的hwFleetRow(ns)了，见toggleParamsPanel()），原来这里"调参面板开着
+  // 就跳过被动重建"这个gate的对象没了，删掉——sim卡片没有任何输入框，
+  // 不存在"重建冲掉正在打字的内容"这个问题，不需要force gate。
+  //
+  // names只取nsSource()判定为"仿真"的命名空间——同一个命名空间如果同时
+  // 被真机UDP通道注册过，也只会在这里被认成仿真（这台机器本地容器真的
+  // 在跑），不会跟真机卡片重复计入，见nsSource()的判定逻辑。
+  const names = Object.keys(fleet).filter((ns) => nsSource(ns) === "sim").sort();
+  emptyEl.style.display = names.length ? "none" : "block";
+  // 2026-08-22修复"锁定起飞点/起飞按钮要点两三下才起作用"的同款防抖：
+  // 先算出新HTML字符串，跟上一次实际写进DOM的内容比较，没变就不碰
+  // innerHTML——定时器每500ms无条件重建会有一次点击撞上"点击过程中
+  // 恰好重建"从而按钮节点被换掉、click事件丢失的概率，只有内容真的
+  // 变化时才重建能避免，见2026-08-22那次记录的完整分析。
+  const cardsHtml = names.map(renderSimDroneCard).join("");
+  if (cardsHtml !== lastSimCardsHtml) {
+    simCardsEl.innerHTML = cardsHtml;
+    lastSimCardsHtml = cardsHtml;
+  }
+  renderUwbBanner();
+  refreshMapOccSelect();
+  drawMap(); // 内部自己判断面板有没有展开，没展开直接跳过，不用在这里再判断一次
+}
+
+// 2026-08-30移除了这里原来无条件立即调用的一次discover()——改成只在
+// ros.on("connection")首次触发（见ros实例初始化那段），保证websocket真的
+// 握手完成之后才第一次调用/rosapi/topics，避免过早调用打空炮。周期轮询
+// 仍然保留，作为兜底继续存在。
+setInterval(discover, DISCOVER_MS);
+setInterval(render, 250); // 2026-08-29用户要求再快一倍，2Hz->4Hz——sim卡片render()本来就有
+                          // lastSimCardsHtml这道"内容没变不碰DOM"防抖(见render()内部)，
+                          // 加速对2026-08-22那次"定时器重建吞点击"没有新增风险，250ms仍然
+                          // 远大于一次点击的耗时(几十~两百毫秒)。光靠消息触发render不够——
+                          // 没消息进来时也要让stale变灰持续刷新。
+setInterval(refreshResourceStats, 3000); // 只在gcsMode==='sim'时才真的发请求，见refreshResourceStats()内部判断
+setInterval(refreshRealSlamHz, 20000); // 后端现查一次要等几秒，不能太频繁，20秒一次够用
+refreshRealSlamHz(); // 页面加载后先主动查一次，不用干等20秒
+
+// 2026-08-25新增：仿真容器状态+真机UDP发现表现在需要常驻轮询，不再只在
+// 对应面板展开时才查——nsSource()判定"这个命名空间是仿真还是真机"随时
+// 都要用到这两份数据（不只是面板打开时），仿真/真机两个卡片列表能不能
+// 正确分类、地图"发给哪架飞机"下拉框能不能正确过滤都依赖它们。
+refreshSimFleetStatus();
+setInterval(refreshSimFleetStatus, 5000);
+refreshHwFleetDiscover(true);
+setInterval(() => refreshHwFleetDiscover(false), 1500); // 2026-08-29用户要求再快一倍(3秒->1.5秒)；
+                                                          // 配套给renderHwFleetDiscoverPanel()新增了
+                                                          // lastHwFleetPanelHtml防抖，见该函数说明。这个
+                                                          // 1.5秒轮询做两件事：①打HTTP请求问后端"发现了
+                                                          // 哪些飞机/配置"，②顺带repaint整个面板。下面
+                                                          // 2026-09-04这条新定时器只做②，不再跟着①的节奏走。
+// 2026-09-04新增：用户要求真机卡片的位置/姿态/频率面板刷到5Hz——这几项
+// 数据来自mavros/dlio/uwb等话题的rosbridge实时订阅回调（见
+// makeStatusHandler()里`fleet[ns].fields[suffix] = msg`那行），消息一到就已经写进内存了，
+// 从来不需要等上面那个1.5秒的HTTP发现轮询；卡在1.5秒的其实是"多久重新
+// 拼一次HTML、多久刷一次屏"这一步，而不是数据本身的新鲜度。如果把上面
+// refreshHwFleetDiscover的1.5秒也整个提到200ms，等于每秒对后端多打
+// 5次"发现飞机"请求，飞机不会秒级上下线，纯属浪费——所以拆成独立的定时器。
+// ⚠️2026-09-04这条最初上线时调用的是renderHwFleetDiscoverPanel(false)，
+// 想法是"反正它自己有diff防抖，不会真的撞上点击"——用户实测反馈"控制
+// 面板按钮反应很慢/没反应"，才发现这个想法是错的：diff防抖只挡"内容没变
+// 就不碰DOM"，但位置/姿态这些数字每200ms几乎必然在变，防抖形同虚设，
+// 等于把③控制面板那一整排按钮也跟着每200ms摧毁重建一次，点击的
+// mousedown~mouseup窗口很容易正好撞上重建导致事件丢失。改成只调用
+// refreshHwFleetTelemetryOnly()——只重写hwTelemetryBlockHtml()对应的
+// <div id="hwTelemetry_${ns}">这一个只读子树，不含任何按钮/输入框，
+// ③控制面板的按钮节点完全不会被这个5Hz定时器碰到，只由
+// renderHwFleetDiscoverPanel()的1.5秒节奏重建，回到提速之前的行为。
+setInterval(refreshHwFleetTelemetryOnly, 200);
+// 2026-09-07新增：仿真卡片的高频遥测子树，跟上面真机那条同一个节奏
+// （200ms/5Hz），见simTelemetryTopHtml()/simTelemetryDetailHtml()/
+// refreshSimTelemetryOnly()的说明。render()那条250ms定时器还继续负责
+// 卡片壳（按钮/展开收起链接/容器徽章）本身——两条定时器分工跟真机的
+// renderHwFleetDiscoverPanel()(1.5秒，壳)+refreshHwFleetTelemetryOnly()
+// (200ms，遥测子树)是同一个架构，只是壳这一层的定时器间隔沿用仿真原有
+// 的250ms没有改成1.5秒——壳的内容现在只有按钮/链接/容器徽章，变化频率
+// 天然很低，250ms这道diff防抖基本总是no-op，没有必要为了凑数字一致
+// 刻意调慢，调慢反而会让按钮状态变化(比如操作完成后变绿/变红)的反馈
+// 延迟增加。
+setInterval(refreshSimTelemetryOnly, 200);
+// 页面加载后先按localStorage记的gcsMode把两个pane的显示状态、按钮高亮
+// 同步一次，避免首屏空白；随后立刻查一次GCS容器的真实网络模式来纠正——
+// localStorage只是这台浏览器/这个人的历史点击记录，不代表容器真实状态
+// （比赛现场可能换了台电脑打开网页、或者页面被刷新过，甚至容器是被
+// 别人/别的脚本切换过的），不能是唯一依据。
+setGcsMode(gcsMode);
+backendFetch(`${BACKEND_URL}/api/gcs-network/mode`)
+  .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
+  .then((d) => {
+    if (d.active_mode === "sim" || d.active_mode === "real") {
+      if (d.active_mode !== gcsMode) setGcsMode(d.active_mode); // 用容器真实状态纠正localStorage的猜测
+      const label = d.active_mode === "sim" ? "仿真" : "真机";
+      setModeSwitchStatus(`当前GCS容器实际运行在${label}模式（已按容器配置确认）`, "ok");
+    } else {
+      setModeSwitchStatus("GCS当前网络配置还是占位符/未选择状态——请点击上方按钮明确选择仿真或真机模式", "err");
+    }
+  })
+  .catch((e) => setModeSwitchStatus(`查询GCS当前网络模式失败(${e.message || e})，下方显示的是浏览器本地记忆，可能与容器实际状态不一致`, "err"));
+
+// #mapCanvas是静态HTML里本来就有的元素(不像卡片/表格那样靠innerHTML动态
+// 重建)，脚本执行到这里时它已经在DOM里，只需要绑定一次。wheel事件用
+// addEventListener+{passive:false}而不是内联onwheel属性——要在监听器里
+// 调用preventDefault()阻止页面跟着滚轮一起滚动，addEventListener这条路
+// 明确可控passive选项，比内联属性更可靠。
+const mapCanvasEl = document.getElementById("mapCanvas");
+if (mapCanvasEl) {
+  mapCanvasEl.addEventListener("wheel", onMapWheel, { passive: false });
+  // mousedown绑canvas（只有真的按在画布上才算开始拖动/点击），
+  // mousemove/mouseup绑window（拖动中鼠标很容易滑出canvas边界，只绑
+  // canvas会导致"松手在canvas外"时收不到mouseup、拖动状态卡死）。
+  mapCanvasEl.addEventListener("mousedown", onMapMouseDown);
+  window.addEventListener("mousemove", onMapMouseMove);
+  window.addEventListener("mouseup", onMapMouseUp);
+}
+
+// 俯视图现在是右侧常驻可见的标签页内容，没有"点链接展开"这个触发时机
+// 了，页面加载时就主动populate一次下拉框+画一次图，不然要等到第一次
+// render()/500ms定时器才会有画面，白屏一下不好看。
+// 2026-08-22修复：这里漏了renderMapRoutePanel()——分栏改造之前，"规划
+// 航线"表单是靠旧版toggleMapPanel()在"打开面板"那一刻触发渲染的；分栏
+// 后俯视图常驻显示、没有"打开"这个时机了，改成页面加载时主动populate，
+// 但只带了refreshMapOccSelect()/drawMap()两个，忘了renderMapRoutePanel()
+// ——结果#mapRoutePanel这个div从页面加载起就一直是空的，"开始规划航线"
+// 按钮根本没被画出来过，用户点不到、也就没法进入航线模式，表现是
+// "选取和发送航点序列这个功能不见了"。renderMapQueueStatus()没有这个
+// 问题，是因为它已经在drawMap()内部调用，drawMap()本身在init时会跑
+// 一次；renderMapRoutePanel()没有类似的"挂靠"关系，必须单独在这里补上。
+refreshMapOccSelect();
+renderMapRoutePanel();
+drawMap();
+initCamTabs();
+
+// ---- 左右分栏宽度可拖拽调整（2026-08-22新增）----
+// 用localStorage记住上次拖到的宽度——不用每次刷新页面都重新拖一遍。
+// 拖拽逻辑跟俯视图画布本身"拖动平移"是同一套
+// mousedown(绑在分隔条上)+mousemove/mouseup(绑在window上，防止拖动
+// 途中鼠标滑出分隔条窄条范围导致收不到mouseup)的模式，不是另起一套。
+const LEFT_PANE_MIN_PX = 320;
+const LEFT_PANE_MAX_RATIO = 0.7; // 最多占splitContainer宽度的70%，给右侧留下可用空间
+const leftPaneEl = document.getElementById("leftPane");
+const dragHandleEl = document.getElementById("dragHandle");
+const splitContainerEl = document.getElementById("splitContainer");
+
+function applyLeftPaneWidth(px) {
+  leftPaneEl.style.width = `${px}px`;
+}
+
+(function initLeftPaneWidth() {
+  const saved = parseFloat(localStorage.getItem("gcsLeftPaneWidthPx"));
+  applyLeftPaneWidth(isFinite(saved) && saved > 0 ? saved : 420);
+})();
+
+let paneDrag = null; // {startClientX, startWidth} | null
+if (dragHandleEl) {
+  dragHandleEl.addEventListener("mousedown", (evt) => {
+    paneDrag = { startClientX: evt.clientX, startWidth: leftPaneEl.getBoundingClientRect().width };
+    dragHandleEl.classList.add("dragging");
+    document.body.style.userSelect = "none"; // 拖动过程中禁止选中文字，不然拖着拖着会顺带选中大段页面文字
+  });
+  window.addEventListener("mousemove", (evt) => {
+    if (!paneDrag) return;
+    const maxPx = splitContainerEl.getBoundingClientRect().width * LEFT_PANE_MAX_RATIO;
+    const px = Math.max(LEFT_PANE_MIN_PX, Math.min(maxPx, paneDrag.startWidth + (evt.clientX - paneDrag.startClientX)));
+    applyLeftPaneWidth(px);
+  });
+  window.addEventListener("mouseup", () => {
+    if (!paneDrag) return;
+    paneDrag = null;
+    dragHandleEl.classList.remove("dragging");
+    document.body.style.userSelect = "";
+    localStorage.setItem("gcsLeftPaneWidthPx", String(leftPaneEl.getBoundingClientRect().width));
+  });
+}
+</script>
+</body>
+</html>

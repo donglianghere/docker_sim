@@ -1,0 +1,7 @@
+{
+  "_说明": "GCS的真机网络参数持久化快照，2026-08-30新增。只存'GCS网络设置'面板里保存过的真机网卡IP/Jetson对端IP，独立于gcs/cyclonedds_gcs.xml这份随时会被'仿真模式'/'真机模式'切换动作覆写的活文件——切到仿真模式绝不会冲掉这份快照。复制成 gcs_network_state.json （去掉这个说明字段）后使用，也可以留空对象{}靠网页'GCS网络设置'面板保存——网页保存按钮会调POST /api/gcs-network写回这份文件，不需要手动编辑JSON。real.interface_address是这台GCS本机真实网卡IP，real.peer_addresses是Jetson的静态IP（逗号分隔多个），留空interface_address表示还没配置过，此时点网页'真机模式'按钮会报错提示先来这里填。",
+  "real": {
+    "interface_address": "",
+    "peer_addresses": ""
+  }
+}

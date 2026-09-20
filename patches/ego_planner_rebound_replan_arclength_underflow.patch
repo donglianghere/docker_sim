@@ -1,0 +1,71 @@
+# docker_sim 2026-09-14 —— reboundReplan size_t 下溢死循环修复
+#
+# 从docker_real（真机部署仓库，同一份ego-planner-swarm源码）移植过来，真机
+# 那边2026-08-31用gdb attach一个无声挂死的ego_planner_node定位到的根因，
+# 详见read_hw.md 2026-08-31。
+#
+# ⚠ 跟docker_real的应用方式不一样：docker_real里planner_manager.cpp当时
+#   已经因为别的原因被直接改在staging/里了（"6个M文件"那批），那边这份
+#   patch只作记录、没接进Dockerfile的apply链。docker_sim这边
+#   planner_manager.cpp没有被直接改过（`git status`干净），走正常的
+#   patches/ + Dockerfile git-apply流程，接进docker/Dockerfile.flight-
+#   stack的ego_planner_*补丁链。已用`git apply -p3 --check`在docker_sim
+#   的staging/ego-planner-swarm源码树上验证过能干净应用。
+#
+# 真机侧验证结果（read_hw.md 2026-08-31）：rebuild+重启后确认镜像里编译
+# 进了这段代码，之前必挂的实测脚本能跑完40~90秒全程，节点从"CPU 100%+
+# 完全静默"变成"CPU 86.7%+持续正常打日志"——但新守卫本身在那轮测试里
+# 触发次数为0，验证靠的是"以前必挂、现在不挂"的行为对比+代码推理，守卫
+# 触发路径本身没有被直接测试覆盖。docker_sim这边同样建议rebuild验证后
+# 找机会实际触发一次（比如故意发一个很接近当前位置的目标点）确认。
+#
+#   应用方式：cd staging/ego-planner-swarm/src/planner && git apply -p3 <本文件>
+#
+--- a/src/planner/plan_manage/src/planner_manager.cpp
++++ b/src/planner/plan_manage/src/planner_manager.cpp
+@@ -186,6 +186,45 @@
+           }
+         }
+ 
++        // docker_sim 2026-08-31：死循环修复。下面那个 while 的边界是
++        //     id <= pseudo_arc_length.size() - 2
++        // size() 是 size_t，**当 size()==1 时 1-2 下溢成 SIZE_MAX**，
++        // `id <= SIZE_MAX` 恒真，循环只能靠 sample_length <= back() 退出；
++        // 而 arc[id]/arc[id+1] 此时越界读垃圾值，比较多半不成立 → id++ 无限
++        // 自增、无限越界读 → 主线程 100% CPU 死循环、不分配内存。
++        // 单线程执行器被这个定时器回调堵死后，该节点所有回调（含 grid_map 的
++        // vis_timer_）全部饿死，表现为"进程还在、ros2 node list 有它、零
++        // ERROR/WARN，但所有话题停发"——最坏的一种无声失效。
++        //
++        // size()==1 怎么来的：上面 pseudo_arc_length 先无条件 push_back(0.0)，
++        // 之后的 for 循环只在 t > t_cur 时才追加。**剩余轨迹时长 < ts 时
++        // for 只跑一轮且 t > t_cur 为假**，size 停在 1；若同时离局部目标很近
++        // （poly_time <= ts，按当前参数即距离 <= ts·max_vel/2 = 0.3m），
++        // 上面那个 poly_time > ts 的补长分支也被跳过，size 就保持 1。
++        // ⇒ 触发场景 = 飞机接近终点。跟已记录的"假性完成""卡在终点附近反复
++        //   重规划"是同一族问题。
++        //
++        // ⚠ 2026-08-31 订正：本注释初稿写过"ts 越大越容易命中，所以降 V_MAX
++        //   放大了这个 bug"——**是错的**。ts = ctrl_pt_dist/max_vel*1.5 = 0.6/V，
++        //   而剩余时长 ≈ 剩余距离 × 1.5/V，条件"剩余时长 < ts"两边的 V 约掉，
++        //   化简为 **剩余距离 < ctrl_pt_dist = 0.4m，与 V_MAX 无关**。
++        //   真正影响触发面的是 ctrl_pt_dist，不是速度。
++        //
++        // 上游作者写了 size()==0 的守卫（上面的 "pseudo_arc_length is empty,
++        // return!"），唯独漏了 size()==1。这里补上，风格与之保持一致。
++        // 实测栈：reboundReplan ← callReboundReplan(ego_replan_fsm.cpp:1032)
++        //         ← planFromCurrentTraj(:919) ← checkCollisionCallback(:1000)
++        // 详见 read_hw.md 2026-08-31。
++        if (pseudo_arc_length.size() < 2)
++        {
++          RCLCPP_ERROR(rclcpp::get_logger("ego_planner"),
++                       "pseudo_arc_length too short (size=%zu, need>=2), return! "
++                       "(remaining traj shorter than ts, and target too close to extend)",
++                       pseudo_arc_length.size());
++          continous_failures_count_++;
++          return false;
++        }
++
+         double sample_length = 0;
+         double cps_dist = pp_.ctrl_pt_dist * 1.5; // cps_dist will be divided by 1.5 in the next
+         size_t id = 0;

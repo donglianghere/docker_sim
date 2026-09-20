@@ -1,0 +1,29 @@
+diff --git a/src/planner/plan_manage/src/ego_replan_fsm.cpp b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+index 78d5eee..ae4ff0a 100755
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -583,6 +583,24 @@ namespace ego_planner
+       {
+         if (t_cur > info->duration_ - 1e-2)
+         {
++          // docker_sim: 原版这里只看"这段轨迹的局部目标是不是全局终点"+
++          // "时间是不是跑完了"，从没检查过实际飞到的位置pos离end_pt_
++          // 还有多远——只要满足前两条，不管真实位置在哪都直接判定"到达"
++          // 切WAIT_TARGET。2026-08-19两机对穿测试实测撞上：swarm
++          // avoidance生效后重规划出的轨迹段被压缩得很短，某一段恰好把
++          // 局部目标设成了终点、时间又跑完了，FSM因此"假性宣布成功"，
++          // 飞机实际还在半路（最多差过2米多），没有任何碰撞风险但也
++          // 没有真的完成任务，详见DEBUG_JOURNAL.md 2026-08-19相关记录。
++          // 补上跟下面REPLAN_TRAJ那个分支同样的距离判断（no_replan_
++          // thresh_是这份代码本来就在用的阈值，不新引入概念）：真的
++          // 到终点了才宣布完成，没到就继续按当前位置重新规划一段飞
++          // 过去，不假装已经完成。
++          if ((end_pt_ - pos).norm() > no_replan_thresh_)
++          {
++            changeFSMExecState(REPLAN_TRAJ, "FSM");
++            goto force_return;
++          }
++
+           have_target_ = false;
+           have_trigger_ = false;
+ 

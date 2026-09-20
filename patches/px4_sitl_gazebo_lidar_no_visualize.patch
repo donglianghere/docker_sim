@@ -1,0 +1,26 @@
+diff --git a/models/lidar/model.sdf b/models/lidar/model.sdf
+index b132300..a393b39 100644
+--- a/models/lidar/model.sdf
++++ b/models/lidar/model.sdf
+@@ -54,7 +54,20 @@
+         </plugin>
+         <always_on>1</always_on>
+         <update_rate>20</update_rate>
+-        <visualize>true</visualize>
++        <!-- contest_mission补丁（2026-09-10）：官方默认true，本项目
++             headless/无GPU环境下mid360那颗雷达之前实测过visualize=true
++             会导致传感器更新出问题（PX4 poll timeout，详见
++             gen_iris_mid360_sdf.py文件头docstring"雷达传感器/插件这两处
++             <visualize>故意都是false"那段——同一类headless环境下
++             visualize相关问题，不是新猜测，是这个项目已经验证过的
++             既有教训）。这颗测距雷达追加对地测距雷达MAVLink
++             DISTANCE_SENSOR数据链路排查时确认：`px4-listener
++             distance_sensor`显示"never published"，而用同一套nested
++             include机制的GPS(`px4-listener vehicle_gps_position`)数据
++             新鲜——排除了nested机制本身的问题，怀疑指向这颗传感器自己
++             的Update()没有正常走完（`ranges not constructed yet (zero
++             sized)`），跟mid360当年的根因同属一类，一并关掉。 -->
++        <visualize>false</visualize>
+       </sensor>
+     </link>
+   </model>

@@ -1,0 +1,12 @@
+{
+  "_说明": "真机集群远程控制(《单机接口描述文件.md》)的每架飞机配置，key是namespace。复制成 hw_fleet_tokens.json （去掉这个说明字段和示例条目）后使用，也可以留空对象{}靠网页面板逐条录入——网页'保存配置'按钮会调POST /api/hw-fleet/targets写回这份文件，不需要手动编辑JSON。文件名里的tokens是2026-08-25删掉X-Control-Token鉴权之前留下的历史命名，内容已经不含任何令牌（地面站和飞机端control_server.py都不再要求鉴权）：control_port是HTTP控制端口(默认8890，跟UDP发现心跳端口8891不是一回事，别填错)，cam0_mode/cam0_mjpeg_port/cam1_mode/cam1_mjpeg_port是网页'保存配置'时一并存的cam0(前视)/cam1(下视)两路摄像头各自的检测模式/MJPEG端口默认值，方便下次打开网页不用重填；planner(ego_planner/mighty)是这架真机实际跑的规划器类型，2026-08-26新增——GCS后端够不到真机上的进程，没法像仿真那样docker exec查PLANNER环境变量，只能手工登记，网页据此决定订阅grid_map/occupancy_inflate还是occupancy_grid来在规划地图上显示障碍物点云；不填(null)的话网页按ego_planner处理（对齐docker-compose.hw.yml里PLANNER默认值——真机首飞组合本来就锁定用这个规划器），只有真机实际跑mighty时才需要显式填'mighty'覆盖这个默认值，见DEBUG_JOURNAL.md续33/续34/续35；网页'删除本地配置'会把这整条记录一起清空，不是分字段删。",
+  "NX01": {
+    "ip": null,
+    "control_port": 8890,
+    "cam0_mode": null,
+    "cam0_mjpeg_port": null,
+    "cam1_mode": null,
+    "cam1_mjpeg_port": null,
+    "planner": null
+  }
+}

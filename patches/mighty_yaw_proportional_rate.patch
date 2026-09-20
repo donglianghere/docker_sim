@@ -1,0 +1,36 @@
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index 84ea7ef..40c08f1 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -1828,9 +1828,29 @@ void MIGHTY::getDesiredYaw(state& next_goal, const state& yaw_look_ahead_goal) {
+ // ----------------------------------------------------------------------------
+ 
+ void MIGHTY::yaw(double diff, state& next_goal) {
++  // Was copysign(1, diff) * par_.w_max -- bang-bang: commanded rate is
++  // always the full +-w_max regardless of how small diff is, only the
++  // *sign* of diff mattered (the saturate() call right above this used to
++  // clamp diff into [-dc*w_max, dc*w_max] and then have its magnitude
++  // thrown away). Every time desired_yaw flip-flopped by a hair (exactly
++  // the near-zero-vector noise the safeAtan2OrHold guard above targets,
++  // but also just ordinary small-scale replanning jitter that isn't near
++  // zero), the commanded rate slammed to full w_max in the new direction
++  // every single dc cycle -- alpha_filter_dyaw only smooths the *rate's*
++  // step response, it can't turn a full-speed direction reversal into a
++  // small one. ego_planner's traj_server.cpp calculate_yaw() never has
++  // this problem because it clamps the yaw *angle* change to
++  // max_yaw_change and otherwise passes the raw (small) diff through
++  // unscaled -- proportional near convergence, capped like today only when
++  // diff itself is large. Same fix here: after saturate() clamps diff's
++  // *magnitude* (not just discards it), diff/par_.dc is the actual
++  // proportional rate implied by that clamped angular step -- identical to
++  // the old bang-bang value when diff is at the clamp boundary (large
++  // diff), but shrinks toward zero as diff does, instead of staying pinned
++  // at w_max.
+   saturate(diff, -par_.dc * par_.w_max, par_.dc * par_.w_max);
+-  dyaw_filtered_ = (1 - par_.alpha_filter_dyaw) * (copysign(1, diff) * par_.w_max) +
+-                   par_.alpha_filter_dyaw * dyaw_filtered_;
++  double raw_dyaw = diff / par_.dc;
++  dyaw_filtered_ = (1 - par_.alpha_filter_dyaw) * raw_dyaw + par_.alpha_filter_dyaw * dyaw_filtered_;
+   next_goal.dyaw = dyaw_filtered_;
+   next_goal.yaw = previous_yaw_ + dyaw_filtered_ * par_.dc;
+   previous_yaw_ = next_goal.yaw;

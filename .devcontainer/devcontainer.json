@@ -1,0 +1,48 @@
+{
+  // 2026大赛任务系统第三部分方案②（进阶可选，跟方案①的运行仿真.sh/.bat共用
+  // 同一个contestant-sdk:latest底层镜像，不冲突）：给本来就用VS Code的选手，
+  // 打开这个文件夹后VS Code会提示"在容器中重新打开"（Reopen in Container），
+  // 点一下之后集成终端/代码补全/调试器全部自动切到contestant-sdk容器环境，
+  // 不需要选手自己敲任何docker命令。
+  //
+  // 前提：contestant-sdk:latest镜像必须已经手动build好（本项目约定docker
+  // build/compose build由用户手动执行，见docker/Dockerfile.contestant-sdk
+  // 顶部的构建命令）。VS Code Dev Containers扩展打开这个文件夹时，如果本机
+  // 找不到这个镜像名，会尝试直接docker pull——本地开发环境下拉不到，需要
+  // 先手动`docker build -f docker/Dockerfile.contestant-sdk -t
+  // contestant-sdk:latest .`（context是这个仓库根目录）。
+  "name": "contestant-sdk",
+  "image": "contestant-sdk:latest",
+
+  // 跟运行仿真.sh里`docker run --network host`保持同一种网络拓扑：
+  // contestant-sdk容器要跟sim-world/flight-stack-nx01/flight-stack-nx02三个
+  // 仿真栈容器共享宿主机网络命名空间，才能通过CycloneDDS(锁lo回环，见
+  // Dockerfile.contestant-sdk里烘进镜像的那份配置)发现/收发仿真栈的ROS2
+  // 话题——不加这一条的话，VS Code默认用bridge网络起容器，跟仿真栈完全是
+  // 两个隔离的网络，`ros2 topic list`只会看到空列表。
+  "runArgs": ["--network=host"],
+
+  // 选手在VS Code里打开的文件夹，原样挂载成容器里的/workspace——跟方案①
+  // `-v "$(pwd)":/workspace`的挂载点保持一致，选手写的`我的任务.py`等文件
+  // 两种方式（脚本双击/VS Code容器内开发）看到的是同一份文件、同一个路径，
+  // 不用区分"我现在是用哪种方式在跑"。
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+
+  // ros:humble-ros-base-jammy这个基础镜像默认就是root用户，不额外建普通
+  // 用户——跟这个项目其它几个镜像（sim-world/flight-stack）的运行身份一致，
+  // 选手容器本来就是"一次性用完就扔"，不需要考虑多用户权限隔离这类问题。
+  "remoteUser": "root",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Python代码补全/调试器——选手写的`我的任务.py`是纯Python。
+        "ms-python.python",
+        // ROS2话题/节点浏览、.msg高亮等，选手调试contest_sdk跟仿真栈的
+        // 交互时能直接在VS Code里看话题，不用切到终端敲`ros2 topic list`。
+        "ms-iot.vscode-ros"
+      ]
+    }
+  }
+}

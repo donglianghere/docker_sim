@@ -1,0 +1,59 @@
+diff --git a/src/dlio/odom.cc b/src/dlio/odom.cc
+index 22c3a00..eade2c4 100755
+--- a/src/dlio/odom.cc
++++ b/src/dlio/odom.cc
+@@ -1365,6 +1365,27 @@ void dlio::OdomNode::propagateState() {
+ 
+   double dt = this->imu_meas.dt;
+ 
++  // 2026-08-19新增：工程化安全网，不是精确定位崩溃根因的修复——真机联调
++  // 实测过一次完全静止状态下速度在单帧内(dt<0.01s)从毫米级跳到>1m/s、
++  // 紧接着GICP LOST TRACK、姿态整个跑飞(重力被错误分配到X轴)、最终
++  // free(): invalid next size堆损坏、进程SIGABRT退出的完整链路，具体
++  // 触发点没有被抓到(诊断打印限流1秒一次，跳变发生在两次打印之间)。
++  // 这里加两道防线拦住失控继续往下传：
++  //   1. dt异常大(消息丢帧/延迟)——0.5*dt*dt这个二阶项对dt极度敏感，
++  //      dt从0.01涨到1.0，这一项被放大10000倍，明显不该拿这么大的dt去做
++  //      位置积分。
++  //   2. 积分算出来的速度超过这个平台任何合理飞行状态都不可能达到的物理
++  //      上限——不管上面dt检查有没有覆盖到，这是最后一道兜底。
++  // 两道防线命中任意一个都直接丢弃这一帧的位置/速度/姿态更新、回滚到
++  // 上一个已知状态，只打印告警，不让数值继续往前传播、不会真正修好背后
++  // 那个更深层的bug(那个需要专门去精确定位)，但能避免失控扩散到SLAM
++  // 彻底崩掉、进程退出这种最坏结果。
++  constexpr double kMaxSaneDt = 0.1;          // 对应<10Hz，明显的消息丢帧/延迟
++  constexpr double kMaxSaneSpeed = 15.0;      // m/s，这个平台任何合理状态都到不了这个速度
++  const Eigen::Vector3f p_snapshot = this->state.p;
++  const Eigen::Vector3f v_snapshot = this->state.v.lin.w;
++  const Eigen::Quaternionf q_snapshot = this->state.q;
++
+   Eigen::Quaternionf qhat = this->state.q, omega;
+   Eigen::Vector3f world_accel;
+ 
+@@ -1379,6 +1400,26 @@ void dlio::OdomNode::propagateState() {
+   this->state.v.lin.w[0] += world_accel[0]*dt;
+   this->state.v.lin.w[1] += world_accel[1]*dt;
+   this->state.v.lin.w[2] += (world_accel[2] - this->gravity_)*dt;
++
++  if (dt > kMaxSaneDt || this->state.v.lin.w.norm() > kMaxSaneSpeed) {
++    static double last_reject_print_time = 0.0;
++    if (this->imu_meas.stamp - last_reject_print_time >= 1.0) {
++      last_reject_print_time = this->imu_meas.stamp;
++      std::cout << "[propagateState] !! 拒绝这次积分更新：dt=" << dt
++                << "s(上限" << kMaxSaneDt << "s) 算出的速度模长="
++                << this->state.v.lin.w.norm() << "m/s(上限" << kMaxSaneSpeed
++                << "m/s) —— 回滚到上一个已知状态，不让失控继续传播 !!"
++                << std::endl;
++    }
++    this->state.p = p_snapshot;
++    this->state.v.lin.w = v_snapshot;
++    this->state.q = q_snapshot;
++    this->state.v.lin.b = this->state.q.toRotationMatrix().inverse() * this->state.v.lin.w;
++    this->state.v.ang.b = this->imu_meas.ang_vel;
++    this->state.v.ang.w = this->state.q.toRotationMatrix() * this->state.v.ang.b;
++    return;
++  }
++
+   this->state.v.lin.b = this->state.q.toRotationMatrix().inverse() * this->state.v.lin.w;
+ 
+   // Gyro propogation

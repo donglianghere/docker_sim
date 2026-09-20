@@ -1,0 +1,219 @@
+diff --git a/include/mighty/mighty_type.hpp b/include/mighty/mighty_type.hpp
+index f150ec1..1d4a3bb 100644
+--- a/include/mighty/mighty_type.hpp
++++ b/include/mighty/mighty_type.hpp
+@@ -45,6 +45,11 @@ struct parameters {
+   bool share_traj{true};
+   bool use_frame_alignment{false};
+   int num_agents{10};
++  // 本机自己的数字id（从namespace最后两位解析，NX01->1、NX02->2，见
++  // mighty_node.cpp构造函数），用于跟别的agent目标点冲突时打破对称——
++  // 见sanitizeTerminalGoal()。默认-1表示"还没被设置"，正常运行时
++  // mighty_node.cpp会在构造MIGHTY实例之前把这个值填好。
++  int id{-1};
+ 
+   // Simulated frame offset (for testing frame alignment in fake_sim)
+   // Applied to published trajectory to simulate operating in a rotated frame
+diff --git a/src/mighty/mighty_node.cpp b/src/mighty/mighty_node.cpp
+index c856658..9737892 100644
+--- a/src/mighty/mighty_node.cpp
++++ b/src/mighty/mighty_node.cpp
+@@ -263,6 +263,12 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
+   if (!use_benchmark_ && !par_.expl_enabled && timer_goal_reached_check_)
+     timer_goal_reached_check_->cancel();
+ 
++  // 把本机自己的数字id传给MIGHTY实例，供sanitizeTerminalGoal()跟别的
++  // agent目标点冲突时打破对称用——declareParameters()/setParameters()
++  // 都不会碰这个字段（不是ROS参数），放在构造MIGHTY实例之前赋值，保证
++  // 不会被参数加载逻辑覆盖掉。
++  par_.id = id_;
++
+   // Initialize the DYNUS object
+   mighty_ptr_ = std::make_shared<MIGHTY>(par_);
+ 
+diff --git a/src/mighty/mighty.cpp b/src/mighty/mighty.cpp
+index e77e2cf..ad9d94b 100644
+--- a/src/mighty/mighty.cpp
++++ b/src/mighty/mighty.cpp
+@@ -1930,62 +1983,139 @@ void MIGHTY::yaw(double diff, state& next_goal) {
+ /**
+  * @brief If the goal is inside an occupied voxel, relocate it to the nearest
+  *        free or unknown cell, then push outward along that direction by
+- *        ||drone_bbox|| so the new goal sits clear of the obstacle. No-op if
+- *        the goal is already non-occupied or if the map isn't ready yet.
++ *        ||drone_bbox|| so the new goal sits clear of the obstacle. Then, if
++ *        the (possibly-relocated) goal is too close to another agent's own
++ *        declared goal, push it away from that too. No-op if the goal is
++ *        already clear on both counts or if the map isn't ready yet.
+  */
+ bool MIGHTY::sanitizeTerminalGoal(state& goal) {
+   // Map not initialized yet (e.g. very first goal at startup): trust the user.
+   if (!hgp_manager_.isMapInitialized()) return true;
+ 
+-  // Already free or unknown: nothing to do.
+-  if (!hgp_manager_.checkIfPointOccupied(goal.pos)) return true;
++  // --- 1) 目标点是否落在占据栅格里（既有逻辑，未改动） ---
++  if (hgp_manager_.checkIfPointOccupied(goal.pos)) {
++    // BFS for the closest free/unknown cell.
++    Vec3f closest;
++    hgp_manager_.findClosestNonOccupiedPoint(goal.pos, closest);
+ 
+-  // BFS for the closest free/unknown cell.
+-  Vec3f closest;
+-  hgp_manager_.findClosestNonOccupiedPoint(goal.pos, closest);
++    // findClosestNonOccupiedPoint returns the input unchanged if it found nothing.
++    if ((closest - goal.pos).norm() < 1e-6) {
++      printf("[MIGHTY] sanitizeTerminalGoal: goal is occupied and no free/unknown "
++             "cell found within BFS budget; dropping goal.\n");
++      return false;
++    }
+ 
+-  // findClosestNonOccupiedPoint returns the input unchanged if it found nothing.
+-  if ((closest - goal.pos).norm() < 1e-6) {
+-    printf("[MIGHTY] sanitizeTerminalGoal: goal is occupied and no free/unknown "
+-           "cell found within BFS budget; dropping goal.\n");
+-    return false;
+-  }
++    // Direction outward from the occupied goal toward free/unknown space.
++    const Vec3f dir = (closest - goal.pos).normalized();
++
++    // Required clearance from the original occupied point: ||drone_bbox||.
++    // drone_bbox is a [x,y,z] full-extent vector; using its norm gives the
++    // bounding-box diagonal as the safety margin.
++    double clearance = 0.0;
++    if (par_.drone_bbox.size() >= 3) {
++      clearance = std::sqrt(par_.drone_bbox[0] * par_.drone_bbox[0] +
++                            par_.drone_bbox[1] * par_.drone_bbox[1] +
++                            par_.drone_bbox[2] * par_.drone_bbox[2]);
++    }
+ 
+-  // Direction outward from the occupied goal toward free/unknown space.
+-  const Vec3f dir = (closest - goal.pos).normalized();
++    Vec3f new_pos = goal.pos + dir * clearance;
+ 
+-  // Required clearance from the original occupied point: ||drone_bbox||.
+-  // drone_bbox is a [x,y,z] full-extent vector; using its norm gives the
+-  // bounding-box diagonal as the safety margin.
+-  double clearance = 0.0;
+-  if (par_.drone_bbox.size() >= 3) {
+-    clearance = std::sqrt(par_.drone_bbox[0] * par_.drone_bbox[0] +
+-                          par_.drone_bbox[1] * par_.drone_bbox[1] +
+-                          par_.drone_bbox[2] * par_.drone_bbox[2]);
+-  }
++    // Safety loop: if pushing by `clearance` lands us back inside an obstacle
++    // (thin wall, etc.), keep walking outward by one resolution at a time.
++    // Cap iterations so we never spin forever.
++    const double step = par_.res > 0.0 ? par_.res : 0.1;
++    for (int i = 0; i < 20 && hgp_manager_.checkIfPointOccupied(new_pos); ++i) {
++      new_pos += dir * step;
++    }
+ 
+-  Vec3f new_pos = goal.pos + dir * clearance;
++    if (hgp_manager_.checkIfPointOccupied(new_pos)) {
++      printf("[MIGHTY] sanitizeTerminalGoal: could not escape occupied region "
++             "after %d steps; dropping goal.\n", 20);
++      return false;
++    }
+ 
+-  // Safety loop: if pushing by `clearance` lands us back inside an obstacle
+-  // (thin wall, etc.), keep walking outward by one resolution at a time.
+-  // Cap iterations so we never spin forever.
+-  const double step = par_.res > 0.0 ? par_.res : 0.1;
+-  for (int i = 0; i < 20 && hgp_manager_.checkIfPointOccupied(new_pos); ++i) {
+-    new_pos += dir * step;
+-  }
++    const Vec3f original = goal.pos;
++    goal.pos = new_pos;
++    printf("[MIGHTY] Goal relocated from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
++           "(was inside occupied voxel, clearance=%.2f m)\n",
++           original.x(), original.y(), original.z(),
++           new_pos.x(), new_pos.y(), new_pos.z(), clearance);
++  }
++
++  // --- 2) 新增：目标点是否跟别的agent声明的目标点冲突（2026-08-13） ---
++  // 背景：以前完全没有这一层检查——每架飞机各自收到的目标点，就算两机
++  // 目标点是完全相同的世界坐标，也会原样接受、直接飞过去。`trajCallback()`
++  // /`convertDynTrajMsg2DynTraj()`早就把对方广播的目标点(`traj->goal`)
++  // 收下来了，但全仓库找不到第二处读它的地方（`publishOwnTraj()`附近
++  // 那行注释自己写明白了："consumers of msg.goal...don't rely on it for
++  // the dynamic-obstacle/avoidance path"）——收到了但完全没用。加上部署
++  // 的`goal_radius`(0.3米)本来就小于两机避障需要的间距
++  // (`||drone_bbox||`≈1.2~2米量级)，两机各自独立朝同一点飞、都判定"到了"
++  // 的时候，物理上必然贴得比避障安全距离更近。
++  //
++  // 修复思路：复用上面(1)已有的"推离+安全步进"模式，只是把"占据栅格"换成
++  // "别的agent的目标点"。分布式对称性用agent id打破——两机各自独立跑这
++  // 同一段逻辑、面对的输入一开始是完全对称的(两个目标点完全重合)，如果
++  // 两边都跑"往对方反方向推"，退化方向(重合时是零向量)选不好还可能两边
++  // 都算出同一个逃逸方向、又撞上；改成只让id更大的一方让路，id更小的
++  // 那架不做任何改动继续飞向原目标——两机的判断结果保证互补，不会出现
++  // "谁都在让"或"谁都不让"。
++  {
++    auto trajs_copy = getTrajs();
++    for (const auto& t : trajs_copy) {
++      if (!t || !t->is_agent) continue;
++
++      // t->bbox已经是"己方drone_bbox/2 + 对方drone_bbox/2"逐轴求和之后的
++      // 结果(convertDynTrajMsg2DynTraj)，本质上就是两机不能小于的逐轴
++      // 中心距。用它的模长(而不是某一个轴的分量)当阈值/推离距离，是因为
++      // 沿任意方向推离都必须保证足够——参考(1)里"clearance=||drone_bbox||"
++      // 同样的处理方式，对角线方向需要的推离距离最大，取模长能覆盖所有
++      // 推离方向的最坏情况。
++      const double required = t->bbox.norm();
++      if (required <= 0.0) continue;
++
++      const double dist = (goal.pos - t->goal).norm();
++      if (dist >= required) continue;  // 没有冲突
++
++      // 只有id更大的一方让路。
++      if (par_.id <= t->id) continue;
++
++      Vec3f dir;
++      if (dist > 1e-3) {
++        dir = (goal.pos - t->goal).normalized();
++      } else {
++        // 目标点完全重合：上面这个方向退化成零向量，改用双方id构造一个
++        // 确定性方位角——不同id组合会散开到不同方向，不会每次都只往
++        // 同一个轴推、导致三机以上时接连撞在一起。
++        const double angle =
++            static_cast<double>(par_.id * 131 + t->id * 37) * (2.0 * M_PI / 360.0);
++        dir = Vec3f(std::cos(angle), std::sin(angle), 0.0);
++      }
+ 
+-  if (hgp_manager_.checkIfPointOccupied(new_pos)) {
+-    printf("[MIGHTY] sanitizeTerminalGoal: could not escape occupied region "
+-           "after %d steps; dropping goal.\n", 20);
+-    return false;
++      Vec3f new_pos = t->goal + dir * (required * 1.05);  // 多留5%余量
++
++      // 推离之后可能落进占据栅格——跟(1)同一套"沿方向安全步进"逻辑。
++      const double step = par_.res > 0.0 ? par_.res : 0.1;
++      for (int i = 0; i < 20 && hgp_manager_.checkIfPointOccupied(new_pos); ++i) {
++        new_pos += dir * step;
++      }
++
++      if (hgp_manager_.checkIfPointOccupied(new_pos)) {
++        printf("[MIGHTY] sanitizeTerminalGoal: goal too close to agent %d's own goal "
++               "(dist=%.2fm < required=%.2fm), and could not find a clear relocation; "
++               "dropping goal.\n", t->id, dist, required);
++        return false;
++      }
++
++      const Vec3f original = goal.pos;
++      goal.pos = new_pos;
++      printf("[MIGHTY] Goal relocated from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
++             "(too close to agent %d's own goal, dist=%.2fm < required=%.2fm)\n",
++             original.x(), original.y(), original.z(), new_pos.x(), new_pos.y(), new_pos.z(),
++             t->id, dist, required);
++    }
+   }
+ 
+-  const Vec3f original = goal.pos;
+-  goal.pos = new_pos;
+-  printf("[MIGHTY] Goal relocated from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
+-         "(was inside occupied voxel, clearance=%.2f m)\n",
+-         original.x(), original.y(), original.z(),
+-         new_pos.x(), new_pos.y(), new_pos.z(), clearance);
+   return true;
+ }
+ 

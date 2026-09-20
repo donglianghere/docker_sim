@@ -1,0 +1,54 @@
+{
+  "bag": "/home/robots/ai_uav/docker_sim/runtime_logs/l3_hw/h1_center",
+  "tag": "base465_实测几何",
+  "n": 29952,
+  "baseline_used_m": 0.465,
+  "baseline_measured_mean_m": 0.4650246303576834,
+  "baseline_measured_std_m": 0.025630143518495806,
+  "yaw_mean_deg": 91.90976392471461,
+  "yaw_std_deg": 2.0565601396272717,
+  "yaw_p95_abs_dev_deg": 12.019026880605194,
+  "sigma_assumed_m": 0.0151,
+  "sigma_yaw_pred_deg": 2.6312470401236716,
+  "ratio_meas_over_pred": 0.7815914310845594,
+  "sigma_yaw_times_L": 0.9563004649266814,
+  "block_average_scaling": [
+    {
+      "M": 1,
+      "n_blocks": 29952,
+      "sigma_yaw_deg": 2.0565601396272717,
+      "sigma_times_sqrtM": 2.0565601396272717
+    },
+    {
+      "M": 2,
+      "n_blocks": 14976,
+      "sigma_yaw_deg": 1.8849502031158991,
+      "sigma_times_sqrtM": 2.665722141644425
+    },
+    {
+      "M": 5,
+      "n_blocks": 5990,
+      "sigma_yaw_deg": 1.5920250691554703,
+      "sigma_times_sqrtM": 3.5598762765154355
+    },
+    {
+      "M": 10,
+      "n_blocks": 2995,
+      "sigma_yaw_deg": 1.3141263165450225,
+      "sigma_times_sqrtM": 4.155632293449685
+    },
+    {
+      "M": 20,
+      "n_blocks": 1497,
+      "sigma_yaw_deg": 1.0486055943904125,
+      "sigma_times_sqrtM": 4.689506781287069
+    },
+    {
+      "M": 50,
+      "n_blocks": 599,
+      "sigma_yaw_deg": 0.7828463826632686,
+      "sigma_times_sqrtM": 5.535559858085561
+    }
+  ],
+  "block_scaling_spread": 0.9210664771377157
+}

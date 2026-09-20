@@ -1,0 +1,107 @@
+diff --git a/ros2_px4_stack/src/dynus_offboard_node.py b/ros2_px4_stack/src/dynus_offboard_node.py
+index ebeb892..9355e7d 100644
+--- a/ros2_px4_stack/src/dynus_offboard_node.py
++++ b/ros2_px4_stack/src/dynus_offboard_node.py
+@@ -17,7 +17,6 @@ from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion, Transform, T
+ from dynus_interfaces.msg import Goal
+ from dynus_interfaces.msg import State as StateDynus
+ from trajectory_msgs.msg import MultiDOFJointTrajectory, MultiDOFJointTrajectoryPoint
+-from mavros_msgs.msg import AttitudeTarget
+ from scipy.spatial.transform import Rotation
+ import numpy as np
+ 
+@@ -80,7 +79,6 @@ class OffboardDynusFollower(BasicMavrosInterface):
+         goal_qos.reliability = ReliabilityPolicy.RELIABLE
+ 
+         self.trajectory_setpoint = None
+-        self.attitude_setpoint = None
+         self.received_trajectory_setpoint = None
+ 
+         # Dynus subscriptions/publishers
+@@ -88,11 +86,6 @@ class OffboardDynusFollower(BasicMavrosInterface):
+         self.dynus_goal_topic = f'/{veh}/goal'
+         self.dynus_traj_sub = self.create_subscription(Goal, self.dynus_goal_topic, self.dynus_cb, goal_qos)
+ 
+-        # Attitude setpoint publisher — bypasses PX4's position controller entirely.
+-        # PX4 only runs its attitude/rate controller using onboard IMU.
+-        self.attitude_pub = self.create_publisher(
+-            AttitudeTarget, "mavros/setpoint_raw/attitude", qos_profile)
+-
+         # Start thread for setpoint publisher
+         self.trajectory_publish_thread = Thread(
+             target=self._publish_setpoint, args=()
+@@ -146,7 +139,7 @@ class OffboardDynusFollower(BasicMavrosInterface):
+         # 只能靠人工用QGC/遥控器操作 —— 补上这个不是必须的，但能让仿真里
+         # 不用每次都手动切模式，真机上要不要用这个自动解锁，请你自己权衡风险。
+         self.get_logger().info("Waiting for trajectory setpoints...")
+-        while rclpy.ok() and self.trajectory_setpoint is None and self.attitude_setpoint is None:
++        while rclpy.ok() and self.trajectory_setpoint is None:
+             _time.sleep(0.1)
+         self._set_px4_param("COM_DISARM_PRFLT", -1.0)
+         self._set_px4_param("COM_OF_LOSS_T", 5.0)
+@@ -187,11 +180,7 @@ class OffboardDynusFollower(BasicMavrosInterface):
+         period = 1.0 / rate
+         while rclpy.ok():
+             if self.navigation_mode == LOCAL_NAVIGATION:
+-                # During TAKEOFF: use trajectory setpoint (PX4 position controller)
+-                # During TRAJECTORY: use attitude setpoint (bypass PX4 position controller)
+-                if self.attitude_setpoint is not None:
+-                    self.attitude_pub.publish(self.attitude_setpoint)
+-                elif self.trajectory_setpoint is not None:
++                if self.trajectory_setpoint is not None:
+                     self.setpoint_traj_pub.publish(self.trajectory_setpoint)
+             _time.sleep(period)
+ 
+@@ -281,24 +270,6 @@ class OffboardDynusFollower(BasicMavrosInterface):
+ 
+         return trajectory_msg
+ 
+-    def _pack_into_attitude(self, point: Goal):
+-        """
+-        Convert DYNUS goal to attitude + thrust setpoint using differential flatness.
+-        Completely bypasses PX4's position controller — PX4 only does attitude/rate control.
+-        """
+-        quat = get_orientation(point)
+-        p, q, r = get_angular(point)
+-        thrust = get_thrust(point)
+-
+-        msg = AttitudeTarget()
+-        msg.header.stamp = self.get_clock().now().to_msg()
+-        # type_mask: ignore nothing — send orientation + body rates + thrust
+-        msg.type_mask = 0
+-        msg.orientation = Quaternion(x=quat[0], y=quat[1], z=quat[2], w=quat[3])
+-        msg.body_rate = Vector3(x=p, y=q, z=r)
+-        msg.thrust = thrust
+-        return msg
+-
+     def takeoff_and_track_trajectory(self, altitude):
+ 
+         # wait 1 second for FCU connection
+@@ -377,27 +348,6 @@ def get_orientation(point):
+ 
+     return Rotation.from_matrix(R_W_B).as_quat() # As [x, y, z, w] vector
+ 
+-def get_thrust(point):
+-    """Compute normalized thrust from differential flatness.
+-    thrust = |m * (a + g*z_W)| / (m * g) maps to [0,1] where ~0.5 = hover.
+-    PX4 expects thrust in [0,1] for multicopters."""
+-    # 质量/悬停油门不再硬编码，从环境变量读（由 flight-stack-entrypoint.sh
+-    # 在启动前从 config/vehicle_profile.yaml 里解析出来 export），
+-    # 保证跟 mighty_node 用的是同一个数字，见专项报告里的那处数值不一致问题。
+-    m = float(os.environ.get('VEHICLE_MASS_KG', '2.906'))
+-    g = 9.81
+-    # Desired force = m*(a + g)
+-    ax = point.a.x if abs(point.a.x) > 0.1 else 0.0
+-    ay = point.a.y if abs(point.a.y) > 0.1 else 0.0
+-    az = point.a.z if abs(point.a.z) > 0.1 else 0.0
+-    f_des = np.array([m * ax, m * ay, m * (az + g)])
+-    thrust_magnitude = np.linalg.norm(f_des)
+-    # Normalize: hover thrust (m*g) maps to ~0.5
+-    # This scaling factor depends on the vehicle; 0.5/(m*g) assumes hover at 50% throttle
+-    hover_thrust = float(os.environ.get('VEHICLE_HOVER_THRUST', '0.50'))
+-    normalized = hover_thrust * thrust_magnitude / (m * g)
+-    return float(np.clip(normalized, 0.1, 0.95))
+-
+ def get_angular(point):
+     m = float(os.environ.get('VEHICLE_MASS_KG', '2.906'))
+     g = 9.81

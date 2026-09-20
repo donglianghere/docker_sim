@@ -1,0 +1,21 @@
+{
+  "bag": "/home/robots/ai_uav/docker_sim/runtime_logs/l3_hw/h3_run2b",
+  "tag": "run2b",
+  "abs_topic": "a",
+  "d_min": 0.5,
+  "window": 50,
+  "robust": false,
+  "n_updates": 161,
+  "n_segments_final": 50,
+  "path_len_m_est": 25.0,
+  "theta_final_deg": 121.05185423642965,
+  "theta_true_final_deg": 117.91999999999999,
+  "err_mean_deg": 3.9366773706111324,
+  "err_std_deg": 0.5644257240996883,
+  "err_rmse_deg": 3.97693413552541,
+  "err_max_abs_deg": 5.156522599295784,
+  "truth_single_frame_sigma_deg": NaN,
+  "truth_standard_error_deg": 0.27,
+  "n_segments_at_convergence": null,
+  "duration_s": 178.27161407470703
+}

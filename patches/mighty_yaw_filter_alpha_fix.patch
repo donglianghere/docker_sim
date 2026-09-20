@@ -1,0 +1,22 @@
+diff --git a/config/hw_mighty.yaml b/config/hw_mighty.yaml
+index c5d926a..31aee79 100644
+--- a/config/hw_mighty.yaml
++++ b/config/hw_mighty.yaml
+@@ -189,7 +189,16 @@ mighty_node:
+         k_value_factor: 5.0                         # [-] Factor for the k_value adaptation
+
+         # Yaw-related parameters
+-        alpha_filter_dyaw: 0.1                 # [-] Filter parameter for dyaw, \in [0,1]. Higher--> More aggressive filtering
++        # 2026-08-12：从0.1改成0.8，跟同一个上游仓库里其它所有配置文件保持
++        # 一致（mighty.yaml/multi_mighty.yaml/hw_mighty_ground_robot.yaml/
++        # mighty_ground_robot.yaml全都是0.8，只有这份hw_mighty.yaml还停在
++        # 老默认值）。`dyaw_filtered_ = (1-alpha)*raw_dyaw + alpha*dyaw_
++        # filtered_`（mighty.cpp的yaw()函数）：alpha=0.1时，每个周期实际
++        # 下发的角速度里90%直接来自原始（有噪声的）期望朝向信号，几乎没有
++        # 起到滤波作用——实测确认这就是"轨迹跟踪时机头左右摇摆、不能锁定
++        # 飞行方向"的根因。改成0.8之后，80%的下发角速度来自历史值，跟其它
++        # 配置文件本来就在用的强滤波强度一致。
++        alpha_filter_dyaw: 0.8                 # [-] Filter parameter for dyaw, \in [0,1]. Higher--> More aggressive filtering
+         w_max: 0.8                              # [rd/s] Maximum angular velocity. ~4.0 for Hardware
+         # 0.8 rd/s (~45.8 deg/s) matches PX4's MPC_YAWRAUTO_MAX=45deg/s cap
+         # (see px4_iris_mpc_yawrate_max.patch). Was 3.0 rd/s (~172 deg/s) --

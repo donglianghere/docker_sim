@@ -1,0 +1,55 @@
+// 原样搬自 KumarRobotics/kr_mav_control（humble分支）的
+// kr_mav_controllers/include/kr_mav_controllers/SO3Control.hpp，BSD-3-Clause
+// 许可（版权声明见同目录 LICENSE-kr_mav_control），未做任何逻辑改动，只是
+// 从原来的 kr_mav_controllers/ 子目录拍平到这里，配合 so3ctrl 这个包直接编译。
+#ifndef SO3_CONTROL_HPP
+#define SO3_CONTROL_HPP
+
+#include <Eigen/Geometry>
+
+class SO3Control
+{
+ public:
+  SO3Control();
+
+  void setMass(const float mass);
+  void setGravity(const float g);
+  void setPosition(const Eigen::Vector3f &position);
+  void setVelocity(const Eigen::Vector3f &velocity);
+  void setMaxIntegral(const float max_integral);
+  void setMaxIntegralBody(const float max_integral_b);
+  void setCurrentOrientation(const Eigen::Quaternionf &current_orientation);
+  void resetIntegrals();
+  void setMaxTiltAngle(const float max_tilt_angle);
+
+  void calculateControl(const Eigen::Vector3f &des_pos, const Eigen::Vector3f &des_vel, const Eigen::Vector3f &des_acc,
+                        const Eigen::Vector3f &des_jerk, const float des_yaw, const float des_yaw_dot,
+                        const Eigen::Vector3f &kx, const Eigen::Vector3f &kv, const Eigen::Vector3f &ki,
+                        const Eigen::Vector3f &ki_b);
+
+  const Eigen::Vector3f &getComputedForce();
+  const Eigen::Quaternionf &getComputedOrientation();
+  const Eigen::Vector3f &getComputedAngularVelocity();
+
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+ private:
+  // Inputs for the controller
+  float mass_;
+  float g_;
+  Eigen::Vector3f pos_;
+  Eigen::Vector3f vel_;
+  float max_pos_int_;
+  float max_pos_int_b_;
+  Eigen::Quaternionf current_orientation_;
+  float cos_max_tilt_angle_;
+
+  // Outputs of the controller
+  Eigen::Vector3f force_;
+  Eigen::Quaternionf orientation_;
+  Eigen::Vector3f angular_velocity_;
+  Eigen::Vector3f pos_int_;
+  Eigen::Vector3f pos_int_b_;
+};
+
+#endif  // SO3_CONTROL_HPP

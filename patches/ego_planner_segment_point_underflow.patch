@@ -1,0 +1,38 @@
+diff --git a/src/planner/plan_manage/src/planner_manager.cpp b/src/planner/plan_manage/src/planner_manager.cpp
+index 0000000..0000000 100755
+--- a/src/planner/plan_manage/src/planner_manager.cpp
++++ b/src/planner/plan_manage/src/planner_manager.cpp
+@@ -164,16 +164,31 @@
+                                                                         local_data_.acceleration_traj_.evaluateDeBoorT(t),
+                                                                         local_target_pt, local_target_vel, Eigen::Vector3d::Zero(), poly_time);
+ 
++          // docker_sim 2026-09-16：跟ego_planner_rebound_replan_arclength_
++          // underflow.patch修的同一族bug，另一处没覆盖到的越界读。原来
++          // 判空的是`pseudo_arc_length`——但这个vector函数一开始就无条件
++          // `push_back(0.0)`，**永远不为空**，这个判断形同虚设。真正需要
++          // 判空的是`segment_point`：如果上面"从当前轨迹采样"那段循环
++          // 一次都没跑（t_cur已经超过local_data_.duration_，即"轨迹快
++          // 执行完/离终点很近"），进这个分支时segment_point是空的，
++          // push_back之后size()才变成1，`segment_point[segment_point.
++          // size() - 2]`里`size_t`的`1-2`下溢成天文数字，读到一段无效
++          // 内存——典型表现是"当下不一定崩，读坏的内存隔一会儿在完全
++          // 无关的地方才炸出来"，跟"重规划几十次后突然std::bad_alloc"
++          // 这种滞后崩溃症状吻合。触发窗口本来就窄（"离终点很近+这段
++          // 轨迹采样一次没跑"双重条件），单次goto()距离很长导致短时间内
++          // 高频重规划会显著放大撞上这个窗口的概率，不代表这个bug只在
++          // 长距离goto时才存在。
+           for (t = ts; t < poly_time; t += ts)
+           {
+-            if (!pseudo_arc_length.empty())
++            if (!segment_point.empty())
+             {
+               segment_point.push_back(gl_traj.evaluate(t));
+               pseudo_arc_length.push_back((segment_point.back() - segment_point[segment_point.size() - 2]).norm() + pseudo_arc_length.back());
+             }
+             else
+             {
+-              RCLCPP_ERROR(rclcpp::get_logger("ego_planner"), "pseudo_arc_length is empty, return!");
++              RCLCPP_ERROR(rclcpp::get_logger("ego_planner"), "segment_point is empty (trajectory already at/past its end), return!");
+               continous_failures_count_++;
+               return false;
+             }
