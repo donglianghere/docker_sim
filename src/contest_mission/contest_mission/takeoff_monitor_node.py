@@ -86,13 +86,37 @@ from rclpy.qos import qos_profile_sensor_data
 _TICK_PERIOD_S = 0.1
 
 
+def mean_speed_vector(samples: List[Tuple[float, float, float]]) -> float:
+    """一批速度**矢量**的平均值的模长（米/秒）。
+
+    2026-09-21（用户："等待preflight时间太长"）：原来判"静止"用的是
+    **瞬时速度大小** `|v|` 连续若干秒都低于门限。这个统计量选错了——
+
+    `|v|` 是模长、恒为正，所以零均值的速度噪声取模之后均值**不是 0**。
+    实测 NX02 停在地上时 `|v|` 的采样是 0.26/0.13/0.12/0.11/0.10/0.09/
+    0.08/0.068/0.04，均值约 0.11，比 0.08 的门限还高。要求连续 3 秒每一
+    帧都低于门限，等于要连中十几次，概率很低，所以一等就是几十秒。对
+    `|v|` 取平均同样解决不了，因为均值本身就超标。
+
+    对**矢量**求平均再取模就正确了：飞机真静止时三轴噪声零均值、互相
+    抵消，平均矢量趋近 0；飞机真在动时，平均矢量就是它的真实速度。
+    """
+    if not samples:
+        return float('inf')
+    n = float(len(samples))
+    mx = sum(v[0] for v in samples) / n
+    my = sum(v[1] for v in samples) / n
+    mz = sum(v[2] for v in samples) / n
+    return math.sqrt(mx * mx + my * my + mz * mz)
+
+
 def preflight_ready(
     connected: Optional[bool],
     speed: Optional[float],
-    static_since: Optional[float],
-    now: float,
+    vel_samples: Optional[List[Tuple[float, float, float]]],
+    window_full: bool,
     static_speed_max: float,
-    static_hold_s: float,
+    instant_speed_max: float,
 ) -> Tuple[bool, str]:
     """起飞前就绪判定：返回(是否可以发起飞指令, 不可以的原因)。
 
@@ -114,15 +138,19 @@ def preflight_ready(
     """
     if connected is not True:
         return False, '飞控未连接（mavros/state 还没有 connected=True）'
-    if speed is None:
+    if speed is None or not vel_samples:
         return False, '还没收到里程计数据'
-    if speed > static_speed_max:
-        return False, f'里程计合速度{speed:.2f}m/s > {static_speed_max:.2f}m/s，定位源还没收敛'
-    if static_since is None:
-        return False, '刚开始静止，还没满足持续时长'
-    held = now - static_since
-    if held < static_hold_s:
-        return False, f'已持续静止{held:.1f}s，还差{static_hold_s - held:.1f}s'
+    if not window_full:
+        return False, '正在积累里程计采样窗口'
+    mean_v = mean_speed_vector(vel_samples)
+    if mean_v > static_speed_max:
+        return False, (f'里程计速度矢量均值{mean_v:.3f}m/s > {static_speed_max:.2f}m/s，'
+                       f'飞机还没静止或定位源还没收敛')
+    # 平均值达标之后还要看这一帧的瞬时值：控制器按瞬时 odom_data.v.norm()
+    # 判"非静止起飞"，指令发出去的那一刻瞬时值超标一样会被拒。
+    if speed > instant_speed_max:
+        return False, (f'均值已达标，但这一帧瞬时速度{speed:.2f}m/s > '
+                       f'{instant_speed_max:.2f}m/s，等下一帧再发')
     return True, ''
 
 
@@ -136,7 +164,15 @@ class TakeoffMonitorNode(Node):
         self.declare_parameter('pos_tolerance_m', 0.3)        # TAKEOFF_STABLE_POS_TOLERANCE_M
         self.declare_parameter('hover_after_s', 5.0)          # HOVER_AFTER_TAKEOFF_S
         self.declare_parameter('default_timeout_s', 60.0)     # goal.timeout_s<=0时用这个
-        self.declare_parameter('armed_timeout_s', 30.0)       # 等armed这一段的单独超时
+        # 等armed这一段的单独超时。
+        #
+        # 2026-09-21：一度放宽到120秒，因为仿真容器刚起来时 PX4 自检还没过
+        # （`ARM rejected by PX4!`，实测约40秒后才接受解锁）。但那是在拿
+        # 超时兜一个本该在启动阶段解决的问题——现在启动脚本会等 PX4 自己报
+        # `Ready for takeoff!` 之后才放任务程序进来，到这里 PX4 一定已经
+        # 可以解锁了，所以收回到 45 秒。留这点余量是给"指令落在控制器状态机
+        # 切换缝隙里"这类偶发情况重发用的，不是给启动窗口用的。
+        self.declare_parameter('armed_timeout_s', 45.0)
 
         # "已在空中"判定阈值（2026-09-20实测补上）：收到goal时如果飞机
         # 已经解锁且高度超过这个值，直接返回成功，不重复下发起飞指令。
@@ -164,16 +200,26 @@ class TakeoffMonitorNode(Node):
         # 持续静止时长：瞬时一帧低于门限不算收敛（uwb_imu刚启动时里程计
         # 速度会来回抖，能抽到低值的瞬间），要求连续`static_hold_s`秒都
         # 低于门限才认为定位源真的收敛了、飞机真的停着。
-        self.declare_parameter('static_hold_s', 3.0)
+        # 求平均用的采样窗口长度（秒）。窗口越长噪声压得越干净，但也越晚
+        # 能起飞；1.5 秒在 30Hz 里程计下是 45 个样本，足够把零均值噪声压掉。
+        self.declare_parameter('static_hold_s', 1.5)
+        # 发指令那一刻允许的**瞬时**速度上限。控制器自己的门限是 0.1，
+        # 这里留一点"发出去到控制器处理"之间的余量。
+        self.declare_parameter('instant_speed_max_mps', 0.09)
         # 2026-09-21 从 90 放宽到 150：实测 NX02 停在地上时里程计合速度就在
         # 0.08~0.14m/s 之间抖（控制器自己的拒绝门限是 0.1），凑够连续 3 秒
         # 低于 0.08 需要碰运气，90 秒偏紧。放宽只影响"最坏情况等多久才
         # 报失败"，不影响正常路径——定位收敛得快就立刻起飞。
-        self.declare_parameter('preflight_timeout_s', 150.0)
+        # 2026-09-21：一度放宽到150秒，那是判据用错统计量（对速度**大小**
+        # 取平均，均值恒高于门限）时的兜底。改成速度矢量窗口平均之后，实测
+        # 1.5秒就通过，这个值收回到 45 秒——它现在只覆盖"定位源真的迟迟不
+        # 收敛"这种异常，不再是正常路径的一部分。
+        self.declare_parameter('preflight_timeout_s', 45.0)
 
         self._armed: Optional[bool] = None
         self._odom_xyz: Optional[Tuple[float, float, float]] = None
         self._odom_speed: Optional[float] = None
+        self._odom_vel: Optional[Tuple[float, float, float]] = None
         self._connected: Optional[bool] = None
         self._busy = threading.Lock()
         self._external_takeoff_seen = False
@@ -221,8 +267,10 @@ class TakeoffMonitorNode(Node):
         p = msg.pose.pose.position
         self._odom_xyz = (p.x, p.y, p.z)
         v = msg.twist.twist.linear
-        # 跟px4ctrl判"静止"用的是同一个量（它取odom_data.v.norm()），
-        # 所以这里也算三轴合速度，不只看水平。
+        # 存**矢量**而不只是模长——判"静止"要对矢量做平均再取模，见
+        # `mean_speed_vector()` 的说明。模长仍然保留一份，因为发指令那一刻
+        # 要跟 px4ctrl 的瞬时判据对齐。
+        self._odom_vel = (v.x, v.y, v.z)
         self._odom_speed = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
 
     def _on_takeoff_land(self, msg) -> None:
@@ -285,6 +333,9 @@ class TakeoffMonitorNode(Node):
         retry_interval_s = float(self.get_parameter('takeoff_retry_interval_s').value)
         static_speed_max = float(self.get_parameter('static_speed_max_mps').value)
         static_hold_s = float(self.get_parameter('static_hold_s').value)
+        instant_speed_max = float(self.get_parameter('instant_speed_max_mps').value)
+        vel_samples: List[Tuple[float, float, float]] = []
+        window_start: Optional[float] = None
         preflight_timeout_s = float(self.get_parameter('preflight_timeout_s').value)
 
         started = time.monotonic()
@@ -294,7 +345,6 @@ class TakeoffMonitorNode(Node):
         phase_start = started
         last_cmd_t = 0.0
         attempts = 0
-        static_since: Optional[float] = None
 
         while True:
             if goal_handle.is_cancel_requested:
@@ -304,34 +354,51 @@ class TakeoffMonitorNode(Node):
             # 总超时只管起飞动作本身（第1~3步），不管 preflight——preflight
             # 等的是定位源收敛，有自己的 preflight_timeout_s。
             #
+            # 2026-09-21 追加：`wait_armed` 同理也排除在外。等 PX4 自己变得
+            # 可解锁，跟等定位收敛是同一类"等飞机就绪"，不属于起飞动作本身。
+            # 实测：仿真容器刚起来时 PX4 会 `ARM rejected by PX4!`（自检还
+            # 没过），约40秒后才接受解锁；`armed_timeout_s` 放宽到120秒但
+            # 总超时60秒仍会先到期，所以两处必须一起改。
+            # 注：试过用 mavros/state 的 system_status 当"可解锁"信号，实测
+            # 它全程停在 0(MAV_STATE_UNINIT)，这套 PX4 SITL 没填这个字段，
+            # 用不了，只能靠重试等。
+            #
             # 2026-09-21 修：原来这个检查在 preflight 期间也在跑，于是
             # preflight 实际只有 `goal.timeout_s`（客户端默认60秒）这么长，
             # 而不是 preflight_timeout_s（90秒），下面那句 started = now 形同
             # 摆设。实测 NX02 地面里程计噪声卡在 0.08~0.11m/s 边界，60 秒内
             # 没凑够 3 秒静止窗口就被判 `stage=preflight 总超时`，起飞失败。
-            if phase != 'preflight' and now - started > timeout_s:
+            if phase not in ('preflight', 'wait_armed') and now - started > timeout_s:
                 goal_handle.abort()
                 return self._result(False, phase, f'总超时（{timeout_s:.0f}秒）仍未完成，卡在阶段{phase}')
 
             self._publish_feedback(goal_handle, phase, z_at_armed)
 
-            # "持续静止"计时：速度一旦超门限就重新开始计。放在循环里统一
-            # 维护，不放订阅回调里——回调只管更新原始量。
+            # 维护速度矢量的滑动采样窗口。跟原来"速度一超门限就重新计时"
+            # 不同——矢量平均本来就能容忍个别超标样本，不需要清零重来，
+            # 这也是等待时间能从几十秒降到几秒的原因。
             speed = self._odom_speed
-            if speed is None or speed > static_speed_max:
-                static_since = None
-            elif static_since is None:
-                static_since = now
+            if self._odom_vel is not None:
+                if window_start is None:
+                    window_start = now
+                vel_samples.append(self._odom_vel)
+                # 按时间长度裁剪窗口：保留最近 static_hold_s 秒的样本
+                max_samples = max(1, int(static_hold_s / _TICK_PERIOD_S))
+                if len(vel_samples) > max_samples:
+                    del vel_samples[:len(vel_samples) - max_samples]
+            window_full = (window_start is not None
+                           and now - window_start >= static_hold_s)
 
             if phase == 'preflight':
                 ready, why = preflight_ready(
-                    self._connected, speed, static_since, now,
-                    static_speed_max, static_hold_s,
+                    self._connected, speed, vel_samples, window_full,
+                    static_speed_max, instant_speed_max,
                 )
                 if ready:
                     self.get_logger().info(
-                        f'起飞前就绪：飞控已连接、里程计合速度{speed:.3f}m/s并已'
-                        f'持续静止{static_hold_s:.1f}秒，现在下发起飞指令'
+                        f'起飞前就绪：飞控已连接、最近{static_hold_s:.1f}秒里程计'
+                        f'速度矢量均值{mean_speed_vector(vel_samples):.3f}m/s'
+                        f'（瞬时{speed:.3f}m/s），现在下发起飞指令'
                     )
                     phase, phase_start = 'wait_armed', now
                     last_cmd_t = now - retry_interval_s   # 让下一圈立刻发
@@ -371,6 +438,7 @@ class TakeoffMonitorNode(Node):
                     # 才会真的开始爬升，理论上走不到这个分支）。
                     z_at_armed = self._odom_xyz[2] if self._odom_xyz is not None else 0.0
                     phase, phase_start = 'wait_stable', now
+                    started = now      # 总超时从"真正开始爬升"起算，见上面说明
                     self.get_logger().info(f'已解锁，爬升基线z={z_at_armed:.2f}m，等待爬升到位+稳定')
                 elif now - phase_start > armed_timeout_s:
                     goal_handle.abort()

@@ -238,7 +238,11 @@ YAW_SOURCE_AGREE_DEG = 10.0
 #: 所以这里只保留一个明显大于机载所有阶段超时之和的兜底值，它唯一的作用
 #: 是"机载节点挂了、永远不返回结果"这种情况下不要无限等。正常路径上永远
 #: 不会走到这个值——失败也是机载先返回失败结果。
-TAKEOFF_ACTION_HARD_TIMEOUT_S = 300.0
+#: 这个值必须大于机载各阶段超时之和，否则客户端会先于服务端到期，又变回
+#: "两端各有一套预算、结论可能相反"那个已经修过一次的问题。当前机载是
+#: preflight_timeout_s(45) + armed_timeout_s(45) + goal.timeout_s(60) = 150，
+#: 取 240 留余量。改机载那三个值时必须回头核这一行。
+TAKEOFF_ACTION_HARD_TIMEOUT_S = 240.0
 
 ACTION_SERVER_PROBE_TIMEOUT_S = 2.0
 

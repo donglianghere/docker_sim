@@ -67,14 +67,47 @@ fi
 
 # ---- 2. 等两机的编队节点就绪 ----
 # 等这条日志而不是 sleep 固定秒数：仿真启动耗时随机器负载变化很大。
-log "等两机就绪…"
+
+# PX4 自己报"可以起飞"才算就绪。只等 ROS 节点起来是不够的——节点起来时
+# PX4 的起飞前自检（ekf2 收敛、电源检查）往往还没过，这时候发起飞指令会被
+# `ARM rejected by PX4!` 拒掉，只能盲等重试。PX4 在自己的日志里明说了这件
+# 事（`INFO [commander] Ready for takeoff!`），直接等它。
+#
+# 为什么读日志文件而不是订 ROS 话题：mavros 的 statustext 转发通路指望不上
+# ——实测从 compose up 开始录 150 秒，`mavros/statustext/recv` 一条都没有，
+# 因为 mavros 建立 MAVLink 连接时 PX4 早就把那条消息打完了，STATUSTEXT 不
+# 补发。脚本本来就在跑 docker compose、本来就是仿真侧的测试工具，读仿真
+# 容器里的 PX4 日志没有任何耦合问题；机载代码一行都不碰这个。
+
+# 注意：这里**不能**写成 `docker logs ... | grep -q PATTERN`。
+# `set -o pipefail` 下，grep -q 一匹配上就退出，docker logs 还在往管道写、
+# 被 SIGPIPE 杀掉（141），整条管道被判为失败——匹配成功反而当成失败，日志
+# 越大越必然触发。所以先读进变量再用 case 匹配，不走管道。
+log_has() {   # $1=容器名 $2=要找的字符串
+    local out
+    out="$(docker logs "$1" 2>&1 || true)"
+    case "$out" in
+        *"$2"*) return 0 ;;
+        *)      return 1 ;;
+    esac
+}
+
+px4_ready() {
+    for f in /tmp/px4_NX01.log /tmp/px4_NX02.log; do
+        docker exec docker_sim-sim-world-1 grep -q "Ready for takeoff" "$f" \
+            2>/dev/null || return 1
+    done
+    return 0
+}
+
+log "等两机就绪（ROS节点 + PX4自检）…"
 READY_DEADLINE=$(( $(date +%s) + 180 ))
 while :; do
     ok=1
     for c in nx01 nx02; do
-        docker logs "docker_sim-flight-stack-$c-1" 2>&1 \
-            | grep -q 'formation_follower_node就绪' || ok=0
+        log_has "docker_sim-flight-stack-$c-1" 'formation_follower_node就绪' || ok=0
     done
+    px4_ready || ok=0
     [ "$ok" = "1" ] && break
     if [ "$(date +%s)" -ge "$READY_DEADLINE" ]; then
         echo "!! 等仿真就绪超过180秒，检查 docker compose logs !!" >&2
@@ -100,14 +133,14 @@ DEADLINE=$(( $(date +%s) + TIMEOUT_S ))
 while :; do
     done_cnt=0
     for c in fm_leader fm_follower; do
-        docker logs "$c" 2>&1 | grep -q '编队飞行结束' && done_cnt=$((done_cnt + 1))
+        log_has "$c" '编队飞行结束' && done_cnt=$((done_cnt + 1))
     done
     [ "$done_cnt" = "2" ] && { log "两机都已完成"; break; }
 
     # 容器退了但没打印"编队飞行结束"=异常终止
     for c in fm_leader fm_follower; do
         if ! docker ps --format '{{.Names}}' | grep -qx "$c"; then
-            if ! docker logs "$c" 2>&1 | grep -q '编队飞行结束'; then
+            if ! log_has "$c" '编队飞行结束'; then
                 echo ""
                 echo "!! $c 异常退出，末尾日志： !!" >&2
                 docker logs --tail 15 "$c" 2>&1 >&2
@@ -138,4 +171,9 @@ echo ""
 echo "僚机沿轨迹间距（track阶段最后几次反馈，应当稳定且不小于 ${SPACING} 米）："
 docker logs fm_follower 2>&1 | grep 'track阶段' | tail -3 || echo "  （没有 track 阶段反馈）"
 echo "=============================================="
-[ "$KEEP" = "1" ] && echo "（--keep：选手容器保留，用 docker logs fm_leader / fm_follower 看完整日志）"
+# 注意别写成 `[ cond ] && echo ...`：这是脚本最后一条命令，条件为假时它的
+# 退出码1会成为整个脚本的退出码——飞行明明成功，调用方却看到失败。
+if [ "$KEEP" = "1" ]; then
+    echo "（--keep：选手容器保留，用 docker logs fm_leader / fm_follower 看完整日志）"
+fi
+exit 0

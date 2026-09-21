@@ -5,6 +5,7 @@
 独立的 first_sample_time 判断，不能用 trim 之后剩下的 history[0]——
 否则判定永远不可能成立（实测表现为 takeoff 稳定卡在超时）。
 """
+import math
 import sys, types, importlib.util, time
 
 def stub(name, **attrs):
@@ -134,21 +135,37 @@ check('没有里程计数据 -> 不算在空中且不崩', n7._already_airborne(
 print()
 print('用例8：起飞前就绪判定（2026-09-21，用户："不能飞机一出世就给起飞命令"）')
 R = tmn.preflight_ready
-MAX, HOLD = 0.08, 3.0
-check('飞控还没连上 -> 不发', R(None, 0.01, 100.0, 110.0, MAX, HOLD)[0] is False)
-check('connected=False -> 不发', R(False, 0.01, 100.0, 110.0, MAX, HOLD)[0] is False)
-check('还没收到里程计 -> 不发', R(True, None, None, 110.0, MAX, HOLD)[0] is False)
-check('速度0.51m/s（NX02实测被拒时的值）-> 不发',
-      R(True, 0.512840, None, 110.0, MAX, HOLD)[0] is False)
-check('速度够低但刚静止0.5秒 -> 不发（瞬时低值不算收敛）',
-      R(True, 0.01, 109.5, 110.0, MAX, HOLD)[0] is False)
-check('持续静止3.0秒整 -> 可以发', R(True, 0.01, 107.0, 110.0, MAX, HOLD)[0] is True)
-check('持续静止5秒 -> 可以发', R(True, 0.02, 105.0, 110.0, MAX, HOLD)[0] is True)
-check('速度刚好等于门限且已持续够 -> 可以发',
-      R(True, 0.08, 105.0, 110.0, MAX, HOLD)[0] is True)
-check('门限比控制器的0.1m/s严，0.09被拦下',
-      R(True, 0.09, 105.0, 110.0, MAX, HOLD)[0] is False)
-check('不通过时给出可读原因', '定位源还没收敛' in R(True, 0.5, None, 110.0, MAX, HOLD)[1])
+MAX, INST = 0.08, 0.09
+STILL = [(0.0, 0.0, 0.0)] * 45          # 真静止：45个零样本
+check('飞控还没连上 -> 不发', R(None, 0.01, STILL, True, MAX, INST)[0] is False)
+check('connected=False -> 不发', R(False, 0.01, STILL, True, MAX, INST)[0] is False)
+check('还没收到里程计 -> 不发', R(True, None, None, True, MAX, INST)[0] is False)
+check('采样窗口还没攒满 -> 不发', R(True, 0.01, STILL, False, MAX, INST)[0] is False)
+check('窗口满且静止 -> 可以发', R(True, 0.01, STILL, True, MAX, INST)[0] is True)
+check('均值达标但这一帧瞬时0.12m/s -> 等下一帧（控制器会按瞬时值拒）',
+      R(True, 0.12, STILL, True, MAX, INST)[0] is False)
+check('真在动(0.3m/s朝x) -> 不发',
+      R(True, 0.3, [(0.3, 0.0, 0.0)] * 45, True, MAX, INST)[0] is False)
+check('不通过时给出可读原因', '还没静止' in R(True, 0.3, [(0.3, 0.0, 0.0)] * 45, True, MAX, INST)[1])
+
+print('用例9：为什么要对"矢量"平均而不是对"速度大小"平均（2026-09-21实测根因）')
+import random
+random.seed(20260921)
+# 飞机真静止，三轴各叠加 sigma=0.07 的零均值噪声——复现 NX02 地面实测的量级
+noisy = [(random.gauss(0, 0.07), random.gauss(0, 0.07), random.gauss(0, 0.07))
+         for _ in range(45)]
+mag_mean = sum(math.sqrt(v[0]**2 + v[1]**2 + v[2]**2) for v in noisy) / len(noisy)
+vec_mean = tmn.mean_speed_vector(noisy)
+check(f'对"速度大小"取平均：{mag_mean:.3f}m/s，仍然高于门限{MAX}（旧做法就卡在这）',
+      mag_mean > MAX)
+check(f'对"速度矢量"取平均再取模：{vec_mean:.3f}m/s，低于门限（噪声互相抵消）',
+      vec_mean < MAX)
+check('所以静止时新判据能通过，旧判据通不过',
+      R(True, 0.02, noisy, True, MAX, INST)[0] is True)
+check('空样本 -> 返回无穷大，不会误判成静止',
+      tmn.mean_speed_vector([]) == float('inf'))
+check('真实运动不会被平均掉：45帧都朝x以0.5m/s -> 均值仍是0.5',
+      abs(tmn.mean_speed_vector([(0.5, 0.0, 0.0)] * 45) - 0.5) < 1e-9)
 
 print()
 print('全部通过' if not fails else f'失败 {len(fails)} 项: {fails}')

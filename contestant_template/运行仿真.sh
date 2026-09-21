@@ -197,14 +197,47 @@ if [[ "$RESTART" == "1" && -n "$COMPOSE_DIR" ]]; then
 
     # 等两架飞机的节点真的起来了再放任务程序进去。等这条日志而不是 sleep
     # 固定秒数：仿真启动耗时随机器负载差别很大，写死秒数要么白等要么不够。
-    echo "等两架飞机就绪（最多3分钟）……"
+
+# PX4 自己报"可以起飞"才算就绪。只等 ROS 节点起来是不够的——节点起来时
+# PX4 的起飞前自检（ekf2 收敛、电源检查）往往还没过，这时候发起飞指令会被
+# `ARM rejected by PX4!` 拒掉，只能盲等重试。PX4 在自己的日志里明说了这件
+# 事（`INFO [commander] Ready for takeoff!`），直接等它。
+#
+# 为什么读日志文件而不是订 ROS 话题：mavros 的 statustext 转发通路指望不上
+# ——实测从 compose up 开始录 150 秒，`mavros/statustext/recv` 一条都没有，
+# 因为 mavros 建立 MAVLink 连接时 PX4 早就把那条消息打完了，STATUSTEXT 不
+# 补发。脚本本来就在跑 docker compose、本来就是仿真侧的测试工具，读仿真
+# 容器里的 PX4 日志没有任何耦合问题；机载代码一行都不碰这个。
+
+# 注意：这里**不能**写成 `docker logs ... | grep -q PATTERN`。
+# `set -o pipefail` 下，grep -q 一匹配上就退出，docker logs 还在往管道写、
+# 被 SIGPIPE 杀掉（141），整条管道被判为失败——匹配成功反而当成失败，日志
+# 越大越必然触发。所以先读进变量再用 case 匹配，不走管道。
+log_has() {   # $1=容器名 $2=要找的字符串
+    local out
+    out="$(docker logs "$1" 2>&1 || true)"
+    case "$out" in
+        *"$2"*) return 0 ;;
+        *)      return 1 ;;
+    esac
+}
+
+px4_ready() {
+    for f in /tmp/px4_NX01.log /tmp/px4_NX02.log; do
+        docker exec docker_sim-sim-world-1 grep -q "Ready for takeoff" "$f" \
+            2>/dev/null || return 1
+    done
+    return 0
+}
+
+    echo "等两架飞机就绪（ROS节点 + PX4自检，最多3分钟）…"
     READY_DEADLINE=$(( $(date +%s) + 180 ))
     while :; do
         ready=1
         for c in nx01 nx02; do
-            docker logs "docker_sim-flight-stack-$c-1" 2>&1 \
-                | grep -q 'formation_follower_node就绪' || ready=0
+            log_has "docker_sim-flight-stack-$c-1" 'formation_follower_node就绪' || ready=0
         done
+        px4_ready || ready=0
         [[ "$ready" == "1" ]] && break
         if [[ "$(date +%s)" -ge "$READY_DEADLINE" ]]; then
             echo ""
