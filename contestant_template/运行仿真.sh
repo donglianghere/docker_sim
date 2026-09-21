@@ -24,7 +24,8 @@
 #      （如果双击没反应，大概率是系统没有把.sh文件关联到"用终端打开"，
 #      改用终端里执行这条命令肯定管用）；
 #   4. 仿真那一侧：如果这个文件夹就放在仿真项目里（同级目录能找到
-#      docker-compose.yml），脚本每次运行会自动重建仿真容器，让两架飞机
+#      docker-compose.yml，或者用 --sim-dir 指定），脚本每次运行会自动
+#      重建仿真容器，让两架飞机
 #      回到各自的起降点，保证每次都从同一个初始条件开始。不想重建就加
 #      --no-restart。如果你手里只有这个模板文件夹（没有仿真那套文件），
 #      脚本会跳过这一步，仿真环境由赛事方/助教启动。
@@ -51,14 +52,26 @@ FOLLOWER_NS="NX02"    # 僚机编号
 SINGLE=0              # --single：只飞长机那一架
 RESTART=1             # --no-restart：不重建仿真容器，直接接着上次的状态跑
 
+# 仿真项目所在目录（docker-compose.yml 在哪个文件夹里）。
+# 这个模板文件夹被拷到别处之后（比如桌面的 CONTEST 文件夹），上级目录就
+# 不再是仿真项目了，所以这里要能单独指定。按优先级依次尝试：
+#   1. 命令行 --sim-dir /path/to/docker_sim
+#   2. 环境变量 SIM_DIR
+#   3. 这个模板文件夹的上级目录（模板还放在仿真项目里时就是它）
+#   4. 下面这个默认路径——赛事方分发模板前按实际情况改一次即可
+SIM_DIR_DEFAULT="$HOME/ai_uav/docker_sim"
+SIM_DIR="${SIM_DIR:-}"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --single) SINGLE=1; shift ;;
         --no-restart) RESTART=0; shift ;;
+        --sim-dir) SIM_DIR="$2"; shift 2 ;;
         --leader)   LEADER_NS="$2"; shift 2 ;;
         --follower) FOLLOWER_NS="$2"; shift 2 ;;
         -h|--help)
-            echo "用法： bash 运行仿真.sh [--single] [--no-restart] [--leader NX01] [--follower NX02]"
+            echo "用法： bash 运行仿真.sh [--single] [--no-restart] [--sim-dir 仿真项目目录] \\"
+            echo "                   [--leader NX01] [--follower NX02]"
             exit 0 ;;
         *) echo "不认识的参数：$1（加 --help 看用法）"; exit 2 ;;
     esac
@@ -169,8 +182,15 @@ docker rm -f contest_task_leader contest_task_follower >/dev/null 2>&1 || true
 # （手里没有仿真环境那套文件），仿真那一侧本来就由赛事方/助教启动，这个
 # 脚本只负责起"你的任务程序"。
 # ---------------------------------------------------------------------------
-COMPOSE_DIR="$(cd .. 2>/dev/null && pwd)"
-if [[ "$RESTART" == "1" && -f "$COMPOSE_DIR/docker-compose.yml" ]]; then
+# 按上面说的优先级找仿真项目目录
+COMPOSE_DIR=""
+for candidate in "$SIM_DIR" "$(cd .. 2>/dev/null && pwd)" "$SIM_DIR_DEFAULT"; do
+    if [[ -n "$candidate" && -f "$candidate/docker-compose.yml" ]]; then
+        COMPOSE_DIR="$candidate"
+        break
+    fi
+done
+if [[ "$RESTART" == "1" && -n "$COMPOSE_DIR" ]]; then
     echo "正在重建仿真环境（让飞机回到起降点）……"
     ( cd "$COMPOSE_DIR" && docker compose down --timeout 20 >/dev/null 2>&1 || true )
     ( cd "$COMPOSE_DIR" && docker compose up -d >/dev/null )
@@ -198,7 +218,9 @@ if [[ "$RESTART" == "1" && -f "$COMPOSE_DIR/docker-compose.yml" ]]; then
     done
     echo "仿真环境就绪。"
 elif [[ "$RESTART" == "1" ]]; then
-    echo "（没找到 docker-compose.yml，跳过重建仿真——假定仿真环境已经由赛事方启动好）"
+    echo "（没找到仿真项目目录，跳过重建仿真——假定仿真环境已经由赛事方启动好。"
+    echo "  如果需要每次自动重建，用 --sim-dir 指定仿真项目所在文件夹，"
+    echo "  或者改本脚本开头的 SIM_DIR_DEFAULT）"
 fi
 
 set +e
