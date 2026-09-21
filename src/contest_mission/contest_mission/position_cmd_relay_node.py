@@ -47,7 +47,7 @@ from quadrotor_msgs.msg import PositionCommand
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 
-VALID_MODES = ('normal', 'precision_land', 'orbit_yaw_override', 'pillar_aim')
+VALID_MODES = ('normal', 'precision_land', 'orbit_yaw_override', 'pillar_aim', 'formation')
 
 
 class PositionCmdRelayNode(Node):
@@ -70,6 +70,11 @@ class PositionCmdRelayNode(Node):
         self.create_subscription(PositionCommand, 'position_cmd', self._on_position_cmd, 10)
         self.create_subscription(PositionCommand, 'precision_land_cmd', self._on_precision_land_cmd, 10)
         self.create_subscription(PositionCommand, 'fire_pillar_aim_cmd', self._on_pillar_aim_cmd, 10)
+        # 2026-09-20新增：编队轨迹跟随。跟precision_land/pillar_aim同一个
+        # "完全接管"语义，数据源换成formation_follower_node发的
+        # formation_cmd——跟随者的设定点逐点复现长机走过的轨迹，必须绕开
+        # ego_planner（规划器会自己重新规划、抄近道切内弯，实测轨迹很乱）。
+        self.create_subscription(PositionCommand, 'formation_cmd', self._on_formation_cmd, 10)
         # 跟px4ctrl_docker_sim.launch.py里px4ctrl_node_ego_planner的odom
         # remap用同一个话题名——两边应该看到同一份"控制器实际在用的里程计"，
         # 不是另开一路可能跟控制器不一致的定位源。
@@ -116,6 +121,13 @@ class PositionCmdRelayNode(Node):
 
     def _on_pillar_aim_cmd(self, msg: PositionCommand):
         if self.relay_mode != 'pillar_aim':
+            return
+        self.pub.publish(msg)
+
+    def _on_formation_cmd(self, msg: PositionCommand):
+        """编队轨迹跟随指令（2026-09-20新增）。跟上面两个"完全接管"模式
+        同一个形状：只在对应relay_mode下转发，其余模式原样丢弃。"""
+        if self.relay_mode != 'formation':
             return
         self.pub.publish(msg)
 

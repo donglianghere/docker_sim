@@ -1,0 +1,38 @@
+# 编队跟随动作（2026-09-20新增）。把编队跟随从"设参数开关"改成有明确
+# 阶段、可取消、带反馈的 action：入列(join) -> 保持(track) -> 出列(break)。
+#
+# server 实现在 contest_mission/formation_follower_node.py，常驻在**跟随
+# 角色那架飞机自己的** flight-stack 容器里——5~10Hz 的"读长机 odom -> 弧长
+# 回溯算目标点 -> 发布目标"这个回路必须机载，跨网络做会直接体现成跟随滞后
+# （方案 1.0 节原则）。调用方（选手程序）只发 goal、看 feedback、必要时
+# cancel，不参与回路本身。
+#
+# 长机毫不知情：它只是正常飞航线、正常发 odom。"谁是长机"只存在于从机这
+# 个 goal 的 leader_namespace 字段里，所以角色对调不需要改任何代码。
+
+# ---- Goal ----
+# 跟随哪架飞机（命名空间，如 'NX01'）
+string leader_namespace
+# 跟随间距，沿长机航迹回溯的弧长，单位米
+float32 follow_distance_m
+# 入列阶段超时；<=0 用 server 默认参数值
+float32 join_timeout_s
+---
+# ---- Result ----
+bool success
+# 结束在哪个阶段：join / track / break / done
+string stage
+string message
+# 结束时的实际间距（米）
+float32 final_gap_m
+---
+# ---- Feedback ----
+# 当前阶段：join / track / break
+string phase
+# 当前实际间距：跟随者自身位置到"应在位置"的距离，米
+float32 gap_m
+# 最近是否还能收到长机里程计
+bool leader_visible
+# 当前解算出的目标点（跟随者局部系，uwb_imu 下与世界系一致）
+float32 target_x
+float32 target_y

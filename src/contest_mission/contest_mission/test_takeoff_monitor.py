@@ -132,5 +132,24 @@ n7._armed = True; n7._odom_xyz = None
 check('没有里程计数据 -> 不算在空中且不崩', n7._already_airborne() is False)
 
 print()
+print('用例8：起飞前就绪判定（2026-09-21，用户："不能飞机一出世就给起飞命令"）')
+R = tmn.preflight_ready
+MAX, HOLD = 0.08, 3.0
+check('飞控还没连上 -> 不发', R(None, 0.01, 100.0, 110.0, MAX, HOLD)[0] is False)
+check('connected=False -> 不发', R(False, 0.01, 100.0, 110.0, MAX, HOLD)[0] is False)
+check('还没收到里程计 -> 不发', R(True, None, None, 110.0, MAX, HOLD)[0] is False)
+check('速度0.51m/s（NX02实测被拒时的值）-> 不发',
+      R(True, 0.512840, None, 110.0, MAX, HOLD)[0] is False)
+check('速度够低但刚静止0.5秒 -> 不发（瞬时低值不算收敛）',
+      R(True, 0.01, 109.5, 110.0, MAX, HOLD)[0] is False)
+check('持续静止3.0秒整 -> 可以发', R(True, 0.01, 107.0, 110.0, MAX, HOLD)[0] is True)
+check('持续静止5秒 -> 可以发', R(True, 0.02, 105.0, 110.0, MAX, HOLD)[0] is True)
+check('速度刚好等于门限且已持续够 -> 可以发',
+      R(True, 0.08, 105.0, 110.0, MAX, HOLD)[0] is True)
+check('门限比控制器的0.1m/s严，0.09被拦下',
+      R(True, 0.09, 105.0, 110.0, MAX, HOLD)[0] is False)
+check('不通过时给出可读原因', '定位源还没收敛' in R(True, 0.5, None, 110.0, MAX, HOLD)[1])
+
+print()
 print('全部通过' if not fails else f'失败 {len(fails)} 项: {fails}')
 sys.exit(1 if fails else 0)

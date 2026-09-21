@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TakeoffLand.msg"
   "msg/Px4ctrlDebug.msg"
   "action/Takeoff.action"
+  "action/FormationFollow.action"
   DEPENDENCIES std_msgs geometry_msgs action_msgs
 )
 

@@ -309,6 +309,19 @@ class _EventInbox:
             time.sleep(STANDBY_POLL_INTERVAL_S)
 
 
+#: 等长机"航线飞完"事件的兜底超时下限（2026-09-20）。正常情况下这个
+#: 事件几秒内就到；兜底值只是防止事件丢了永远卡住，取得宽松一些。
+ROUTE_DONE_MIN_TIMEOUT_S = 120.0
+
+#: 长机等僚机报"编队待命"的上限（2026-09-21）。僚机那边要先走完
+#: "起飞前就绪判定 -> 解锁 -> 爬升稳定 -> 悬停5秒 -> 接管编队控制权"
+#: 这一串，其中"起飞前就绪"要等定位源收敛（机载
+#: takeoff_monitor_node 的 preflight_timeout_s 默认90秒），所以这个
+#: 上限必须比它宽。超时就明确报错终止，不要"等不到就自己先飞"——那样
+#: 编队没发生却又飞完了航线，比直接失败更难排查。
+FORMATION_STANDBY_WAIT_TIMEOUT_S = 180.0
+
+
 def _spawn_detection_watcher(
     sdk: DroneSDK,
     class_id: str,
@@ -464,7 +477,11 @@ def _local_xy_to_world_xy(sdk: DroneSDK, local_x: float, local_y: float) -> Tupl
 # D3：第一部分任务——航线编队飞行
 # ============================================================================
 
-def _fly_route(sdk: DroneSDK, position_tracker: _PositionTracker) -> None:
+def _fly_route(
+    sdk: DroneSDK,
+    position_tracker: _PositionTracker,
+    route_waypoints: Optional[List[Tuple[float, float]]] = None,
+) -> None:
     """RECON分支：依次飞过`mission_constants.ROUTE_WAYPOINTS_XY`的4个
     途经点，每个途经点直接一次`goto()`，不再自己按`MAX_GOTO_STEP_M`
     拿直线插值出中间子航点。
@@ -488,9 +505,30 @@ def _fly_route(sdk: DroneSDK, position_tracker: _PositionTracker) -> None:
     （比如两点间确定没有障碍物、只是单纯距离太远）需要拆分步长，仍然
     可以复用。
     """
-    for wp_xy in mc.ROUTE_WAYPOINTS_XY:
+    waypoints = list(route_waypoints if route_waypoints is not None else mc.ROUTE_WAYPOINTS_XY)
+    # 2026-09-20（用户要求）：编队飞行的全过程以"回到各自起飞点并降落"收尾，
+    # 所以长机把自己的起飞点接在航线末尾当最后一个航点——僚机沿轨迹跟随，
+    # 自然会被带回起飞点附近，再各自归位降落。
+    own_pad = mc.own_landing_pad_xy(sdk.namespace)
+    if tuple(waypoints[-1]) != tuple(own_pad):
+        waypoints.append(tuple(own_pad))
+    if len(waypoints) < 2:
+        raise ValueError(
+            f'航线至少需要2个航点，当前只有{len(waypoints)}个。'
+            f'编队飞行的意义在于"沿一条航线保持队形"，单点不构成航线。'
+        )
+    total = len(waypoints)
+    for idx, wp_xy in enumerate(waypoints, start=1):
+        print(f'[{sdk.namespace}] 航线第{idx}/{total}个航点: ({wp_xy[0]}, {wp_xy[1]})', flush=True)
         _goto_world_xy(sdk, wp_xy[0], wp_xy[1], mc.CRUISE_AGL_M)
         position_tracker.update(wp_xy)
+
+    # 2026-09-20新增：航线完成通知（D7第4点改走跨机事件）。
+    # 只有长机知道航线由哪几个点组成、哪个是最后一个——从机手里没有这个
+    # 信息，原来只能按几何长度估时间再 time.sleep()。判定放在信息所在的
+    # 这一侧，从机等一个确切信号即可。
+    sdk.send_to_teammate(mv.ROUTE_DONE)
+    print(f'[{sdk.namespace}] 航线{total}个航点全部飞完，已通知队友', flush=True)
 
 
 # ============================================================================
@@ -805,7 +843,10 @@ def _run_search_and_response(
 # 角色主函数
 # ============================================================================
 
-def recon_main(sdk: DroneSDK) -> None:
+def recon_main(
+    sdk: DroneSDK,
+    route_waypoints: Optional[List[Tuple[float, float]]] = None,
+) -> None:
     """RECON角色的完整任务流程（D3+D4，D5/D6作为子流程被D4调用）。"""
     # D4判断点②同一套"提前注册"原则在RECON侧的应用——`supply_ready`/
     # `supply_landed`这两个事件都是SUPPLY发的，注册时机要在SUPPLY可能
@@ -814,7 +855,10 @@ def recon_main(sdk: DroneSDK) -> None:
     # 会被塞进收件箱、但主循环里不特别处理的"已知但忽略"事件，避免
     # `reliability.py`打"没有注册处理回调"的警告日志噪音。
     inbox = _EventInbox()
-    inbox.register(sdk, mv.SUPPLY_READY, _NOTIFY_SUPPLY_LANDED, *_SUPPLY_ORIGINATED_PURE_NOTIFY_EVENTS)
+    inbox.register(
+        sdk, mv.SUPPLY_READY, mv.FORMATION_STANDBY, _NOTIFY_SUPPLY_LANDED,
+        *_SUPPLY_ORIGINATED_PURE_NOTIFY_EVENTS,
+    )
 
     sdk.takeoff()  # 现在内部已经等到位置稳定才返回，见其docstring
     sdk.set_mission_state('enroute:takeoff_done')  # D7 第1点
@@ -822,9 +866,48 @@ def recon_main(sdk: DroneSDK) -> None:
     pad_xy = mc.own_landing_pad_xy(sdk.namespace)
     position_tracker = _PositionTracker(pad_xy)
 
-    _fly_route(sdk, position_tracker)
+    # 2026-09-21新增：等僚机报"编队待命"再起步。
+    # 实测教训：没有这个等待时，僚机因为定位没收敛没能解锁，长机照样把4个
+    # 航点全飞完了——编队根本没发生，这一轮测试白跑。编队飞行的定义就是
+    # "两机一起飞"，长机自己先走就不是编队了。
+    # 僚机那边的判据是机载 feedback 报 `hold`（已接管控制权、原地保持），
+    # 不是"已入列"——入列要等长机走起来，见 mission_vocab.FORMATION_STANDBY
+    # 的说明。
+    print(f'[{sdk.namespace}] 起飞完成，等僚机进入编队跟随待命…', flush=True)
+    inbox.wait_for(mv.FORMATION_STANDBY, timeout_s=FORMATION_STANDBY_WAIT_TIMEOUT_S)
+    print(f'[{sdk.namespace}] 僚机已就位，开始飞航线', flush=True)
+
+    pad_x_end, pad_y_end = mc.own_landing_pad_xy(sdk.namespace)
+    _fly_route(sdk, position_tracker, route_waypoints)
     sdk.set_mission_state('enroute:route_completed')  # D7 第4点（RECON视角）
 
+    # ---- 编队飞行收尾：落在自己的起飞点上 ----
+    # 2026-09-21（用户："回到起飞点后又往外跑就是错误了"）：编队飞行的
+    # 全过程定义就是"两机各自回到自己的起飞点并降落"。`_fly_route()`已经
+    # 把自己的起飞点接在航线末尾当最后一个航点，所以飞完时人已经在起飞点
+    # 附近。
+    # 之前这里没有降落，`_fly_route()`返回后直接进搜索阶段——长机回到
+    # 起飞点后立刻又飞出去找目标，看起来就是"编队没有收尾"。
+    #
+    # 降落前先补一次`goto_direct()`（跟SUPPLY侧收尾用的是同一套）：
+    # 航线最后一段交给ego_planner，规划器的"到点"判据本身有容差、末端还
+    # 会过冲（实测采样里见到飞过航点y=10到y=11.35），所以到点精度只有
+    # 米级——2026-09-21两轮实测长机落点误差1.05米，而走goto_direct的
+    # SUPPLY侧是0.07/0.25米，差一个量级。goto_direct走precision_servo的
+    # coordinate_goto直线飞，不经过规划器，把这最后一米收掉。
+    # ⚠️ 同SUPPLY侧的注意事项：这一段没有避障，仅适用于"已经在起降点附近、
+    # 两点之间确定无障碍"这种收尾场景。
+    pad_lx, pad_ly, pad_lz = sdk.world_to_local(pad_x_end, pad_y_end, mc.CRUISE_AGL_M)
+    sdk.goto_direct(pad_lx, pad_ly, pad_lz)
+    sdk.land()
+    sdk.set_mission_state('idle:formation_completed')
+    print(f'[{sdk.namespace}] 编队飞行结束：已回到起飞点并降落', flush=True)
+
+    # ---- 搜索阶段是编队之后的独立阶段，需要重新起飞 ----
+    # 编队飞行以降落收尾，后面的D5/D6火情搜索是另一个阶段，所以这里重新
+    # 起飞。`sdk.takeoff()`内部含机载的起飞前就绪判定+爬升稳定判定，跟
+    # 任务开头那次完全一样。
+    sdk.takeoff()
     sdk.set_mission_state('searching:fire_response_start')  # D7 第6点
     ground_fire_done, hr_fire_done = _run_search_and_response(sdk, position_tracker, inbox)
     if not (ground_fire_done and hr_fire_done):
@@ -859,6 +942,7 @@ def supply_main(sdk: DroneSDK) -> None:
     inbox = _EventInbox()
     inbox.register(
         sdk, mv.GROUND_FIRE_FOUND, mv.HR_FIRE_LOCKED, mv.RECON_LAUNCH_DONE,
+        mv.ROUTE_DONE,  # 2026-09-20：航线完成通知，替代原来的估时等待
         *_RECON_ORIGINATED_PURE_NOTIFY_EVENTS,
     )
 
@@ -871,14 +955,42 @@ def supply_main(sdk: DroneSDK) -> None:
     sdk.start_formation_follow(follow_distance_m=3.5)
     sdk.set_mission_state('enroute:formation_follow_started')  # D7 第2点
 
-    wait_s = _estimate_route_wait_seconds(sdk)
-    print(f'[{sdk.namespace}] 编队跟随中，按路线几何长度估算RECON飞完全程'
-          f'大概需要{wait_s:.1f}秒，SUPPLY将等待这么久再停止跟随+降落'
-          f'（具体估算依据见_estimate_route_wait_seconds()docstring）。')
-    time.sleep(wait_s)
+    # 2026-09-21新增：告诉长机"我已接管编队控制权、在自己起飞点上空保持，
+    # 你可以起步了"。这一步必须在`start_formation_follow()`返回之后——那个
+    # 方法返回的含义就是机载回路已经接管（feedback 报 `hold`）。
+    sdk.send_to_teammate(mv.FORMATION_STANDBY)
+    print(f'[{sdk.namespace}] 已进入编队跟随待命，已通知长机可以起步', flush=True)
 
-    sdk.set_mission_state('enroute:formation_follow_assumed_complete')  # D7 第4点（SUPPLY视角，近似判定）
+    # 2026-09-20改：等长机的确切"航线飞完"事件，不再按几何长度估时间。
+    # 原来是 _estimate_route_wait_seconds() + time.sleep()，代码注释自陈
+    # 是"近似判定"——从机手里没有航线定义，估不准。兜底超时仍按几何估算
+    # 值放宽一倍，避免事件万一丢了就永远卡住。
+    est_s = _estimate_route_wait_seconds(sdk)
+    wait_timeout_s = max(ROUTE_DONE_MIN_TIMEOUT_S, est_s * 2.0)
+    print(f'[{sdk.namespace}] 编队跟随中，等待RECON广播"{mv.ROUTE_DONE}"事件'
+          f'（几何估算约{est_s:.1f}秒，兜底超时{wait_timeout_s:.1f}秒）。')
+    inbox.wait_for(mv.ROUTE_DONE, timeout_s=wait_timeout_s)
+
+    sdk.set_mission_state('enroute:route_completed')  # D7 第4点（SUPPLY视角，确切信号）
     sdk.stop_formation_follow()
+
+    # 2026-09-20（用户要求）：编队飞行的全过程以"回到各自起飞点并降落"收尾。
+    # 原来这里是出列后**就地降落**——僚机停在长机航线末端后方3.5米的位置，
+    # 不是自己的起降点。出列已经把 relay_mode 交还给 normal，所以这一段
+    # goto 走的是 ego_planner，有避障。
+    own_pad = mc.own_landing_pad_xy(sdk.namespace)
+    print(f'[{sdk.namespace}] 出列，返回自己的起飞点{own_pad}降落', flush=True)
+    # 2026-09-21：这段返航用 goto_direct() 而不是 goto()。实测编队结束后
+    # ego_planner 会进入 `the drone is in obstacle` + `Ran out of pool` 的
+    # 状态、规划不出轨迹，goto() 就一直等到超时（飞机其实已经飞到 pad 附近
+    # 0.9 米处停着）。两个起降点之间是空地、距离只有 3 米，goto_direct 走
+    # precision_servo 的 coordinate_goto 直线飞（E6 实测 2.5 米 / 9.8 秒 /
+    # 误差 0.196 米），不经过规划器，对这段短途足够且更可靠。
+    # ⚠️ 代价是这一段没有避障——仅适用于"两点之间确定无障碍"的场景，不要
+    # 无脑推广到别的 goto 调用。ego_planner 编队后为何进入异常状态是另一个
+    # 待查问题。
+    lx, ly, lz = sdk.world_to_local(own_pad[0], own_pad[1], mc.CRUISE_AGL_M)
+    sdk.goto_direct(lx, ly, lz)
     sdk.land()
     sdk.set_mission_state('idle:standby_after_route')  # D7 第5点
 
@@ -932,11 +1044,34 @@ def supply_main(sdk: DroneSDK) -> None:
 # 主程序骨架（D2）
 # ============================================================================
 
+def _parse_route(route_text: Optional[str]) -> Optional[List[Tuple[float, float]]]:
+    """把 --route 的 "x1,y1 x2,y2 ..." 解析成航点列表。
+
+    至少2个点——编队飞行的意义在于"沿一条航线保持队形"，单点不构成航线。
+    不传（None）时返回 None，调用方用默认航线。
+    """
+    if not route_text:
+        return None
+    pts: List[Tuple[float, float]] = []
+    for token in route_text.split():
+        parts = token.split(',')
+        if len(parts) != 2:
+            raise ValueError(f'航点格式错误: {token!r}，应为 "x,y"（逗号分隔，点之间用空格）')
+        pts.append((float(parts[0]), float(parts[1])))
+    if len(pts) < 2:
+        raise ValueError(f'航线至少需要2个航点，--route 只给了{len(pts)}个')
+    return pts
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='2026大赛contest task全流程任务程序')
     parser.add_argument('--namespace', required=True, help="这架飞机的命名空间（比如'NX01'）")
     parser.add_argument('--role', required=True, choices=('recon', 'supply'), help='这次运行分配到的角色')
     parser.add_argument('--teammate-namespace', required=True, dest='teammate_namespace', help='队友那架飞机的命名空间')
+    parser.add_argument(
+        '--route', default=None,
+        help='编队飞行航线，格式 "x1,y1 x2,y2 ..."（世界坐标，至少2个点，多则不限）。'
+             '不传则用 mission_constants.ROUTE_WAYPOINTS_XY 的默认4点航线。')
     return parser.parse_args()
 
 
@@ -949,7 +1084,8 @@ def main() -> None:
         # 全文件除了`own_landing_pad_xy(sdk.namespace)`这一处D1允许的例外
         # 之外，没有任何地方按namespace分支业务逻辑。
         if sdk.role == 'recon':
-            recon_main(sdk)
+            # 航线只有长机需要（从机靠编队跟随，不自己飞航点）
+            recon_main(sdk, _parse_route(getattr(args, 'route', None)))
         else:
             supply_main(sdk)
     except ContestSdkError as exc:

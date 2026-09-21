@@ -28,9 +28,14 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from contest_mission.formation_follower_node import LeaderPathBuffer  # noqa: E402
+# 节点文件顶部要import rclpy，宿主机上没有ROS，先顶掉再按路径加载。
+import _ros_stubs  # noqa: E402
+
+LeaderPathBuffer = _ros_stubs.load_node_module(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'formation_follower_node.py')
+).LeaderPathBuffer
 
 
 def polyline_arc_length_from_point_to_end(points, point, tol=1e-3):
@@ -81,7 +86,7 @@ def _build_buffer(points, gap_eps=1e-6):
     的去重逻辑介入，避免测试用例的点被意外过滤掉。"""
     buf = LeaderPathBuffer(min_point_gap_m=gap_eps, max_buffer_length_m=1e9)
     for i, (x, y) in enumerate(points):
-        buf.append(x, y, float(i))
+        buf.append(x, y, 1.5, float(i))
     return buf
 
 
@@ -207,7 +212,7 @@ class TestEdgeCases(unittest.TestCase):
 
     def test_single_point_buffer_returns_that_point(self):
         buf = LeaderPathBuffer()
-        buf.append(1.23, 4.56, 0.0)
+        buf.append(1.23, 4.56, 1.5, 0.0)
         result = buf.point_at_arc_length_behind(3.5)
         self.assertAlmostEqual(result[0], 1.23, places=6)
         self.assertAlmostEqual(result[1], 4.56, places=6)
@@ -216,17 +221,17 @@ class TestEdgeCases(unittest.TestCase):
         # 默认min_point_gap_m=0.05，间距远小于这个值的点应该被过滤，
         # 验证append()确实起到了防止缓冲区被高频odom灌爆的作用。
         buf = LeaderPathBuffer(min_point_gap_m=0.05)
-        buf.append(0.0, 0.0, 0.0)
-        buf.append(0.001, 0.0, 0.01)  # 远小于0.05米，应该被忽略
-        buf.append(0.002, 0.0, 0.02)  # 同上
+        buf.append(0.0, 0.0, 1.5, 0.0)
+        buf.append(0.001, 0.0, 1.5, 0.01)  # 远小于0.05米，应该被忽略
+        buf.append(0.002, 0.0, 1.5, 0.02)  # 同上
         self.assertEqual(len(buf), 1)
-        buf.append(1.0, 0.0, 1.0)  # 超过0.05米，应该被接受
+        buf.append(1.0, 0.0, 1.5, 1.0)  # 超过0.05米，应该被接受
         self.assertEqual(len(buf), 2)
 
     def test_max_buffer_length_trims_old_points(self):
         buf = LeaderPathBuffer(min_point_gap_m=0.0, max_buffer_length_m=5.0)
         for i in range(20):
-            buf.append(float(i), 0.0, float(i))
+            buf.append(float(i), 0.0, 1.5, float(i))
         # 总长上限5米，最新点在(19,0)，最老的点应该被裁剪到只剩下
         # 大约(14,0)附近（19-5=14），不会一直保留(0,0)。
         result = buf.point_at_arc_length_behind(100.0)  # 超出缓冲区总长，兜底返回最老点

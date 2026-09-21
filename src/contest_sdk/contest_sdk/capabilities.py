@@ -182,15 +182,35 @@ HOVER_AFTER_TAKEOFF_S = 5.0
 #: 复现过。这条短路让两条路径（action 与退回的选手侧判定）行为一致。
 ALREADY_AIRBORNE_Z_M = 0.5
 
+#: 等"僚机进入跟随待命"的上限（2026-09-21）。原来这里等的是"入列完成"
+#: （feedback 报 track），但 track 要等长机走起来、长机又要等僚机报准备好
+#: ——互相等会死锁，所以改成等 hold（僚机已接管控制权、原地保持）。这个
+#: 信号在 goal 被接受后一两个 feedback 周期内就会出现，不需要很长，
+#: 20秒足够；入列/保持本身的超时由机载 server 的 join_timeout_s /
+#: leader_start_timeout_s 负责。
+FORMATION_STANDBY_WAIT_S = 20.0
+
+#: 等机载起飞 action 返回结果的**唯一**兜底上限（2026-09-21）。
+#:
+#: 为什么客户端这边不再自己算时间预算：判定权已经下沉到机载
+#: `takeoff_monitor_node`，它对每个阶段都有自己的超时
+#: （`preflight_timeout_s` / `armed_timeout_s` / `goal.timeout_s`），
+#: 任何情况下都会返回一个带 stage 的结果。客户端再维护一套并行的预算，
+#: 两套算法就必然会在某些时序下给出相反的结论——实测出现过"机载报
+#: success=True、客户端同时抛 TakeoffTimeoutError"（起因是机载的总超时
+#: 从"就绪那一刻"起算，而客户端从"发出 goal"起算，机载等定位收敛的几十秒
+#: 全被算进了客户端的预算里）。
+#:
+#: 所以这里只保留一个明显大于机载所有阶段超时之和的兜底值，它唯一的作用
+#: 是"机载节点挂了、永远不返回结果"这种情况下不要无限等。正常路径上永远
+#: 不会走到这个值——失败也是机载先返回失败结果。
+TAKEOFF_ACTION_HARD_TIMEOUT_S = 300.0
+
 ACTION_SERVER_PROBE_TIMEOUT_S = 2.0
 
 #: 等 action goal 被 accept/reject 的时长。这一步是一次 service 往返，
 #: 正常是毫秒级，给 5 秒是留给 DDS 发现没跟上的余量。
 ACTION_GOAL_ACCEPT_TIMEOUT_S = 5.0
-
-#: 等 result 时在调用方 timeout 之上额外留的余量，避免机载判定的超时
-#: 和选手侧的超时同时到期、导致分不清是谁先超时。
-ACTION_RESULT_EXTRA_TIMEOUT_S = 10.0
 
 #: 2026-09-17新增：起飞前置检查的超时时间——UWB/里程计数据就绪、PX4
 #: 飞控连接，这两项检查各自用这个超时（不复用`timeout`参数，因为这两项
@@ -544,9 +564,15 @@ class DroneSDK:
             from rclpy.action import ActionClient as _ActionClient
             self._Takeoff = _TakeoffAction
             self._takeoff_action_cli = _ActionClient(self._node, _TakeoffAction, 'takeoff')
+            from quadrotor_msgs.action import FormationFollow as _FormationAction
+            self._FormationFollow = _FormationAction
+            self._formation_action_cli = _ActionClient(
+                self._node, _FormationAction, 'formation_follow')
         except ImportError:
             self._Takeoff = None
             self._takeoff_action_cli = None
+            self._FormationFollow = None
+            self._formation_action_cli = None
         self._Path = Path
         self._Empty = Empty
 
@@ -580,6 +606,9 @@ class DroneSDK:
         #: `do_action()`给每次触发生成goal_id用的自增计数器（见该方法
         #: docstring里"幂等去重+结果关联"一节）。
         self._action_goal_counter: int = 0
+        #: 正在执行的编队 goal 句柄与 result future（stop 时用来 cancel）
+        self._formation_goal_handle = None
+        self._formation_result_future = None
         self._mission_state: Optional[str] = None
         self._servo_status: Optional[str] = None
         self._centered_pose_xy: Optional[Tuple[float, float]] = None
@@ -1225,6 +1254,14 @@ class DroneSDK:
         Raises:
             ActionFailedError: `~/set_parameters`调用超时或被拒绝。
         """
+        # 2026-09-20：优先走机载的 FormationFollow action——它把跟随拆成
+        # 入列(join)/保持(track)/出列(break)三个阶段，这个调用会阻塞到
+        # "入列完成"才返回，调用方因此第一次能确切知道"队形组好了"，而
+        # 不是设完参数就走、靠估时间。server 不在时自动退回原来的参数路径。
+        if self._try_formation_via_action(follow_distance_m, timeout):
+            return
+
+        self._progress('机载编队 action 不可用，退回参数方式启用（行为与改造前一致）')
         ok = self._call_set_parameters_blocking(
             self._formation_follower_params_cli,
             {
@@ -1240,8 +1277,103 @@ class DroneSDK:
             )
         self._progress(f'编队跟随已启用（跟随{self.teammate_namespace}，距离{follow_distance_m}米）')
 
+    def _try_formation_via_action(self, follow_distance_m: float, timeout: float) -> bool:
+        """尝试走机载 FormationFollow action，阻塞到**僚机已接管并进入待命**。
+
+        2026-09-21改（原来是阻塞到入列完成，即 feedback 报 `track`）：
+        `track` 要等长机真的走出一个跟随距离才可能达成，而长机那边要等
+        僚机报"我准备好了"才起步——两边互相等，必然死锁。现在改成等
+        `hold`（僚机已接管控制权、在自己起飞点上空原地保持），这才是
+        "可以让长机起步了"的确切信号。后续的 join->track 由机载回路自己
+        完成，选手程序不需要在那里阻塞。
+
+        Returns:
+            True 表示 action 路径走通且僚机已进入跟随待命；False 表示
+            server 不在，调用方应退回参数路径。
+
+        Raises:
+            ActionFailedError: server 在但拒绝 goal、或入列阶段明确失败
+                （入列超时/长机丢失）。这种情况不退回参数路径重来一次——
+                参数路径连入列判据都没有，退回去只会掩盖问题。
+        """
+        if self._formation_action_cli is None:
+            return False
+        if not self._formation_action_cli.wait_for_server(
+                timeout_sec=ACTION_SERVER_PROBE_TIMEOUT_S):
+            return False
+
+        goal = self._FormationFollow.Goal()
+        goal.leader_namespace = self.teammate_namespace
+        goal.follow_distance_m = float(follow_distance_m)
+        goal.join_timeout_s = 0.0  # 用 server 默认
+
+        # `hold`/`join`/`track` 任意一个到达都说明机载回路已经接管——
+        # `hold` 是最早的那个信号，也是"可以让长机起步了"的判据。
+        standby = {'ok': False}
+
+        def _on_feedback(msg: Any) -> None:
+            fb = msg.feedback
+            gap_text = f'{fb.gap_m:.2f}m' if fb.gap_m >= 0 else '未知'
+            self._progress(
+                f'编队{fb.phase}阶段…间距{gap_text}，长机可见={fb.leader_visible}（回路在机载）'
+            )
+            if fb.phase in ('hold', 'join', 'track'):
+                standby['ok'] = True
+
+        send_future = self._formation_action_cli.send_goal_async(
+            goal, feedback_callback=_on_feedback)
+        if not self._wait_future(send_future, ACTION_GOAL_ACCEPT_TIMEOUT_S):
+            raise ActionFailedError(
+                action_name='start_formation_follow(goal无响应)', timeout_s=timeout,
+                namespace=self.namespace)
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            raise ActionFailedError(
+                action_name='start_formation_follow(goal被拒绝)', timeout_s=timeout,
+                namespace=self.namespace)
+
+        # 记住句柄：stop_formation_follow() 要用它发 cancel
+        self._formation_goal_handle = goal_handle
+        self._formation_result_future = goal_handle.get_result_async()
+
+        # 阻塞到僚机进入跟随待命（feedback 报出 hold/join/track）或 goal
+        # 提前结束。不等 track——见本方法 docstring 里的死锁说明。
+        deadline = time.monotonic() + FORMATION_STANDBY_WAIT_S
+        while time.monotonic() < deadline:
+            if standby['ok']:
+                self._progress(
+                    f'编队跟随已就位待命（跟随{self.teammate_namespace}，间距'
+                    f'{follow_distance_m}米，入列/保持回路在机载）'
+                )
+                return True
+            if self._formation_result_future.done():
+                res = self._formation_result_future.result().result
+                self._formation_goal_handle = None
+                raise ActionFailedError(
+                    action_name=f'start_formation_follow（机载: {res.message}）',
+                    timeout_s=timeout, namespace=self.namespace)
+            time.sleep(0.1)
+        raise ActionFailedError(
+            action_name=f'start_formation_follow(等就位待命超过{FORMATION_STANDBY_WAIT_S:.0f}秒)',
+            timeout_s=timeout, namespace=self.namespace)
+
     def stop_formation_follow(self, timeout: float = 10.0) -> None:
-        """停用编队跟随（`formation_follower_node`的`enabled`设回`False`）。"""
+        """停用编队跟随：出列并停止发布目标点。
+
+        走 action 时发 cancel，server 负责出列收尾后返回 CANCELED；飞机
+        停在最后一个目标点由 pt4ctrl 的 AUTO_HOVER 维持，本方法不额外发
+        任何降落/悬停指令。
+        """
+        if self._formation_goal_handle is not None:
+            handle, self._formation_goal_handle = self._formation_goal_handle, None
+            cancel_future = handle.cancel_goal_async()
+            self._wait_future(cancel_future, timeout)
+            if self._formation_result_future is not None:
+                self._wait_future(self._formation_result_future, timeout)
+                self._formation_result_future = None
+            self._progress('编队跟随已出列（action cancel）')
+            return
+
         ok = self._call_set_parameters_blocking(
             self._formation_follower_params_cli, {'enabled': False}, timeout_s=timeout
         )
@@ -1531,10 +1663,13 @@ class DroneSDK:
                 timeout_s=timeout, namespace=self.namespace, stage='action_goal_rejected')
 
         result_future = goal_handle.get_result_async()
-        # 给机载判定留出比自身 timeout 更宽的余量，避免两侧超时同时到期
-        if not self._wait_future(result_future, timeout + ACTION_RESULT_EXTRA_TIMEOUT_S):
+        # 只等机载返回结果，不在这里维护第二套时间预算——见
+        # TAKEOFF_ACTION_HARD_TIMEOUT_S 的说明。机载每个阶段都有自己的
+        # 超时，失败也会返回带 stage 的结果，客户端照原样报出去就行。
+        if not self._wait_future(result_future, TAKEOFF_ACTION_HARD_TIMEOUT_S):
             raise TakeoffTimeoutError(
-                timeout_s=timeout, namespace=self.namespace, stage='action_result_timeout')
+                timeout_s=TAKEOFF_ACTION_HARD_TIMEOUT_S, namespace=self.namespace,
+                stage='action_no_result')
 
         result = result_future.result().result
         if not result.success:
