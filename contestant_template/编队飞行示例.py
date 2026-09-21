@@ -15,7 +15,10 @@ import time
 from contest_sdk import DroneSDK
 
 CRUISE_AGL_M = 1.5            # 巡航离地高度
-STANDBY_WAIT_S = 180.0        # 长机等僚机就位的上限（僚机要等定位收敛才起飞）
+# 长机等僚机就位的上限。必须大于僚机最坏情况的起飞耗时（机载等定位收敛的
+# preflight_timeout_s=150秒 + 起飞动作本身60秒），否则僚机还在正常起飞、
+# 长机就先判超时终止了。
+STANDBY_WAIT_S = 300.0
 ROUTE_DONE_WAIT_S = 600.0     # 僚机等航线飞完的上限
 READY = 'formation_standby'   # 僚机 -> 长机
 ROUTE_DONE = 'route_done'     # 长机 -> 僚机

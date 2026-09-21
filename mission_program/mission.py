@@ -316,10 +316,13 @@ ROUTE_DONE_MIN_TIMEOUT_S = 120.0
 #: 长机等僚机报"编队待命"的上限（2026-09-21）。僚机那边要先走完
 #: "起飞前就绪判定 -> 解锁 -> 爬升稳定 -> 悬停5秒 -> 接管编队控制权"
 #: 这一串，其中"起飞前就绪"要等定位源收敛（机载
-#: takeoff_monitor_node 的 preflight_timeout_s 默认90秒），所以这个
+#: takeoff_monitor_node 的 preflight_timeout_s，2026-09-21 放宽到150秒），
+#: 再加上起飞动作本身的 goal.timeout_s（60秒）——这个值必须**严格大于**
+#: 这两者之和，否则僚机还在正常起飞、长机这边就先判超时终止了。改机载
+#: 那两个超时时必须同步核这个值。所以这个
 #: 上限必须比它宽。超时就明确报错终止，不要"等不到就自己先飞"——那样
 #: 编队没发生却又飞完了航线，比直接失败更难排查。
-FORMATION_STANDBY_WAIT_TIMEOUT_S = 180.0
+FORMATION_STANDBY_WAIT_TIMEOUT_S = 300.0
 
 
 def _spawn_detection_watcher(

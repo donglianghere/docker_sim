@@ -165,7 +165,11 @@ class TakeoffMonitorNode(Node):
         # 速度会来回抖，能抽到低值的瞬间），要求连续`static_hold_s`秒都
         # 低于门限才认为定位源真的收敛了、飞机真的停着。
         self.declare_parameter('static_hold_s', 3.0)
-        self.declare_parameter('preflight_timeout_s', 90.0)
+        # 2026-09-21 从 90 放宽到 150：实测 NX02 停在地上时里程计合速度就在
+        # 0.08~0.14m/s 之间抖（控制器自己的拒绝门限是 0.1），凑够连续 3 秒
+        # 低于 0.08 需要碰运气，90 秒偏紧。放宽只影响"最坏情况等多久才
+        # 报失败"，不影响正常路径——定位收敛得快就立刻起飞。
+        self.declare_parameter('preflight_timeout_s', 150.0)
 
         self._armed: Optional[bool] = None
         self._odom_xyz: Optional[Tuple[float, float, float]] = None
@@ -297,7 +301,15 @@ class TakeoffMonitorNode(Node):
                 goal_handle.canceled()
                 return self._result(False, phase, '调用方取消了起飞')
             now = time.monotonic()
-            if now - started > timeout_s:
+            # 总超时只管起飞动作本身（第1~3步），不管 preflight——preflight
+            # 等的是定位源收敛，有自己的 preflight_timeout_s。
+            #
+            # 2026-09-21 修：原来这个检查在 preflight 期间也在跑，于是
+            # preflight 实际只有 `goal.timeout_s`（客户端默认60秒）这么长，
+            # 而不是 preflight_timeout_s（90秒），下面那句 started = now 形同
+            # 摆设。实测 NX02 地面里程计噪声卡在 0.08~0.11m/s 边界，60 秒内
+            # 没凑够 3 秒静止窗口就被判 `stage=preflight 总超时`，起飞失败。
+            if phase != 'preflight' and now - started > timeout_s:
                 goal_handle.abort()
                 return self._result(False, phase, f'总超时（{timeout_s:.0f}秒）仍未完成，卡在阶段{phase}')
 

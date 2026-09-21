@@ -1,0 +1,32 @@
+diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
+--- a/src/planner/plan_manage/src/traj_server.cpp
++++ b/src/planner/plan_manage/src/traj_server.cpp
+@@ -257,6 +257,28 @@
+     yaw_temp = dir.norm() > 0.1 ? atan2(dir(1), dir(0)) : last_yaw_;
+   }
+ 
++  // docker_sim 2026-09-21: CONSTANT模式直接输出常量，不经过
++  // step_yaw_toward()的限速平滑。
++  //
++  // 为什么：last_yaw_只在traj_server启动时初始化成0.0，之后再也没有跟
++  // 飞机的实际朝向同步过（这个节点只订阅Bspline一条话题，拿不到里程计）。
++  // 于是第一条轨迹开始时，指令yaw从0起步、按max_yaw_change每帧限速转向
++  // yaw_constant_——飞机忠实跟随这个指令。实测：起飞悬停交接到第一个goto
++  // 的瞬间机头先顺时针甩到约20度、再花约3秒转回90度，Gazebo真值同步验证
++  // （45.7s truth=89.8 -> 46.7s truth=22.2 -> 48.7s truth=67.4 -> 49.7s
++  // truth=89.2）。"保持这个角度不变"本来就没有需要平滑的量，把它塞进一个
++  // 以陈旧起点为基准的平滑器是错的。
++  //
++  // 常量本身改变时（比如D6绕飞结束从POINT切回CONSTANT）指令会是一个阶跃，
++  // 由PX4自己的偏航角速率限幅（MPC_YAWRAUTO_MAX）负责平滑转过去——这跟让
++  // traj_server从一个跟飞机无关的历史值慢慢爬过去是两回事。
++  if (yaw_mode_ == YAW_MODE_CONSTANT)
++  {
++    last_yaw_ = yaw_constant_;
++    last_yaw_dot_ = 0.0;
++    return std::pair<double, double>(yaw_constant_, 0.0);
++  }
++
+   double yawdot = 0;
+   double yaw = step_yaw_toward(yaw_temp, time_now, time_last, yawdot);
+   return std::pair<double, double>(yaw, yawdot);

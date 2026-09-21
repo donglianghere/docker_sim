@@ -44,7 +44,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
@@ -189,6 +189,40 @@ ALREADY_AIRBORNE_Z_M = 0.5
 #: 20秒足够；入列/保持本身的超时由机载 server 的 join_timeout_s /
 #: leader_start_timeout_s 负责。
 FORMATION_STANDBY_WAIT_S = 20.0
+
+#: 判定"起飞前 yaw 已稳定"的采样条件（2026-09-21）。
+#:
+#: 为什么要等稳定：`takeoff()` 要把起飞前的真实机头朝向记下来，再用
+#: `set_yaw_mode_constant()` 命令飞机全程保持这个朝向。但里程计的**第一帧**
+#: 姿态往往是单位四元数（yaw=0）——定位源还没收敛、还没把 UWB 的绝对朝向
+#: 融合进去。实测：飞机物理朝向（Gazebo 真值）全程是 90.0°，里程计稳定后
+#: 也是 89.7~90.4°，而 `get_current_yaw()` 在起飞前读到的是 **0.0°**，于是
+#: `set_yaw_mode_constant(0°)` 反过来把机头从 90° 转到了 0°——本来是要
+#: "保持朝向不变"的一行代码，成了把朝向转走的元凶。
+#:
+#: 判据：连续 YAW_SETTLE_SAMPLES 次采样的最大偏差小于
+#: YAW_SETTLE_TOLERANCE_DEG，取这批样本的圆周均值。
+YAW_SETTLE_SAMPLES = 8
+YAW_SETTLE_INTERVAL_S = 0.25
+YAW_SETTLE_TOLERANCE_DEG = 3.0
+YAW_SETTLE_TIMEOUT_S = 20.0
+
+#: 里程计 yaw 与 UWB 绝对 yaw 的允许偏差（度，2026-09-21 追加）。
+#:
+#: 为什么只看"稳定"不够：定位源还没收敛时，里程计发的是**单位四元数**
+#: （yaw 恒为 0.0），方差精确等于零——"稳定"判据会把"稳定地错"当成"稳定地
+#: 对"直接采纳。实测 NX02 前 14 秒 odom_yaw 一直是 0.0，而同期 UWB 报
+#: 87~93 度、Gazebo 真值 90 度，于是 pretakeoff_yaw 记成了 0。
+#:
+#: `uwb/pose_abs` 的 yaw 从第一帧起就是对的（仿真里 uwb_ground_truth_node、
+#: 真机上 nlink_pose_bridge_node 都直接给绝对朝向，不需要收敛过程），而且
+#: 跟里程计是同一套 yaw 约定（收敛后实测 odom 89.9 / uwb 90.0 / 真值 90.0
+#: 三者一致）。所以用它当交叉校验：两个源对得上，才说明里程计真的收敛了。
+#:
+#: 10 度的余量覆盖 UWB 自身噪声（uwb_ground_truth_node 的 yaw_noise_std_deg
+#: 默认 2 度）加上两条链路的时间差。UWB 话题拿不到时退回"只看稳定"，不因为
+#: 少一个校验源就拒绝起飞。
+YAW_SOURCE_AGREE_DEG = 10.0
 
 #: 等机载起飞 action 返回结果的**唯一**兜底上限（2026-09-21）。
 #:
@@ -546,7 +580,7 @@ class DroneSDK:
     # ------------------------------------------------------------------
 
     def _setup_transport(self) -> None:
-        from geometry_msgs.msg import PointStamped
+        from geometry_msgs.msg import PointStamped, PoseStamped
         from mavros_msgs.msg import State
         from nav_msgs.msg import Odometry, Path
         from quadrotor_msgs.msg import PositionCommand, TakeoffLand
@@ -597,6 +631,7 @@ class DroneSDK:
         # 绕飞本身的yaw跟踪算法问题（那个问题更早之前就已经通过默认切到
         # CONSTANT模式处理过了），是CONSTANT目标值本身选错了。
         self._current_yaw: Optional[float] = None
+        self._uwb_yaw: Optional[float] = None
         # takeoff()调用时刻实测的yaw角，绕飞结束后应该恢复到这个值（不是
         # 硬编码0.0）——mission.py里"绕飞时用POINT模式对准立柱，绕完/命中
         # 后恢复固定朝向"的收尾逻辑要用这个，不能再写死0.0。
@@ -621,6 +656,8 @@ class DroneSDK:
 
         # ---- 自身里程计（进度打印用，非必须但让B6提示更有信息量） ----
         self._node.create_subscription(Odometry, 'dlio/odom_node/odom', self._on_odom, 10)
+        # 只用于起飞前 yaw 的交叉校验，见 YAW_SOURCE_AGREE_DEG
+        self._node.create_subscription(PoseStamped, 'uwb/pose_abs', self._on_uwb_pose, 10)
 
         # ---- goto()/cancel_goto()：waypoint_queue/waypoint_state/waypoint_cancel ----
         self._waypoint_queue_pub = self._node.create_publisher(Path, 'waypoint_queue', 10)
@@ -725,6 +762,11 @@ class DroneSDK:
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self._current_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    def _on_uwb_pose(self, msg: Any) -> None:
+        q = msg.pose.orientation
+        self._uwb_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                   1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def _on_waypoint_state(self, msg: Any) -> None:
         self._waypoint_state = msg.data
@@ -1520,7 +1562,10 @@ class DroneSDK:
         except SoundLightError as exc:
             self._progress(f'声光反馈板不可用，跳过（不影响起飞）：{exc}')
 
-        self.pretakeoff_yaw = self.get_current_yaw()
+        # 必须用"稳定后"的 yaw，不能用 get_current_yaw() 的瞬时第一帧——
+        # 见 YAW_SETTLE_SAMPLES 上面那段实测说明（起飞前读到 0°、飞机实际
+        # 朝向 90°，结果这行代码把机头转走了）。
+        self.pretakeoff_yaw = self._settled_yaw()
         self.set_yaw_mode_constant(self.pretakeoff_yaw)
 
         # 2026-09-20：起飞完成判定已下沉到机载（takeoff_monitor_node 的
@@ -2284,6 +2329,66 @@ class DroneSDK:
             raise DetectionTimeoutError(
                 class_id='dlio/odom_node/odom', timeout_s=timeout, namespace=self.namespace)
         return self._odom_xyz
+
+    def _settled_yaw(self, timeout: float = YAW_SETTLE_TIMEOUT_S) -> float:
+        """等里程计 yaw 稳定下来，返回这批样本的圆周均值（弧度）。
+
+        见 YAW_SETTLE_SAMPLES 上面的说明：不能用第一帧，那一帧可能还是
+        定位源没收敛时的单位四元数。超时就退回当前瞬时值并给出提示——
+        宁可用一个可能不准的值继续起飞，也不要因为 yaw 读不稳就不让起飞。
+        """
+        tol_rad = math.radians(YAW_SETTLE_TOLERANCE_DEG)
+        deadline = time.monotonic() + timeout
+        samples: List[float] = []
+        while time.monotonic() < deadline:
+            y = self._current_yaw
+            if y is None:
+                time.sleep(YAW_SETTLE_INTERVAL_S)
+                continue
+            samples.append(y)
+            if len(samples) > YAW_SETTLE_SAMPLES:
+                samples.pop(0)
+            if len(samples) == YAW_SETTLE_SAMPLES:
+                # 圆周均值，避免 ±180° 附近取平均直接算错
+                mean = math.atan2(
+                    sum(math.sin(v) for v in samples) / len(samples),
+                    sum(math.cos(v) for v in samples) / len(samples),
+                )
+                spread = max(abs(math.atan2(math.sin(v - mean), math.cos(v - mean)))
+                             for v in samples)
+                if spread <= tol_rad:
+                    # 稳定了还要跟 UWB 对得上——见 YAW_SOURCE_AGREE_DEG
+                    uwb = self._uwb_yaw
+                    if uwb is None:
+                        return mean
+                    diff = abs(math.atan2(math.sin(mean - uwb), math.cos(mean - uwb)))
+                    if math.degrees(diff) <= YAW_SOURCE_AGREE_DEG:
+                        return mean
+                    self._progress(
+                        f'里程计朝向{math.degrees(mean):.1f}°已稳定，但跟UWB绝对朝向'
+                        f'{math.degrees(uwb):.1f}°差{math.degrees(diff):.1f}°'
+                        f'（超过{YAW_SOURCE_AGREE_DEG:.0f}°）——定位源还没收敛，继续等'
+                    )
+                    samples.clear()
+                self._progress(
+                    f'等机头朝向稳定…最近{YAW_SETTLE_SAMPLES}次采样偏差'
+                    f'{math.degrees(spread):.1f}°（要求小于{YAW_SETTLE_TOLERANCE_DEG:.0f}°）'
+                )
+            time.sleep(YAW_SETTLE_INTERVAL_S)
+        # 超时兜底优先用 UWB 的绝对朝向：它不需要收敛过程，比"可能还停在单位
+        # 四元数上的里程计瞬时值"更可信。两个都没有才用 0.0。
+        if self._uwb_yaw is not None:
+            self._progress(
+                f'等机头朝向稳定超时（{timeout:.0f}秒），退回UWB绝对朝向'
+                f'{math.degrees(self._uwb_yaw):.1f}°继续起飞'
+            )
+            return self._uwb_yaw
+        fallback = self._current_yaw if self._current_yaw is not None else 0.0
+        self._progress(
+            f'等机头朝向稳定超时（{timeout:.0f}秒），且收不到UWB绝对位置，'
+            f'退回里程计瞬时值{math.degrees(fallback):.1f}°继续起飞'
+        )
+        return fallback
 
     def get_current_yaw(self, timeout: float = 10.0) -> float:
         """读取自己当前的实际yaw角（弧度，局部坐标系，跟`goto()`/
