@@ -1355,7 +1355,8 @@ class DroneSDK:
 
         def _on_feedback(msg: Any) -> None:
             fb = msg.feedback
-            gap_text = f'{fb.gap_m:.2f}m' if fb.gap_m >= 0 else '未知'
+            # NaN 才是"算不出来"；负值是正常的（僚机略微超前于队形位置）
+            gap_text = '未知' if math.isnan(fb.gap_m) else f'{fb.gap_m:.2f}m'
             self._progress(
                 f'编队{fb.phase}阶段…间距{gap_text}，长机可见={fb.leader_visible}（回路在机载）'
             )

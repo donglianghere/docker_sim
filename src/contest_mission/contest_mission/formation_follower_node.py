@@ -1267,7 +1267,11 @@ class FormationFollowerNode(Node):
     def _publish_formation_feedback(self, goal_handle, phase: str, gap, leader_visible: bool) -> None:
         fb = FormationFollow.Feedback()
         fb.phase = phase
-        fb.gap_m = float(gap) if gap is not None else -1.0
+        # 用 NaN 表示"还算不出来"，不用 -1.0：落后量为**负**是正常且有意义的
+        # 值（僚机略微超前于"落后 follow_distance_m"那条线），而那恰恰是跟得好
+        # 时的稳态。用负数当哨兵会让"一切正常"被显示成"间距未知"——2026-09-21
+        # 一键测试脚本的结果摘要就是这么被坑的。
+        fb.gap_m = float(gap) if gap is not None else float('nan')
         fb.leader_visible = bool(leader_visible)
         tx, ty = self._last_target_xy if self._last_target_xy else (0.0, 0.0)
         fb.target_x, fb.target_y = float(tx), float(ty)
