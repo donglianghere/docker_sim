@@ -23,8 +23,11 @@
 #          bash 运行仿真.sh
 #      （如果双击没反应，大概率是系统没有把.sh文件关联到"用终端打开"，
 #      改用终端里执行这条命令肯定管用）；
-#   4. 仿真那一侧（另外有一套仿真环境，通常由赛事方/助教已经启动好）需要
-#      已经在运行，这个脚本只负责起"你的任务程序"，不负责起飞机仿真本身。
+#   4. 仿真那一侧：如果这个文件夹就放在仿真项目里（同级目录能找到
+#      docker-compose.yml），脚本每次运行会自动重建仿真容器，让两架飞机
+#      回到各自的起降点，保证每次都从同一个初始条件开始。不想重建就加
+#      --no-restart。如果你手里只有这个模板文件夹（没有仿真那套文件），
+#      脚本会跳过这一步，仿真环境由赛事方/助教启动。
 #
 # 如果你想让这个文件夹换个地方放（比如复制到U盘/换一台电脑），整个文件夹
 # 一起复制过去就行，脚本会自动找到跟它同目录的"我的任务.py"，不依赖你在
@@ -46,14 +49,16 @@ IMAGE_NAME="contestant-sdk:latest"
 LEADER_NS="NX01"      # 长机编号
 FOLLOWER_NS="NX02"    # 僚机编号
 SINGLE=0              # --single：只飞长机那一架
+RESTART=1             # --no-restart：不重建仿真容器，直接接着上次的状态跑
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --single) SINGLE=1; shift ;;
+        --no-restart) RESTART=0; shift ;;
         --leader)   LEADER_NS="$2"; shift 2 ;;
         --follower) FOLLOWER_NS="$2"; shift 2 ;;
         -h|--help)
-            echo "用法： bash 运行仿真.sh [--single] [--leader NX01] [--follower NX02]"
+            echo "用法： bash 运行仿真.sh [--single] [--no-restart] [--leader NX01] [--follower NX02]"
             exit 0 ;;
         *) echo "不认识的参数：$1（加 --help 看用法）"; exit 2 ;;
     esac
@@ -152,6 +157,49 @@ run_one() {   # $1=容器名 $2=自己编号 $3=角色 $4=队友编号
 
 # 上一次没清理干净的同名容器先删掉，否则 docker run 会因为重名直接失败
 docker rm -f contest_task_leader contest_task_follower >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# 重建仿真容器，让两架飞机回到各自的起降点。
+#
+# 为什么每次都要重建：上一次跑完飞机停在最后的落点、各种状态（定位源、
+# 规划器、编队节点的参数）也都还留着。不重置的话第二次跑就不是从同一个
+# 初始条件出发，调出来的结果没法比较，还可能撞上上次遗留的异常状态。
+#
+# 找不到 docker-compose.yml 就跳过——选手如果只把这个模板文件夹单独拷走
+# （手里没有仿真环境那套文件），仿真那一侧本来就由赛事方/助教启动，这个
+# 脚本只负责起"你的任务程序"。
+# ---------------------------------------------------------------------------
+COMPOSE_DIR="$(cd .. 2>/dev/null && pwd)"
+if [[ "$RESTART" == "1" && -f "$COMPOSE_DIR/docker-compose.yml" ]]; then
+    echo "正在重建仿真环境（让飞机回到起降点）……"
+    ( cd "$COMPOSE_DIR" && docker compose down --timeout 20 >/dev/null 2>&1 || true )
+    ( cd "$COMPOSE_DIR" && docker compose up -d >/dev/null )
+
+    # 等两架飞机的节点真的起来了再放任务程序进去。等这条日志而不是 sleep
+    # 固定秒数：仿真启动耗时随机器负载差别很大，写死秒数要么白等要么不够。
+    echo "等两架飞机就绪（最多3分钟）……"
+    READY_DEADLINE=$(( $(date +%s) + 180 ))
+    while :; do
+        ready=1
+        for c in nx01 nx02; do
+            docker logs "docker_sim-flight-stack-$c-1" 2>&1 \
+                | grep -q 'formation_follower_node就绪' || ready=0
+        done
+        [[ "$ready" == "1" ]] && break
+        if [[ "$(date +%s)" -ge "$READY_DEADLINE" ]]; then
+            echo ""
+            echo "【仿真环境没能在3分钟内就绪】"
+            echo "请把下面这条命令的输出发给助教："
+            echo "    cd \"$COMPOSE_DIR\" && docker compose logs --tail 50"
+            echo ""
+            exit 1
+        fi
+        sleep 5
+    done
+    echo "仿真环境就绪。"
+elif [[ "$RESTART" == "1" ]]; then
+    echo "（没找到 docker-compose.yml，跳过重建仿真——假定仿真环境已经由赛事方启动好）"
+fi
 
 set +e
 run_one contest_task_leader "$LEADER_NS" leader "$FOLLOWER_NS"
