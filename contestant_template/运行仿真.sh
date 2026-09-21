@@ -3,8 +3,14 @@
 #  运行仿真.sh —— 双击我，或者在终端里输入 ./运行仿真.sh 运行
 # =============================================================================
 #
-# 这个脚本做的事情很简单：把同一个文件夹里的"我的任务.py"丢进仿真环境里跑
-# 一遍，你会看到中文的飞行进度提示（起飞/飞行中/降落…）。
+# 这个脚本做的事情很简单：把同一个文件夹里的"我的任务.py"丢进仿真环境里跑，
+# 你会看到中文的飞行进度提示（起飞/飞行中/降落…）。
+#
+# 默认**同时起两架飞机**，两架跑的是同一份"我的任务.py"，只是传给它的
+# --role 不一样（一架 leader、一架 follower）——你在那个文件里用
+# `if role == 'leader':` 分开写两架各自要做的事。
+# 只想飞一架时加 --single 参数：
+#     bash 运行仿真.sh --single
 #
 # 你不需要看懂这个脚本里面在做什么，正常情况下你也不需要改这个文件——
 # 你只需要改"我的任务.py"里的坐标数字，然后重新运行这个脚本。
@@ -37,6 +43,21 @@ cd "$(dirname "$0")"
 
 TASK_FILE="我的任务.py"
 IMAGE_NAME="contestant-sdk:latest"
+LEADER_NS="NX01"      # 长机编号
+FOLLOWER_NS="NX02"    # 僚机编号
+SINGLE=0              # --single：只飞长机那一架
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --single) SINGLE=1; shift ;;
+        --leader)   LEADER_NS="$2"; shift 2 ;;
+        --follower) FOLLOWER_NS="$2"; shift 2 ;;
+        -h|--help)
+            echo "用法： bash 运行仿真.sh [--single] [--leader NX01] [--follower NX02]"
+            exit 0 ;;
+        *) echo "不认识的参数：$1（加 --help 看用法）"; exit 2 ;;
+    esac
+done
 
 echo "======================================================================"
 echo " 正在检查运行环境……"
@@ -99,29 +120,60 @@ if [[ ! -f "$TASK_FILE" ]]; then
     exit 1
 fi
 
-echo "环境检查通过，开始运行你的任务代码（$TASK_FILE）……"
+if [[ "$SINGLE" == "1" ]]; then
+    echo "环境检查通过，开始运行你的任务代码（$TASK_FILE，只飞 $LEADER_NS 一架）……"
+else
+    echo "环境检查通过，开始运行你的任务代码（$TASK_FILE，两架飞机同时跑）……"
+fi
 echo "======================================================================"
 echo ""
 
 # ---------------------------------------------------------------------------
-# 真正的运行命令：
-#   --rm            任务跑完自动清理这个容器，不会在电脑上越堆越多垃圾容器
-#   --network host  让这个容器跟仿真环境共享同一套网络，这样才能"看到"
-#                    仿真里的飞机（技术细节你不需要关心，只需要知道这一行
-#                    是必须的，不能删）
-#   -v "$(pwd)":/workspace   把当前这个文件夹整个"共享"给容器，容器里对
-#                    /workspace 的读写，实际上就是在读写你电脑上这个文件夹，
-#                    所以你在"我的任务.py"里改的内容，运行的时候一定是最新的
-#
-# 这里临时关掉 set -e：我们需要自己拿到 docker run 的退出码来打印人话提示，
-# 如果不关，脚本会在 docker run 失败的那一刻直接终止，看不到下面的提示。
+# 真正的运行命令。几个参数的意思：
+#   （故意不加 --rm）容器跑完保留着，这样程序崩了你还能用
+#                   `docker logs contest_task_leader` 把完整输出翻出来。
+#                   下次运行这个脚本时会先把上次的删掉，不会越堆越多。
+#   --network host  让容器和仿真里的飞机能互相发现（技术细节你不用关心，
+#                   但这一行不能删）
+#   -v "$(pwd)":/workspace
+#                   把当前文件夹共享给容器，所以你在"我的任务.py"里改的内容
+#                   运行时一定是最新的，不需要重新打包镜像
+#   --namespace/--role/--teammate
+#                   告诉这个容器"你是哪架飞机、扮演什么角色、队友是谁"。
+#                   两架飞机的区别**只有这三个参数**，代码是同一份。
 # ---------------------------------------------------------------------------
+run_one() {   # $1=容器名 $2=自己编号 $3=角色 $4=队友编号
+    docker run -d --name "$1" --network host \
+        -v "$(pwd)":/workspace \
+        "$IMAGE_NAME" \
+        python3 -u "/workspace/$TASK_FILE" \
+        --namespace "$2" --role "$3" --teammate "$4" >/dev/null
+}
+
+# 上一次没清理干净的同名容器先删掉，否则 docker run 会因为重名直接失败
+docker rm -f contest_task_leader contest_task_follower >/dev/null 2>&1 || true
+
 set +e
-docker run --rm --network host \
-    -v "$(pwd)":/workspace \
-    "$IMAGE_NAME" \
-    python3 "/workspace/$TASK_FILE"
-RUN_STATUS=$?
+run_one contest_task_leader "$LEADER_NS" leader "$FOLLOWER_NS"
+CONTAINERS="contest_task_leader"
+if [[ "$SINGLE" != "1" ]]; then
+    run_one contest_task_follower "$FOLLOWER_NS" follower "$LEADER_NS"
+    CONTAINERS="$CONTAINERS contest_task_follower"
+fi
+
+# 两架飞机的输出会交替出现。SDK 打印的每一行本来就带 [NX01]/[NX02] 编号，
+# 所以这里直接透传，不再额外加前缀（加了会变成 [NX02] [NX02] 这样重复）。
+for c in $CONTAINERS; do
+    docker logs -f "$c" 2>&1 &
+done
+
+# 等两个容器都结束，任一非零退出就记下来
+RUN_STATUS=0
+for c in $CONTAINERS; do
+    code=$(docker wait "$c" 2>/dev/null || echo 1)
+    [[ "$code" != "0" ]] && RUN_STATUS=$code
+done
+wait   # 等日志流打完，避免提示信息插在日志中间
 set -e
 
 echo ""
@@ -133,3 +185,5 @@ else
     echo " 哪一行的中文提示，或者把完整输出发给助教帮忙看看。"
 fi
 echo "======================================================================"
+# 用真实退出码结束：出错时返回非零，方便在别的脚本里判断这次跑成没成
+exit $RUN_STATUS
