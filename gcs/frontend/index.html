@@ -23,7 +23,12 @@
      rosbridge"提示条(#conn)，已删除，见下面ros.on()那几行旁边的说明。）*/
   #leftPaneHeader { position: sticky; top: 0; z-index: 2; background: #12161c;
     padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #2a3140; }
-  #linkRow { text-align: center; margin-top: 18px; padding-top: 12px; border-top: 1px solid #2a3140; }
+  /* 2026-09-21：这一行现在并排放两个链接（"真机网络配置"/"GCS主机"），
+     .toggleLink本身是inline-block、彼此紧挨着，加点gap隔开。用flex+center
+     替代原来的text-align:center——text-align对inline-block有效，但gap只在
+     flex/grid容器上生效，两者要配套改。 */
+  #linkRow { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;
+    margin-top: 18px; padding-top: 12px; border-top: 1px solid #2a3140; }
   /* 2026-08-22新增：左右分栏——左边"参数"（控制按钮+表格+管理面板），
      右边"大幅面视图"（俯视图，以后再加视频回传这类），中间一条可拖拽
      调宽度的分隔条。原来是单栏从上到下堆叠，俯视图展开后占满整页、
@@ -39,6 +44,40 @@
   .rightTabs .rightTab { padding: 6px 14px; border-radius: 6px 6px 0 0; font-size: 13px;
     cursor: pointer; color: #9aa4b2; background: #1c222b; border: 1px solid #2a3140; border-bottom: none; user-select: none; }
   .rightTabs .rightTab.active { color: #7bb8ff; background: #232a36; }
+  /* 2026-09-21新增：真机机队的"一机一tab"标签条——用户反馈NX01/NX02两张
+     卡片上下排列太长。样式刻意照抄上面.rightTabs/.rightTab那一套（同样的
+     圆角/内边距/配色/active态），不另起一套视觉语言：这个页面右栏已经用
+     tab表达过"同一位置切换多个视图"这件事，左栏机队用同一个外观，用户不
+     需要学第二种交互。没有直接复用.rightTab这个class是因为它被
+     `.rightTabs .rightTab`这种后代选择器限定在右栏容器里，而且右栏那套
+     带flex:0 0 auto（给#rightPane的flex布局用的），左栏不需要。
+     .fleetTabDot是标签上的健康状态小圆点——tab方案的关键配套：没被选中的
+     那架飞机整张卡片不在DOM里，低电压/SLAM掉线这类事必须在标签上就能看见，
+     否则"藏起来"就变成了"看不见故障"。数据来源见hwFleetTabDotColor()。 */
+  /* 2026-09-21：#fleetTabBar是标签条在常驻header里的容器。:empty时整个
+     收掉——仿真模式/只有一架飞机时renderFleetTabBar()会把它清空，留着
+     margin会在logo下面空出一条莫名其妙的缝。 */
+  #fleetTabBar { margin-top: 10px; }
+  #fleetTabBar:empty { display: none; }
+  .fleetTabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .fleetTabs .fleetTab { padding: 6px 14px; border-radius: 6px 6px 0 0; font-size: 13px;
+    font-weight: 700; cursor: pointer; color: #7d8795; background: #161b22;
+    border: 1px solid #2a3140; border-bottom: none; user-select: none;
+    display: flex; align-items: center; gap: 6px; }
+  .fleetTabs .fleetTab:hover { background: #232a36; color: #9aa4b2; }
+  /* 2026-09-21用户反馈"亮度不足以区分"：选中态原来抄的是右栏
+     .rightTab.active那套(#7bb8ff字/#232a36底)——右栏只有三个固定标签，
+     弱对比够用；左栏这个标签条是飞行时要一眼扫到"我现在操作的是哪一架"
+     的东西，弱对比不行。现在跟上面.modeBtn.active共用同一套选中态配色
+     (亮蓝#4a9eff底 + 深色字#0b1118 + 淡蓝外发光)，未选中态则压到深灰"退下去"。
+     两处是同一个语义（"这是当前生效的那一个"），共用同一套视觉。 */
+  .fleetTabs .fleetTab.active { background: #4a9eff; color: #0b1118; border-color: #8ecdff;
+    box-shadow: 0 0 0 2px rgba(142, 205, 255, 0.35); }
+  .fleetTabs .fleetTab.active:hover { background: #4a9eff; color: #0b1118; }
+  /* 小圆点在深色未选中底和亮蓝选中底上都要看得清，给一圈同底色描边把它
+     从背景里"抠"出来 */
+  .fleetTabDot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); }
   .rightTabContent { flex: 1 1 auto; min-height: 0; overflow: auto; }
   .rightTabPage { display: none; }
   /* 2026-08-22修复：漏了height:100%——.camPanel/#mapPanel下面都有
@@ -178,11 +217,38 @@
      大按钮切换模式，模式专属的内容（仿真机队卡片/本地仿真启停/资源
      消耗/清空日志 vs 真机集群卡片/GCS网络设置）分别收进各自的pane，
      用display:none/block整体切换，不需要互相感知对方的DOM。 */
-  #modeSwitch { display: flex; gap: 8px; margin: 4px 0 14px; }
+  /* 2026-09-21：这两个按钮从左侧栏顶部挪到了最底部（见body里的说明），
+     上下外边距跟着对调——原来是"顶部元素"的4px上/14px下，现在需要跟上面
+     的#gcsHostPanel拉开距离，用18px上/4px下，跟#linkRow那条分隔的间距
+     保持一致。 */
+  #modeSwitch { display: flex; gap: 8px; margin: 18px 0 4px; padding-top: 12px;
+    border-top: 1px solid #2a3140; }
+  /* 2026-09-21用户反馈"当前按钮模式不明显，亮度区别不大"。原来未选中是
+     #1e3a5f底/#8ecdff字、选中是#2f5a8a底/#bfe3ff字——两个都是中等亮度的
+     蓝，底色对比度只有约1.6:1，确实分不出谁是当前模式。
+     改法是**两头都动**，不是单方面把选中态调亮：未选中态压到接近页面底色
+     的深灰(#161b22底/#7d8795字)，变成"退下去"的样子；选中态换成高亮度蓝
+     (#4a9eff)配深色字(#0b1118)，再加一圈淡蓝外发光。
+     用"亮底+深字"而不是"中蓝底+白字"，是实算过对比度之后定的：中蓝
+     (#2f7fd4)配白字时，选中/未选中的底色差只有4.2:1、白字本身也才4.1:1；
+     换成亮蓝配深字之后底色差到6.3:1、字对比6.9:1，两项同时变好，不用在
+     "够醒目"和"看得清"之间二选一。（原来的#2f5a8a vs #1e3a5f只有1.6:1，
+     就是用户说的"亮度区别不大"。）
+     这套"选中=亮蓝+深字+发光 / 未选中=深灰+灰字"的配色同时用在下面的
+     .fleetTab.active上（机队标签条），两处是同一个语义——"这是当前生效的
+     那一个"——用同一套视觉，不让用户学两遍。 */
   .modeBtn { flex: 1; padding: 10px 0; border-radius: 8px; border: 1px solid #2a3140;
-    background: #1e3a5f; color: #8ecdff; font-size: 14px; font-weight: 700; cursor: pointer; }
-  .modeBtn:hover { background: #274a75; }
-  .modeBtn.active { background: #2f5a8a; color: #bfe3ff; border-color: #4a7bab; }
+    background: #161b22; color: #7d8795; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .modeBtn:hover { background: #232a36; color: #9aa4b2; }
+  /* box-shadow这里要把下面那条统一"立体浮雕"规则(.modeBtn在选择器列表里)
+     的凸起阴影一起写出来再追加发光——.modeBtn.active(0,2,0)特异性高于
+     .modeBtn(0,1,0)，只写发光会把凸起效果整个顶掉，按钮就变平了。
+     按下时的inset效果不受影响：.modeBtn:active跟这条同特异性、但在文件里
+     位置更靠后，后来者胜。 */
+  .modeBtn.active { background: #4a9eff; color: #0b1118; border-color: #8ecdff;
+    box-shadow: -2px -2px 3px rgba(255, 255, 255, 0.10), 2px 2px 5px rgba(0, 0, 0, 0.6),
+                0 0 0 2px rgba(142, 205, 255, 0.35); }
+  .modeBtn.active:hover { background: #4a9eff; color: #0b1118; }
   #simModePane, #realModePane { display: none; }
   #simModePane.active, #realModePane.active { display: block; }
   /* 一机一卡片——比重构前的.controlBar更"重"，容纳的内容更多（遥测+
@@ -203,7 +269,7 @@
   .configBox { border: 1px solid #3a4a63; border-radius: 6px; padding: 10px 12px;
     margin-top: 10px; background: #171d27; }
   .configBoxTitle { font-size: 12px; color: #7bb8ff; font-weight: 600; margin-bottom: 6px; }
-  /* 2026-08-29新增：真机卡片"①容器状态/②飞机状态/③控制面板/④配置面板"
+  /* 2026-08-29新增：真机卡片"①控制面板/②飞机状态/③容器状态/④配置面板"
      四段用户要求"不同面板用不同底色"——用低透明度色块区分，不是纯装饰，
      文字/表格/按钮该有的颜色不受影响(半透明叠加在.droneCard的#1c222b
      底色上面，不是遮住内容重新上色)。四种颜色分别沿用页面里已经在用的
@@ -377,16 +443,17 @@
     <img src="konghe_logo.png" alt="康鹤智能" class="brandLogo">
     <h1>康鹤智能无人机集群指控系统</h1>
   </div>
+  <!-- 2026-09-21：机队标签条（NX01/NX02...）从#hwFleetDiscoverPanel内部
+       挪到这里——用户要求"tab标签放最上边，且滚动鼠标时始终显示"。放进
+       #leftPaneHeader而不是在它下面另起一个sticky元素，是因为这个header
+       本身已经是position:sticky;top:0了，塞进来就天然跟着常驻，不需要给
+       第二个sticky元素算top偏移量（那个偏移要等于header实测高度，logo
+       换张图/标题换行就会错位，是个脆的做法）。内容由
+       renderFleetTabBar()动态填，仿真模式下会被清空。 -->
+  <div id="fleetTabBar"></div>
 </div>
 <div id="uwbBanner"></div>
 
-<div id="modeSwitch">
-  <button id="modeBtn-sim" class="modeBtn active" onclick="requestGcsModeSwitch('sim')"
-    title="点击会让GCS自己重建容器、真正切到本机回环DDS网络+仿真专用ROS_DOMAIN_ID——本机sim-world+双机flight-stack容器，飞行参数/健康状态/规划地图数据走DDS/rosbridge，起飞/降落/发目标点这类飞行指令只对这个模式里的飞机生效">🖥️ 仿真模式</button>
-  <button id="modeBtn-real" class="modeBtn" onclick="requestGcsModeSwitch('real')"
-    title="点击会让GCS自己重建容器、真正切到'GCS网络设置'里保存的真机网卡/Peer配置+真机ROS_DOMAIN_ID——真实飞机通过UDP广播自动发现+HTTP直连《单机接口描述文件.md》里的control_server.py，不需要SSH；额外配好DDS网络桥接后卡片上还会多一段实时遥测">🛰️ 真机模式</button>
-</div>
-<div id="modeSwitchStatus" class="actionMsg"></div>
 
 <div id="simModePane" class="active">
   <div id="empty" style="display:none">仿真机队还没起来，或者容器起了但PX4/DDS话题还没就绪——去下面"仿真工具"面板启动（等待 /&lt;NS&gt;/mavros/state 之类的话题出现）</div>
@@ -406,21 +473,45 @@
 <div id="realModePane">
   <div id="realEmpty" style="display:none">还没收到任何飞机的UDP发现心跳(:8891)，也没有手动配置过的命名空间——确认飞机端docker_sim/scripts/control_server.py已经在跑</div>
   <div id="hwFleetDiscoverPanel"></div>
-  <h3>GCS网络设置（真机模式必填，点上方"🛰️真机模式"按钮前先在这里配好）</h3>
-  <span class="toggleLink" onclick="toggleSettings(this)">⚙ 展开配置</span>
-  <div id="settingsPanel" class="panel">
-    <div class="field"><label>本机网卡IP（NetworkInterface）</label><input id="gcsIfaceInput" placeholder="加载中..."></div>
-    <div class="field"><label>Jetson对端IP（Peer，可留空，多台用逗号分隔）</label><input id="gcsPeerInput" placeholder="加载中...例：192.168.2.104, 192.168.2.107"></div>
-    <button id="gcsSaveBtn" onclick="saveGcsNetwork()">保存真机网络参数</button>
-    <div id="gcsNetworkMsg" class="actionMsg"></div>
-  </div>
 </div>
 
+<!-- 2026-09-21：原来"GCS网络设置"这块在#realModePane里面，由一个<h3>标题
+     ("GCS网络设置（真机模式必填，点上方🛰️真机模式按钮前先在这里配好）")加
+     一个"⚙ 展开配置"链接组成。用户要求去掉那行标题、把链接改名成"真机网络
+     配置"并与"💻 GCS主机"并排。顺带解决了两个问题：
+     1. 那行标题里的"点**上方**真机模式按钮"在这次改版后已经是错的——模式
+        切换按钮已经挪到左侧栏最底部了。与其改字，不如按用户说的整行去掉。
+     2. 这块配置从#realModePane里搬了出来，因此在仿真模式下也能打开了。这
+        正好对得上它的用途：它要求用户"切到真机模式**之前**先配好"，而之前
+        它藏在真机模式的pane里，人在仿真模式下根本点不开，是个死循环。 -->
 <div id="linkRow">
+  <span class="toggleLink" onclick="toggleSettings(this)"
+    title="改本机GCS的CycloneDDS网络配置(cyclonedds_gcs.xml)——真机模式必填，切到“🛰️ 真机模式”之前要先在这里填好本机网卡IP和Jetson对端IP，否则点真机模式会报错">🛰️ 真机网络配置</span>
   <span class="toggleLink" onclick="toggleGcsHostPanel(this)"
     title="关闭GCS自己（gcs-gcs-1前端+rosbridge、gcs-backend-1这个后端）——只有停止，没有启动按钮，关掉后要回宿主机终端手动重新拉起，不影响仿真/真机那边正在跑的飞控软件">💻 GCS主机</span>
 </div>
+<div id="settingsPanel" class="panel">
+  <div class="field"><label>本机网卡IP（NetworkInterface）</label><input id="gcsIfaceInput" placeholder="加载中..."></div>
+  <div class="field"><label>Jetson对端IP（Peer，可留空，多台用逗号分隔）</label><input id="gcsPeerInput" placeholder="加载中...例：192.168.2.104, 192.168.2.107"></div>
+  <button id="gcsSaveBtn" onclick="saveGcsNetwork()">保存真机网络参数</button>
+  <div id="gcsNetworkMsg" class="actionMsg"></div>
+</div>
 <div id="gcsHostPanel" class="panel"></div>
+
+<!-- 2026-09-21：仿真/真机模式切换按钮从左侧栏顶部挪到这里（最底部），
+     用户要求。这两个按钮是"一次性设置"性质的——选定之后整场飞行都不会再
+     碰（切一次要重建GCS容器、等rosbridge重连，不是随手点的东西），却一直
+     占着最顶上最显眼的位置；真正每时每刻要看的是机队标签条和遥测。
+     #modeSwitchStatus跟着一起挪，必须紧挨着按钮：它显示的是"配置已写入、
+     正在等待rosbridge重新可用"这类切换过程反馈，跟按钮分开放就等于让用户
+     点完之后去别处找结果。 -->
+<div id="modeSwitch">
+  <button id="modeBtn-sim" class="modeBtn active" onclick="requestGcsModeSwitch('sim')"
+    title="点击会让GCS自己重建容器、真正切到本机回环DDS网络+仿真专用ROS_DOMAIN_ID——本机sim-world+双机flight-stack容器，飞行参数/健康状态/规划地图数据走DDS/rosbridge，起飞/降落/发目标点这类飞行指令只对这个模式里的飞机生效">🖥️ 仿真模式</button>
+  <button id="modeBtn-real" class="modeBtn" onclick="requestGcsModeSwitch('real')"
+    title="点击会让GCS自己重建容器、真正切到'GCS网络设置'里保存的真机网卡/Peer配置+真机ROS_DOMAIN_ID——真实飞机通过UDP广播自动发现+HTTP直连《单机接口描述文件.md》里的control_server.py，不需要SSH；额外配好DDS网络桥接后卡片上还会多一段实时遥测">🛰️ 真机模式</button>
+</div>
+<div id="modeSwitchStatus" class="actionMsg"></div>
 </div>
 <div id="dragHandle" title="拖动调整左右宽度"></div>
 <div id="rightPane">
@@ -720,7 +811,7 @@ let lastSimCardsHtml = null; // 上一次真正写进simCardsEl的HTML字符串�
 // 卡片"壳"(标题/容器徽章/按钮/展开收起链接)这些很少变的结构，真正高频
 // 变化的遥测(连接摘要/位置摘要/展开区的详细数据)挪进独立子树
 // <div id="simTelemetry_${ns}">，由refreshSimTelemetryOnly()按跟真机
-// hwTelemetryLastHtml同款的200ms/5Hz节奏单独刷新，不会碰到①里的按钮
+// hwTelemetryLastHtml同款的200ms/5Hz节奏单独刷新，不会碰到卡片壳里的按钮
 // 节点。见simTelemetryBlockHtml()/refreshSimTelemetryOnly()的说明，动机
 // 是2026-09-07那次"按钮都点不动了"事故——根因是给卡片新增的飞行栈模式
 // 懒加载失败后陷入死循环，每次render()都整卡重建，按钮节点被换得太
@@ -744,6 +835,10 @@ let lastSimFleetPanelHtml = null;
 // （定时器无条件重建带交互控件的DOM，撞上正在进行中的点击会丢事件），
 // 不能只加速不加保护。
 let lastHwFleetPanelHtml = null;
+// 2026-09-21新增：标签条自己的那份防抖缓存。标签条从#hwFleetDiscoverPanel
+// 内部挪到常驻header之后，是独立写innerHTML的一块，不再跟着上面那份
+// lastHwFleetPanelHtml一起判断，必须各存各的。
+let lastFleetTabBarHtml = null;
 // 2026-09-04新增：真机卡片"②飞机状态"里的只读遥测(位置/姿态/健康/频率/
 // RC/推力标定)提速到5Hz独立刷新之后（见refreshHwFleetTelemetryOnly()），
 // 每个命名空间各自一份"上次写进对应<div>的HTML"缓存，同样是"内容没变就
@@ -784,6 +879,12 @@ function setGcsMode(mode) {
   document.getElementById("simModePane").classList.toggle("active", mode === "sim");
   document.getElementById("realModePane").classList.toggle("active", mode === "real");
   if (mode === "sim") refreshResourceStats(); // 切进来时立刻查一次，不用干等下一个3秒轮询
+  // 2026-09-21：机队标签条现在挂在**两种模式共用**的常驻header里，不再
+  // 待在#realModePane内部、也就不会再被`#realModePane{display:none}`自动
+  // 带走，必须在切模式时主动重画一次。不加这行的表现是：从真机切到仿真
+  // 之后，顶上还挂着NX01/NX02两个标签，点了也没有对应卡片可显示，要等
+  // 下一次1.5秒轮询才消失。
+  renderHwFleetDiscoverPanel(true);
 }
 
 function setModeSwitchStatus(text, cls) {
@@ -806,7 +907,7 @@ function clearFleetCaches() {
   Object.keys(mapTrails).forEach((k) => delete mapTrails[k]);
   Object.keys(mapRoutes).forEach((k) => delete mapRoutes[k]);
   uwbAlign.pair = null; uwbAlign.lastSeen = 0;
-  lastSimCardsHtml = null; lastHwFleetPanelHtml = null; lastMapOccNames = null;
+  lastSimCardsHtml = null; lastHwFleetPanelHtml = null; lastFleetTabBarHtml = null; lastMapOccNames = null;
   Object.keys(simTelemetryLastHtml).forEach((k) => delete simTelemetryLastHtml[k]);
   // 注意：不重置mapOccUserPicked——用户手动选过之后即使rosbridge重连、
   // fleet被清空重建，也不应该把选择弹回NX01，见refreshMapOccSelect()注释。
@@ -1205,7 +1306,35 @@ function subscribeOccAndTraj(ns, planner, source) {
   // 话题名不同。
   const occSuffix = (OCCUPANCY_SUFFIX[planner] || {})[source];
   if (occSuffix) {
-    const topic = new ROSLIB.Topic({ ros, name: `/${ns}/${occSuffix}`, messageType: "sensor_msgs/msg/PointCloud2" });
+    // 2026-09-21新增compression/throttle_rate/queue_length三个订阅选项——
+    // 这是整个前端唯一一个大带宽话题（占据栅格点云，其它订阅都是几十字节
+    // 的状态量），真机现场"面板数据时有时无"排查时发现它一直是按规划器
+    // 原生频率、用最贵的编码方式全量推给浏览器的，三个选项一个都没设：
+    //   1. compression:"cbor"——不设时rosbridge把PointCloud2.data这个
+    //      uint8[]编码成base64字符串塞进JSON（见下面decodePointCloudXY()
+    //      里atob()那段的说明），base64本身膨胀33%，外面再套一层JSON的
+    //      引号/转义开销。CBOR是二进制编码，同一帧点云省掉一半以上字节。
+    //      roslib.min.js自带cbor-js+cborTypedArrayTags支持这个值，不需要
+    //      额外引库；但msg.data的类型会从base64字符串变成Uint8Array，
+    //      decodePointCloudXY()必须同步兼容两种形态，见那个函数里的说明。
+    //   2. throttle_rate:500——地面站俯视图看态势2Hz足够，不需要跟着
+    //      规划器原生频率(ego_planner的grid_map一般10Hz)走。这个参数是
+    //      rosbridge服务端节流（在GCS容器里就丢掉了多余的帧），不是浏览器
+    //      收到再丢，省的是真实的DDS→websocket带宽。
+    //   3. queue_length:1——只保留最新一帧。占据栅格是"当前世界长什么样"
+    //      的快照，积压的旧帧没有任何价值，链路一抖就排队、恢复后再一股脑
+    //      灌给浏览器，反而是害处。
+    // ⚠️这三个值只影响地面站显示，不影响规划器自己用的原始话题（这里订阅
+    // 的occupancy_inflate_z_filtered本来就是pointcloud_z_filter包专门为
+    // 地面站/RViz显示发的旁路话题，见OCCUPANCY_SUFFIX定义处的说明）。
+    const topic = new ROSLIB.Topic({
+      ros,
+      name: `/${ns}/${occSuffix}`,
+      messageType: "sensor_msgs/msg/PointCloud2",
+      compression: "cbor",
+      throttle_rate: 500,
+      queue_length: 1,
+    });
     topic.subscribe(makeStatusHandler(ns, occSuffix));
     fleet[ns].subs[occSuffix] = topic;
     fleet[ns].occSuffix = occSuffix;
@@ -1307,23 +1436,42 @@ function worldToLocal(tf, wx, wy, wz) {
 }
 
 function decodePointCloudXY(msg) {
-  // 只解出x,y（俯视图用不到z）——PointCloud2.data在rosbridge JSON协议里
-  // 是base64字符串（实测roslibpy/rosbridge都是这样编码uint8[]字段，不是
-  // 数字数组），要先atob()解码成字节再用DataView按point_step读。x/y/z
-  // 分别在offset 0/4/8——ego_planner(grid_map/occupancy_inflate_z_filtered)和
+  // 只解出x,y（俯视图用不到z）——x/y/z分别在offset 0/4/8，
+  // ego_planner(grid_map/occupancy_inflate_z_filtered)和
   // mighty(occupancy_grid/global_mapper_ros)两边实测/查证都是
   // pcl::toROSMsg(pcl::PointXYZ)生成，字段顺序相同，可以共用这一份解码，
   // 不用按PLANNER分支写两套。
+  //
+  // msg.data有两种可能的形态，必须都认，不能只写一种：
+  //   - Uint8Array：2026-09-21给订阅加上compression:"cbor"之后的常态
+  //     （见subscribeOccAndTraj()里那三个订阅选项的说明），roslib的
+  //     cborTypedArrayTags会把uint8[]直接还原成Uint8Array，不需要解码。
+  //   - base64字符串：rosbridge默认JSON协议下uint8[]的编码方式（实测
+  //     roslibpy/rosbridge都是这样，不是数字数组），要atob()成字节。
+  // 保留base64这条分支不是防御性编程凑数——compression是"尽力而为"的：
+  // roslib发现服务端不支持某种压缩时会emit warning并自己退回none（见
+  // roslib.min.js里"compression is not supported"那段），rosbridge版本
+  // 不对/以后有人把compression这行删掉，都会让msg.data变回base64字符串。
+  // 那种情况下点云应该照常显示（只是费带宽），不应该变成俯视图一片空白。
   if (!msg || !msg.data || !msg.width) return [];
   let bytes;
-  try {
-    const bin = atob(msg.data);
-    bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  } catch (e) {
-    return [];
+  if (msg.data instanceof Uint8Array) {
+    bytes = msg.data;
+  } else {
+    try {
+      const bin = atob(msg.data);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    } catch (e) {
+      return [];
+    }
   }
-  const view = new DataView(bytes.buffer);
+  // 必须显式传byteOffset/byteLength，不能只写new DataView(bytes.buffer)——
+  // atob()那条路径造出来的Uint8Array独占一整个ArrayBuffer(byteOffset=0)，
+  // 省略参数没问题；但CBOR那条路径拿到的Uint8Array很可能是解码器内部
+  // 大buffer上的一个视图(byteOffset≠0)，此时bytes.buffer是整个大buffer，
+  // 不加偏移会从错误的位置开始读，解出来的点云坐标全是垃圾值。
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const little = !msg.is_bigendian;
   const step = msg.point_step;
   const n = msg.width * msg.height;
@@ -1805,6 +1953,11 @@ const hwFleetDiscover = {
   drones: {},   // namespace -> discovered.py条目 { ip, control_port, hostname, flight_up, vision_up, age_sec, configured }
   targets: {},  // namespace -> { ip, control_port }（后端配置）
   rows: {},     // namespace -> 本行UI状态（展开/忙/消息/表单默认值）
+  // 2026-09-21新增：当前选中哪一架（"一机一tab"标签条用）。null=还没选过，
+  // 渲染时自动落到排序后的第一架；选中的这架在页面上不存在（飞机下线、
+  // 改名、删了配置）时也会自动落回第一架，不会出现"选中了一个空tab、
+  // 整个面板一片空白"。
+  activeTab: null,
   msg: "", msgCls: "",
 };
 
@@ -1847,11 +2000,18 @@ function newHwFleetRow() {
     // ——这份契约几乎不会变，没必要每次渲染都请求。
     stackContract: null, stackContractLoading: false,
     stackPending: null, stackMismatch: null,  // GET /status查到的待生效值/差异，懒加载
-    // 2026-08-29新增：①容器状态/②飞机状态/③控制面板这三段各自能收起，
+    // 2026-08-29新增：①控制面板/②飞机状态/③容器状态这三段各自能收起，
     // 但默认展开（true）——跟④配置面板反过来：配置表单不常看，默认收起；
     // 这三段是操作/监控时天天要看的东西，不该默认藏起来，只是允许手动
     // 收起腾地方（比如一次盯很多架飞机时，收起暂时不关心的部分）。
     containerOpen: true, vehicleOpen: true, controlOpen: true,
+    // 2026-09-21新增：①控制面板内部再分一层——用户要求"飞机操作按钮常态
+    // 显示，容器和命名空间操作按钮常态收起"。飞行操作(锁定起飞点/起飞/
+    // 悬停/降落)是飞行时每分钟都要点的，必须常驻；启停Flight/Vision容器和
+    // 改命名空间属于布场阶段做一次的事，天天摆在起飞按钮旁边既占地方、
+    // 又有误触风险（"停止Flight"挨着"降落"，点错就是掐飞控）。默认false=
+    // 收起，跟④配置面板同样的理由。
+    containerOpsOpen: false,
   };
 }
 
@@ -1898,7 +2058,7 @@ function toggleHwFleetConfig(ns) {
   renderHwFleetDiscoverPanel(true);
 }
 
-// 2026-08-29新增：①容器状态/②飞机状态/③控制面板三段通用的收起/展开
+// 2026-08-29新增：①控制面板/②飞机状态/③容器状态三段通用的收起/展开
 // 切换——跟toggleHwFleetConfig()是同一个写法，field传containerOpen/
 // vehicleOpen/controlOpen三者之一，不用为每段各写一个函数。
 function toggleHwFleetSection(ns, field) {
@@ -2235,9 +2395,91 @@ function doHwFleetRename(ns) {
     body: JSON.stringify({ namespace: newNs, confirm: true }),
   })
     .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); return d; })
-    .then((d) => { delete hwFleetDiscover.rows[ns]; hwFleetRow(newNs).msg = d.message || "已改名"; hwFleetRow(newNs).msgCls = "ok"; })
+    .then((d) => {
+      delete hwFleetDiscover.rows[ns];
+      // 2026-09-21新增：改名后让tab跟着走到新命名空间。不加这行的话，
+      // renderHwFleetDiscoverPanel()发现activeTab("NX02")已经不在names里，
+      // 会按兜底逻辑落回names[0]——用户刚给眼前这架改完名，画面却跳到了
+      // 另一架飞机上，很莫名其妙。兜底逻辑本身要留着（飞机下线/删配置这些
+      // 情况下确实没有"新名字"可跟），这里只是把"改名"这个能明确知道去向的
+      // 场景接住。
+      hwFleetDiscover.activeTab = newNs;
+      hwFleetRow(newNs).msg = d.message || "已改名";
+      hwFleetRow(newNs).msgCls = "ok";
+    })
     .catch((e) => { st.busy = false; st.msg = `改名失败: ${e.message || e}`; st.msgCls = "err"; renderHwFleetDiscoverPanel(true); })
     .finally(() => { refreshHwFleetDiscover(true); });
+}
+
+// ---- 2026-09-21新增：真机机队"一机一tab"标签条 ----
+// 背景：NX01/NX02两张卡片上下堆叠，页面太长要滚很远（用户反馈）。改成
+// 一次只显示一架、用标签条切换。选这个方案而不是"两卡并排"，是因为
+// .fieldGrid用的是repeat(auto-fit, minmax(150px,1fr))：卡片越窄排的列数
+// 越少、卡片本身反而越高，并排省下的高度会被这个反效果吃掉一部分；tab
+// 方案里选中的卡片独占整个左栏宽度，列数拉满，单卡是最矮的形态。
+
+// 标签上小圆点的颜色——tab方案的关键配套。没被选中的飞机整张卡片不在
+// DOM里，如果标签上不给状态，"收起来"就等于"看不见故障"，这在飞行场景
+// 是实打实的安全退步，不是审美问题。
+function hwFleetTabDotColor(ns) {
+  // 没接DDS遥测就没有健康数据可言（跟renderHwFleetRow()里hasTelemetry
+  // 同一套判定：光在真机发现表里有条目不够，还得这台GCS真的桥接到了它
+  // 的DDS），这种情况显示中性灰——不能用绿色假装"一切正常"。
+  if (nsSource(ns) !== "real" || !fleet[ns]) return HEALTH_COLOR.unknown;
+  const states = Object.values(computeHealth(ns));
+  if (states.includes("fail")) return HEALTH_COLOR.fail;
+  // 低电压单独一档：各子系统都在线、但电池已经低于px4ctrl自己的
+  // low_voltage阈值(BATTERY_LOW_VOLTAGE)，这是"还能飞但该落了"，跟
+  // "掉线"不是一回事，混成同一个红色会让人分不清该处置哪个。琥珀色取自
+  // .panelSection-control已经在用的那个橙(255,177,102)，不新引入颜色。
+  const battery = fleet[ns].fields["mavros/battery"];
+  const voltage = battery ? battery.voltage : null;
+  if (voltage != null && voltage < BATTERY_LOW_VOLTAGE) return "#ffb166";
+  // "wait"=还在HEALTH_GRACE_MS宽限期内、没收到过这个话题，不是故障
+  if (states.includes("wait")) return HEALTH_COLOR.wait;
+  return HEALTH_COLOR.ok;
+}
+
+function hwFleetTabsHtml(names, active) {
+  // 只有一架飞机时标签条没有任何信息量，纯占地方——本来就是为了省高度
+  // 做的这套东西，不能反过来在单机场景平白多出一行。
+  if (names.length < 2) return "";
+  return `<div class="fleetTabs">${names.map((ns) => `
+    <span class="fleetTab ${ns === active ? "active" : ""}" onclick="switchHwFleetTab('${ns}')" title="${ns}">
+      <span class="fleetTabDot" style="background:${hwFleetTabDotColor(ns)}"></span>${ns}
+    </span>`).join("")}</div>`;
+}
+
+function switchHwFleetTab(ns) {
+  if (hwFleetDiscover.activeTab === ns) return;
+  hwFleetDiscover.activeTab = ns;
+  // force=true：切tab是用户的明确点击，必须立刻重画。不能被
+  // renderHwFleetDiscoverPanel()开头那条"有人正在输入框里打字就跳过重建"
+  // 的保护挡掉——那条保护防的是1.5秒被动轮询冲掉输入内容，不该拦用户
+  // 自己发起的动作（否则表现就是"点了标签没反应"）。
+  renderHwFleetDiscoverPanel(true);
+}
+
+// 2026-09-21：把标签条写进常驻header里的#fleetTabBar。原来它是拼在
+// renderHwFleetDiscoverPanel()的HTML串开头、跟卡片一起塞进
+// #hwFleetDiscoverPanel的，那样它会跟着卡片一起被滚走——用户要求
+// "滚动鼠标时始终显示标签栏"，所以改成单独往header里写。
+function renderFleetTabBar(names, activeNs) {
+  const el = document.getElementById("fleetTabBar");
+  if (!el) return;
+  // 仿真模式下不显示：这个标签条管的是真机机队。它以前住在#realModePane
+  // 里面，`#realModePane{display:none}`会连它一起藏掉，不用自己操心；
+  // 现在挂在两种模式共用的header里，这个"免费的"隐藏没有了，必须显式判断。
+  const html = gcsMode === "real" ? hwFleetTabsHtml(names, activeNs) : "";
+  // 跟renderHwFleetDiscoverPanel()末尾同一套"内容没变就不碰innerHTML"防抖，
+  // 理由完全一样：标签是真的可点控件，1.5秒一次无条件重建innerHTML有概率
+  // 撞上一次正在进行中的点击（mousedown和mouseup之间恰好跨越了重建那一
+  // 刻），click事件凭空丢失，表现成"点了没反应"。这个坑2026-08-22在sim
+  // 卡片上、2026-08-29在真机面板上各踩过一次，不能在新加的控件上再踩第三次。
+  if (html !== lastFleetTabBarHtml) {
+    el.innerHTML = html;
+    lastFleetTabBarHtml = html;
+  }
 }
 
 function renderHwFleetDiscoverPanel(force) {
@@ -2262,10 +2504,43 @@ function renderHwFleetDiscoverPanel(force) {
   // 2026-09-04新增renameDraft：跟configOpen同样的道理，"更新NameSpace"
   // 输入框只要打了字（renameDraft非空）就跳过被动重建，见newHwFleetRow()
   // 里的说明——这个输入框之前完全没有防抖，是个遗留的漏网之鱼。
-  if (!force && Object.values(hwFleetDiscover.rows).some((st) => (st.configOpen || st.renameDraft) && !st.busy)) return;
+  // 2026-09-21跟着"一机一tab"改动收窄了判定范围：原来是遍历所有行
+  // (Object.values(...).some(...))——只要**任何一架**飞机的配置面板开着或
+  // 改名框里有字，整个面板的被动刷新就停摆。改成tab之后这个写法会变成
+  // 一个新bug：用户展开NX02的配置面板、再切到NX01这个tab去看飞行状态，
+  // NX02的configOpen还是true，于是眼前NX01的遥测被一个**根本不在屏幕上**
+  // 的表单冻住，完全没有道理。现在只看当前选中这一架——也只有它的输入框
+  // 真的在DOM里、真的可能正在被打字，其余飞机的表单连渲染都没渲染，不
+  // 存在"被冲掉"这回事。
   const names = Array.from(new Set([...Object.keys(hwFleetDiscover.drones), ...Object.keys(hwFleetDiscover.targets)])).sort();
+  const activeNs = names.includes(hwFleetDiscover.activeTab) ? hwFleetDiscover.activeTab : (names[0] || null);
+  hwFleetDiscover.activeTab = activeNs;
+  // 2026-09-21：标签条刻意画在下面那条"用户正在输入就跳过重建"的保护
+  // **之前**。标签上的小圆点是故障告警(子系统掉线/低电压)，用户在配置
+  // 表单里打字的这几十秒恰恰是最不该让告警停更新的时候。放在保护之前
+  // 是安全的：标签条里没有任何输入框，重画它不可能冲掉用户正在打的字，
+  // 那条保护要挡的是卡片里的IP/端口/改名输入框被重建冲掉。
+  renderFleetTabBar(names, activeNs);
+  // 2026-09-21再收紧一次：改名输入框现在被折叠在"容器与命名空间操作"子分组
+  // 里(controlOpen && containerOpsOpen 两层都展开才在DOM里)。只看
+  // renameDraft非空会引入一个死锁——用户打了几个字、又把子分组收起来，
+  // 输入框已经不在屏幕上了，renameDraft却还留着值，这条保护会把整个面板的
+  // 被动刷新**永久**冻住(遥测全部定格)，而且用户完全不知道是什么原因、也
+  // 没有可见的输入框可以去清空它。所以要求"输入框此刻真的可见"才生效。
+  const activeRow = hwFleetDiscover.activeTab ? hwFleetDiscover.rows[hwFleetDiscover.activeTab] : null;
+  const renameVisible = !!(activeRow && activeRow.renameDraft && activeRow.controlOpen && activeRow.containerOpsOpen);
+  if (!force && activeRow && (activeRow.configOpen || renameVisible) && !activeRow.busy) return;
   realEmptyEl.style.display = names.length ? "none" : "block";
-  const rowsHtml = names.map(renderHwFleetRow).join("");
+  // 2026-09-21改成"一机一tab"：原来这里是names.map(renderHwFleetRow)，把
+  // 所有飞机的卡片一次全拼出来上下堆叠，双机时页面长到要滚很远（用户
+  // 反馈）。现在只渲染选中的那一架，其余靠上面的标签条切换。
+  // ⚠️这里只是"不画"，不是"不收数据"——遥测订阅挂在fleet[ns].subs上，
+  // makeStatusHandler()收到消息只往fleet[ns]里写、故意完全不碰DOM（见那个
+  // 函数里的注释，原因是odom能到100Hz、每条都重建DOM会把按钮点击吞掉）。
+  // 所以没被选中的飞机照样在收话题、lastSeen照样在更新、computeHealth()
+  // 照样算得准，标签上那个小圆点就是拿这份数据画的。两个推论：切tab不会
+  // 让任何飞机"失联"；也因此这个改动不省带宽，省的只是屏幕高度。
+  const rowsHtml = activeNs ? renderHwFleetRow(activeNs) : "";
   // 2026-08-25新增：DDS能看到、但既不是运行中的仿真容器、也没在真机
   // 通道注册过的命名空间——大概率是"真机已经在广播DDS但还没配置UDP/
   // HTTP控制通道"这种过渡态，只读展示遥测，不提供任何操作按钮（没有
@@ -2402,9 +2677,9 @@ function hwFleetSectionTitleHtml(ns, field, title) {
 // 2026-09-04新增：从renderHwFleetRow()里抽出来的纯只读遥测内容(飞行栈
 // 摘要/连接状态/位置/姿态/健康/频率/RC/推力标定)，两处调用——①这里
 // renderHwFleetRow()自己1.5秒节奏的完整重建（首次创建<div id="hwTelemetry_
-// ${ns}">节点，或者面板结构变化比如收起/展开③控制面板时），②下面
+// ${ns}">节点，或者面板结构变化比如收起/展开①控制面板时），②下面
 // refreshHwFleetTelemetryOnly()的5Hz独立刷新（只重写这一个<div>的
-// innerHTML，不碰旁边③控制面板的按钮）。抽成共用函数避免两处各写一份
+// innerHTML，不碰旁边①控制面板的按钮）。抽成共用函数避免两处各写一份
 // 容易改漏其中一处。
 function hwTelemetryBlockHtml(ns) {
   // 2026-09-04：用户要求"连接/模式"+"解锁"这张表(connSummaryHtml)挪到
@@ -2467,7 +2742,7 @@ function renderHwFleetRow(ns) {
   // (原来挂在卡片标题旁边的cardSub文字"已接DDS遥测")也一并收进表格里，
   // 6个字段正好3+3分成两张对称的表，不是硬凑。
   const containerStatusHtml = `
-    ${hwFleetSectionTitleHtml(ns, "containerOpen", "① 容器状态")}
+    ${hwFleetSectionTitleHtml(ns, "containerOpen", "③ 容器状态")}
     ${st.containerOpen ? `
     <table class="telemetryTable">
       <thead><tr><th>FlightStack</th><th>VisionStack</th><th>DDS遥测</th></tr></thead>
@@ -2496,15 +2771,15 @@ function renderHwFleetRow(ns) {
   // CONTROLLER=px4ctrl，/{ns}/takeoff_land确实被px4ctrl订阅，起飞(cmd=1)/
   // 降落(cmd=2)走这条路完全可行，不需要control_server.py参与（它只管
   // 容器生命周期HTTP接口，从不参与ROS话题收发）——这几个按钮挪到下面
-  // "③控制面板"，跟遥测数据分开，这里只放"状态"。
+  // "①控制面板"，跟遥测数据分开，这里只放"状态"。
   // 2026-09-04：hasTelemetry为真时这一段(连接/位置/姿态/健康/频率/RC/
   // 推力标定)全部是纯只读表格、不含任何按钮/输入框，包一层带固定id的
   // <div>，配合下面refreshHwFleetTelemetryOnly()按5Hz单独刷新——用户
   // 反馈把这块提到5Hz后"控制面板按钮反应很慢/没反应"，根因是之前直接
-  // 5Hz整panel(renderHwFleetDiscoverPanel)重建，会把③控制面板那一整排
+  // 5Hz整panel(renderHwFleetDiscoverPanel)重建，会把①控制面板那一整排
   // 飞行/启停/改名按钮也跟着每200ms摧毁重建一次，点击的mousedown~mouseup
   // 窗口有很大概率正好撞上重建，事件跟着丢。改成只重建这一个子树之后，
-  // ③控制面板的按钮节点不会再被这个5Hz定时器碰到，只由renderHwFleetRow()
+  // ①控制面板的按钮节点不会再被这个5Hz定时器碰到，只由renderHwFleetRow()
   // 自己那套1.5秒节奏重建，跟提速之前完全一样，不再有丢点击的风险。
   const vehicleStatusHtml = `
     ${hwFleetSectionTitleHtml(ns, "vehicleOpen", "② 飞机状态")}
@@ -2515,10 +2790,10 @@ function renderHwFleetRow(ns) {
     <div class="row" style="margin-top:4px;"><span class="v" style="color:#6b7684;">这架飞机还没接DDS遥测——去"GCS网络设置"配好网络桥接就能在这里多看到位置/姿态/健康状态，见realModePane说明</span></div>`}` : ""}`;
 
   // ---- 3. 控制面板 ----
-  // 2026-08-29用户曾要求"取消控制面板"、把按钮分派进①②两段，随后又
+  // 2026-08-29用户曾要求"取消控制面板"、把按钮分派进容器状态/飞机状态两段，随后又
   // 明确要求"回退刚才那次改动"——恢复成独立的控制面板。三排按钮：
   // 飞行控制（锁定/起飞/悬停/降落，只有接了遥测才显示）、flight容器控制、
-  // vision容器控制，都挂在"③控制面板"这个小标题下面。
+  // vision容器控制，都挂在"①控制面板"这个小标题下面。
   const flightControlHtml = hasTelemetry ? `
     <div class="actions" style="margin-top:6px;">
       <button ${st.busy ? "disabled" : ""} onclick="doHwFleetLockOrigin('${ns}')">锁定起飞点</button>
@@ -2526,10 +2801,14 @@ function renderHwFleetRow(ns) {
       <button ${st.busy ? "disabled" : ""} onclick="doHwFleetHover('${ns}')">悬停</button>
       <button ${st.busy ? "disabled" : ""} class="danger" onclick="doHwFleetLand('${ns}')">降落</button>
     </div>` : "";
-  const controlPanelHtml = `
-    ${hwFleetSectionTitleHtml(ns, "controlOpen", "③ 控制面板")}
-    ${st.controlOpen ? `
-    ${flightControlHtml}
+  // 2026-09-21：容器(Flight/Vision启停重启)+命名空间(改名)这两组按钮收进
+  // 一个默认折叠的子分组，飞行操作和操作结果输出框留在外面常驻显示。
+  // 输出框刻意不收进折叠里——它显示的是"上一次操作的结果/原始命令输出"，
+  // 里面也包含起飞/降落这些常驻按钮的反馈，跟着折叠走的话点完起飞就看不到
+  // 结果了。
+  const containerOpsHtml = `
+    ${hwFleetSectionTitleHtml(ns, "containerOpsOpen", "容器与命名空间操作")}
+    ${st.containerOpsOpen ? `
     <div class="actions" style="margin-top:6px;">
       <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(flightUp, true)}" onclick="doHwFleetStackAction('${ns}','flight','up')">启动&nbsp;&nbsp;Flight</button>
       <button ${disabledBase ? "disabled" : ""} class="${hwFleetStackBtnClass(flightUp, false)}" onclick="doHwFleetStackAction('${ns}','flight','down')">停止&nbsp;&nbsp;Flight</button>
@@ -2546,6 +2825,12 @@ function renderHwFleetRow(ns) {
       <input id="hwFleetRenameInput_${ns}" class="renameSlotInput" placeholder="新命名空间，如NX03"
         value="${escAttr(st.renameDraft)}" oninput="hwFleetRow('${ns}').renameDraft = this.value">
     </div>
+    ` : ""}`;
+  const controlPanelHtml = `
+    ${hwFleetSectionTitleHtml(ns, "controlOpen", "① 控制面板")}
+    ${st.controlOpen ? `
+    ${flightControlHtml}
+    ${containerOpsHtml}
     <div class="outputBox ${st.msgCls}">${st.msg ? escHtml(st.msg) : "（还没有操作记录——点上面任意按钮后，结果或原始命令输出会显示在这里）"}</div>` : ""}`;
 
   // ---- 4. 配置面板（原"本地配置"改名）----
@@ -2607,17 +2892,25 @@ function renderHwFleetRow(ns) {
         <button ${st.busy ? "disabled" : ""} style="width:auto;padding:4px 10px;margin:0;" onclick="doHwFleetRefreshStackStatus('${ns}')">刷新待生效值</button>
         <button ${st.busy || !st.stackContract ? "disabled" : ""} onclick="doHwFleetApplyStackMode('${ns}')">应用模式（只写.env）</button>
       </div>
-      <div class="row"><span class="v" style="color:#6b7684;font-size:12px;">改完模式只是写了.env，飞控还在按旧模式跑——要生效需要再去上面"③控制面板"点"flight重启"（会掐断飞控）。</span></div>
+      <div class="row"><span class="v" style="color:#6b7684;font-size:12px;">改完模式只是写了.env，飞控还在按旧模式跑——要生效需要再去上面"①控制面板"点"flight重启"（会掐断飞控）。</span></div>
     </div>` : "";
 
   // 2026-08-29用户要求"不同面板用不同底色"——四段各包一层.panelSection+
   // 对应的颜色修饰class，纯视觉分区，不影响里面已有的内容/交互逻辑。
+  // 2026-09-21用户要求"容器状态放最下边，控制面板放最上边"——把原来
+  // 容器/飞机/控制的顺序倒成控制/飞机/容器。顺序一换，各段小标题上那个
+  // 可见的序号(①②③④)必须跟着换，否则从上往下读会变成③②①这种倒序：
+  // 容器状态①→③、控制面板③→①，飞机状态②和配置面板④位置没动、编号不变。
+  // 全文件里引用这些序号的注释和一句用户可见的提示文案(在④配置面板里，
+  // 告诉用户改完飞行栈模式要去点"flight重启")也一并同步过了。
+  // 配置面板(④)仍然留在最后：它是点开才出现的表单，不属于"常驻三段"，
+  // 放在容器状态后面也能保证展开它时不会把上面的内容顶得跳来跳去。
   return `
     <div class="droneCard">
       <b class="cardTitle">${ns}</b>
-      <div class="panelSection panelSection-container">${containerStatusHtml}</div>
-      <div class="panelSection panelSection-vehicle">${vehicleStatusHtml}</div>
       <div class="panelSection panelSection-control">${controlPanelHtml}</div>
+      <div class="panelSection panelSection-vehicle">${vehicleStatusHtml}</div>
+      <div class="panelSection panelSection-container">${containerStatusHtml}</div>
       <div class="actions" style="margin-top:10px;">${configOpenBtn}</div>
       ${st.configOpen ? `<div class="panelSection panelSection-config">${configPanelHtml}</div>` : ""}
     </div>`;
@@ -3969,7 +4262,7 @@ function toggleSimCardExpand(ns) {
   render();
 }
 
-// 2026-09-07新增：仿真卡片模拟真机集群卡片"①容器状态"的最简版本——只有
+// 2026-09-07新增：仿真卡片模拟真机集群卡片"③容器状态"的最简版本——只有
 // 一个flight-stack容器（没有真机那样flight/vision两个独立容器，仿真也
 // 没有Docker层面拆分视觉栈），直接读fleetCtl.sim.status（已经在常驻
 // setInterval里5秒轮询，见refreshSimFleetStatus()，这里不用再单独发
@@ -4206,11 +4499,11 @@ setInterval(() => refreshHwFleetDiscover(false), 1500); // 2026-08-29用户要�
 // 想法是"反正它自己有diff防抖，不会真的撞上点击"——用户实测反馈"控制
 // 面板按钮反应很慢/没反应"，才发现这个想法是错的：diff防抖只挡"内容没变
 // 就不碰DOM"，但位置/姿态这些数字每200ms几乎必然在变，防抖形同虚设，
-// 等于把③控制面板那一整排按钮也跟着每200ms摧毁重建一次，点击的
+// 等于把①控制面板那一整排按钮也跟着每200ms摧毁重建一次，点击的
 // mousedown~mouseup窗口很容易正好撞上重建导致事件丢失。改成只调用
 // refreshHwFleetTelemetryOnly()——只重写hwTelemetryBlockHtml()对应的
 // <div id="hwTelemetry_${ns}">这一个只读子树，不含任何按钮/输入框，
-// ③控制面板的按钮节点完全不会被这个5Hz定时器碰到，只由
+// ①控制面板的按钮节点完全不会被这个5Hz定时器碰到，只由
 // renderHwFleetDiscoverPanel()的1.5秒节奏重建，回到提速之前的行为。
 setInterval(refreshHwFleetTelemetryOnly, 200);
 // 2026-09-07新增：仿真卡片的高频遥测子树，跟上面真机那条同一个节奏

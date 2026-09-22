@@ -11,6 +11,11 @@
 # `if role == 'leader':` 分开写两架各自要做的事。
 # 只想飞一架时加 --single 参数：
 #     bash 运行仿真.sh --single
+# 想跑这个文件夹里别的程序（比如示例），用 --task 指定文件名：
+#     bash 运行仿真.sh --task 编队飞行示例.py
+# 连真机调试加 --real（或者直接运行同目录的"运行真机.sh"）：
+#     bash 运行仿真.sh --real
+# 仿真和真机用不同的 ROS_DOMAIN_ID（仿真21/真机20），互相隔离，不会连错。
 #
 # 你不需要看懂这个脚本里面在做什么，正常情况下你也不需要改这个文件——
 # 你只需要改"我的任务.py"里的坐标数字，然后重新运行这个脚本。
@@ -51,6 +56,7 @@ LEADER_NS="NX01"      # 长机编号
 FOLLOWER_NS="NX02"    # 僚机编号
 SINGLE=0              # --single：只飞长机那一架
 RESTART=1             # --no-restart：不重建仿真容器，直接接着上次的状态跑
+MODE=sim              # --real：连真机（ROS_DOMAIN_ID=20），不碰仿真容器
 
 # 仿真项目所在目录（docker-compose.yml 在哪个文件夹里）。
 # 这个模板文件夹被拷到别处之后（比如桌面的 CONTEST 文件夹），上级目录就
@@ -66,11 +72,13 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --single) SINGLE=1; shift ;;
         --no-restart) RESTART=0; shift ;;
+        --real) MODE=real; RESTART=0; shift ;;
+        --task) TASK_FILE="$2"; shift 2 ;;
         --sim-dir) SIM_DIR="$2"; shift 2 ;;
         --leader)   LEADER_NS="$2"; shift 2 ;;
         --follower) FOLLOWER_NS="$2"; shift 2 ;;
         -h|--help)
-            echo "用法： bash 运行仿真.sh [--single] [--no-restart] [--sim-dir 仿真项目目录] \\"
+            echo "用法： bash 运行仿真.sh [--real] [--single] [--task 任务文件.py] [--no-restart] [--sim-dir 仿真项目目录] \\"
             echo "                   [--leader NX01] [--follower NX02]"
             exit 0 ;;
         *) echo "不认识的参数：$1（加 --help 看用法）"; exit 2 ;;
@@ -138,6 +146,25 @@ if [[ ! -f "$TASK_FILE" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# 检查5：按仿真/真机选网络参数（ROS_DOMAIN_ID 仿真21/真机20，真机还要换
+# DDS 网卡配置，细节见 contestant_network.sh）
+# ---------------------------------------------------------------------------
+COMPOSE_DIR=""
+for candidate in "$SIM_DIR" "$(cd .. 2>/dev/null && pwd)" "$SIM_DIR_DEFAULT"; do
+    if [[ -n "$candidate" && -f "$candidate/docker-compose.yml" ]]; then
+        COMPOSE_DIR="$candidate"
+        break
+    fi
+done
+source ./contestant_network.sh
+if ! contestant_net_args "$MODE" "$COMPOSE_DIR" "$HOME/.cache/contest_sdk"; then
+    echo ""
+    echo "【网络参数没准备好】见上面的提示。"
+    exit 1
+fi
+echo "运行模式：$CONTESTANT_NET_DESC"
+
 if [[ "$SINGLE" == "1" ]]; then
     echo "环境检查通过，开始运行你的任务代码（$TASK_FILE，只飞 $LEADER_NS 一架）……"
 else
@@ -156,6 +183,8 @@ echo ""
 #   -v "$(pwd)":/workspace
 #                   把当前文件夹共享给容器，所以你在"我的任务.py"里改的内容
 #                   运行时一定是最新的，不需要重新打包镜像
+#   "${CONTESTANT_NET_ARGS[@]}"
+#                   仿真/真机的网络参数（上面"检查5"选好的）
 #   --namespace/--role/--teammate
 #                   告诉这个容器"你是哪架飞机、扮演什么角色、队友是谁"。
 #                   两架飞机的区别**只有这三个参数**，代码是同一份。
@@ -163,6 +192,7 @@ echo ""
 run_one() {   # $1=容器名 $2=自己编号 $3=角色 $4=队友编号
     docker run -d --name "$1" --network host \
         -v "$(pwd)":/workspace \
+        "${CONTESTANT_NET_ARGS[@]}" \
         "$IMAGE_NAME" \
         python3 -u "/workspace/$TASK_FILE" \
         --namespace "$2" --role "$3" --teammate "$4" >/dev/null
@@ -182,14 +212,7 @@ docker rm -f contest_task_leader contest_task_follower >/dev/null 2>&1 || true
 # （手里没有仿真环境那套文件），仿真那一侧本来就由赛事方/助教启动，这个
 # 脚本只负责起"你的任务程序"。
 # ---------------------------------------------------------------------------
-# 按上面说的优先级找仿真项目目录
-COMPOSE_DIR=""
-for candidate in "$SIM_DIR" "$(cd .. 2>/dev/null && pwd)" "$SIM_DIR_DEFAULT"; do
-    if [[ -n "$candidate" && -f "$candidate/docker-compose.yml" ]]; then
-        COMPOSE_DIR="$candidate"
-        break
-    fi
-done
+# 仿真项目目录 COMPOSE_DIR 在上面"检查5"已经按优先级找好了
 if [[ "$RESTART" == "1" && -n "$COMPOSE_DIR" ]]; then
     echo "正在重建仿真环境（让飞机回到起降点）……"
     ( cd "$COMPOSE_DIR" && docker compose down --timeout 20 >/dev/null 2>&1 || true )
@@ -250,7 +273,7 @@ px4_ready() {
         sleep 5
     done
     echo "仿真环境就绪。"
-elif [[ "$RESTART" == "1" ]]; then
+elif [[ "$RESTART" == "1" && "$MODE" == "sim" ]]; then
     echo "（没找到仿真项目目录，跳过重建仿真——假定仿真环境已经由赛事方启动好。"
     echo "  如果需要每次自动重建，用 --sim-dir 指定仿真项目所在文件夹，"
     echo "  或者改本脚本开头的 SIM_DIR_DEFAULT）"

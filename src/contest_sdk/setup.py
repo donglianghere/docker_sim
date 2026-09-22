@@ -12,4 +12,10 @@ setup(
         'rclpy',
         'pyserial',
     ],
+    # 声光反馈常驻程序，等价于`python3 -m contest_sdk.sound_light_server`
+    entry_points={
+        'console_scripts': [
+            'contest-sound-light-server = contest_sdk.sound_light_server:main',
+        ],
+    },
 )

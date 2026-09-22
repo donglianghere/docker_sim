@@ -8,6 +8,10 @@
 
 航点是世界坐标 (x, y)，至少两个，按顺序飞。僚机不需要知道航线，它沿长机
 实际飞过的轨迹走，沿轨迹间距不小于 --spacing（这是下限，不是要死守的值）。
+
+声光反馈：起飞/降落由 SDK 自动播（长机="侦察机"、僚机="任务机"），这里只在
+落地后各补一条。需要地面站上的声光常驻程序在运行（start_sound_light_server.sh），
+没运行也不影响飞行，只会打一行警告。
 """
 import argparse
 import time
@@ -39,6 +43,7 @@ def leader(sdk, route_xy):
 
     sdk.send_to_teammate(ROUTE_DONE)    # 只有长机知道哪个是最后一个航点
     _land_at_pad(sdk)
+    sdk.play_sound_light('侦察机任务完成')
 
 
 def follower(sdk, spacing_m):
@@ -52,6 +57,7 @@ def follower(sdk, spacing_m):
     inbox.wait(ROUTE_DONE, ROUTE_DONE_WAIT_S)
     sdk.stop_formation_follow()
     _land_at_pad(sdk)
+    sdk.play_sound_light('任务机已降落')
 
 
 def _land_at_pad(sdk):

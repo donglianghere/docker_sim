@@ -57,7 +57,15 @@ from contest_sdk.exceptions import EnvironmentMisconfiguredError
 # 看不见对方的节点/话题。这类问题的故障现象通常不是"连接失败"这种能
 # 立刻定位的报错，而是"某个调用一直卡住直到超时"，排查成本很高，所以
 # 选择在SDK最早期（`rclpy.init()`之前）就主动校验、快速失败。
-EXPECTED_ROS_DOMAIN_ID = '21'
+#
+# 2026-09-21：原来只认'21'，但项目约定是"仿真21/真机20"两个域（见根目录
+# docker-compose.yml/docker-compose.hw.yml、gcs/backend/app.py的
+# SIM_ROS_DOMAIN_ID/REAL_ROS_DOMAIN_ID）——选手容器连真机调试时必须设成20，
+# 写死21会让SDK在真机上直接拒绝启动。两个值都放行，其它值（没设置、默认0
+# 等真正配错的情况）照样拦下。
+SIM_ROS_DOMAIN_ID = '21'
+REAL_ROS_DOMAIN_ID = '20'
+EXPECTED_ROS_DOMAIN_IDS = {SIM_ROS_DOMAIN_ID: '仿真', REAL_ROS_DOMAIN_ID: '真机'}
 
 
 class RclpyRuntime:
@@ -96,10 +104,10 @@ class RclpyRuntime:
         # 时候选手很难第一时间联想到"是不是ROS_DOMAIN_ID配错了"——不如
         # 在最早期就把这类环境问题挡在门口。
         actual = os.environ.get('ROS_DOMAIN_ID')
-        if actual != EXPECTED_ROS_DOMAIN_ID:
+        if actual not in EXPECTED_ROS_DOMAIN_IDS:
             raise EnvironmentMisconfiguredError(
                 f"ROS_DOMAIN_ID环境变量配置不对：当前值={actual!r}，"
-                f"期望值={EXPECTED_ROS_DOMAIN_ID!r}。请检查ROS_DOMAIN_ID"
+                f"应该是{SIM_ROS_DOMAIN_ID!r}（仿真）或{REAL_ROS_DOMAIN_ID!r}（真机）。请检查ROS_DOMAIN_ID"
                 f"环境变量——这个仿真/比赛系统全场（GCS、双机飞控容器、"
                 f"选手SDK容器）都必须使用同一个ROS_DOMAIN_ID，否则DDS "
                 f"discovery会各自活在独立的域里、互相看不见对方的节点，"

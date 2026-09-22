@@ -53,8 +53,16 @@ from rclpy.time import Time
 from std_srvs.srv import Trigger
 
 from contest_sdk._rclpy_runtime import RclpyRuntime
-from contest_sdk._sound_light_port import SOUND_LIGHT_EVENTS
+from contest_sdk._sound_light_port import (
+    DEFAULT_SOUND_LIGHT_BAUDRATE,
+    DEFAULT_SOUND_LIGHT_PORT,
+    DEFAULT_SOUND_LIGHT_TIMEOUT_S,
+    MUTE_COMMAND_ARGS as _SOUND_LIGHT_MUTE_ARGS,
+    REQUEST_TOPIC as _SOUND_LIGHT_REQUEST_TOPIC,
+    SOUND_LIGHT_EVENTS,
+)
 from contest_sdk._sound_light_port import SoundLightPort as _SoundLightPort
+from contest_sdk._sound_light_port import build_request as _build_sound_light_request
 from contest_sdk._sound_light_port import encode_command as _encode_sound_light_command
 from contest_sdk.exceptions import (
     ActionFailedError,
@@ -114,11 +122,52 @@ DEFAULT_ALARM_RETRIES = 2
 # 都刚好是`ttyUSB0`——写死成常量的话每次环境不一样都要改代码重新pip
 # install，改成环境变量之后选手/部署脚本在容器`docker run -e SOUND_LIGHT_
 # PORT=/dev/ttyUSB1 ...`或者直接`export`就能覆盖，不用碰SDK代码本身。
-# 没设置这个环境变量时才落回下面这个默认值。
+# 没设置这个环境变量时才落回默认值（`DEFAULT_SOUND_LIGHT_PORT`，定义在
+# `_sound_light_port.py`，常驻程序共用）。
+#
+# 2026-09-21：地面站只有一块板子、两架飞机的任务进程共用，默认改成
+# "server"模式——SDK不再自己开串口，而是往`/sound_light/request`话题发
+# 请求，由常驻程序`sound_light_server.py`独占串口、排队发送（理由见该
+# 文件模块头）。`SOUND_LIGHT_MODE=direct`退回原来的"本进程直接开串口"，
+# 只适合单进程、板子直接插在本机的调试场景，跟常驻程序不能同时用
+# （串口以exclusive方式打开，后开的一方会报错）。
 # ---------------------------------------------------------------------------
-DEFAULT_SOUND_LIGHT_PORT = '/dev/ttyUSB0'
-DEFAULT_SOUND_LIGHT_BAUDRATE = 115200
-DEFAULT_SOUND_LIGHT_TIMEOUT_S = 1.0
+SOUND_LIGHT_MODES = ('server', 'direct')
+#: `takeoff()`/`land()`自动播报用：角色 -> 事件名前缀（表格里"侦察机"/"任务机"）。
+_SOUND_LIGHT_ROLE_PREFIX = {'recon': '侦察机', 'supply': '任务机'}
+
+@dataclass(frozen=True)
+class ServoSpec:
+    """一路舵机的硬件接线/飞控配置，必须跟飞控里的参数一致（改了飞控参数
+    就同步改这里）。"""
+    actuator_set: int   # PWM_MAIN_FUNCn = 300 + actuator_set（Peripheral via Actuator Set N）
+    output: str         # 接在飞控哪个输出口，只用于报错/打印
+    pwm_min: int        # = PWM_MAIN_MINn，对应归一化值-1
+    pwm_max: int        # = PWM_MAIN_MAXn，对应归一化值+1
+
+
+# `sdk.set_servo()`用的舵机表：飞机编号 -> {舵机编号: 配置}。
+# 2026-09-21用户给定：两个舵机都在NX02上，MAIN7/MAIN9，50Hz，PWM 800~2000。
+# MAIN7(TIM2组)和MAIN9(TIM3组)各自的组频率都要设成50Hz（PWM_MAIN_TIM2/
+# PWM_MAIN_TIM3=50），上锁时也要能动需要COM_PREARM_MODE=2——这些都是飞控
+# 侧设置，SDK这边只负责按表把PWM换算成归一化值发出去。
+SERVO_CONFIG: Dict[str, Dict[int, ServoSpec]] = {
+    'NX02': {
+        1: ServoSpec(actuator_set=1, output='MAIN7', pwm_min=800, pwm_max=2000),
+        2: ServoSpec(actuator_set=2, output='MAIN9', pwm_min=800, pwm_max=2000),
+    },
+}
+
+
+def servo_pwm_to_normalized(spec: ServoSpec, pwm: int) -> float:
+    """PWM微秒值 -> `MAV_CMD_DO_SET_ACTUATOR`用的-1~1。PX4输出侧按
+    `interpolate(v, -1, 1, MIN, MAX)`再四舍五入换算回PWM，这里是它的逆运算。"""
+    if not spec.pwm_min <= pwm <= spec.pwm_max:
+        raise ValueError(
+            f"舵机({spec.output})的PWM必须在{spec.pwm_min}~{spec.pwm_max}之间，收到{pwm}"
+        )
+    return (pwm - spec.pwm_min) / (spec.pwm_max - spec.pwm_min) * 2.0 - 1.0
+
 
 #: `send_to_teammate()`默认总超时——方案2.3节"延迟预算"建议区间(30-60秒)
 #: 的中间值，跟`reliability.py`的`DEFAULT_TIMEOUT_S`保持一致，这里单独
@@ -406,10 +455,10 @@ class DroneSDK:
         det = sdk.wait_for_detection('apriltag:2', timeout=60)
         sdk.send_to_teammate('ground_fire_found', x=det.bbox_x, y=det.bbox_y)
         sdk.do_action('grab_supply')
-        sdk.play_sound_light('发现地面火情')
+        sdk.play_sound_light('侦察机发现地面火情')
     """
 
-    #: `play_sound_light(event=...)`的九个合法取值 -> (R, G, B, 声音编号)，
+    #: `play_sound_light(event=...)`的20个合法取值 -> (R, G, B, 声音编号, 循环次数, 间隔ms)，
     #: 挂成类属性方便选手用`DroneSDK.SOUND_LIGHT_EVENTS`查有哪些事件名，
     #: 不需要单独`import`内部模块（跟本文件"只暴露DroneSDK一个类"的约定
     #: 保持一致，见`__init__.py`文件头说明）。
@@ -448,6 +497,14 @@ class DroneSDK:
         self._alarm_url = DEFAULT_ALARM_URL
         self._alarm_timeout_s = DEFAULT_ALARM_TIMEOUT_S
 
+        self._sound_light_mode = os.environ.get('SOUND_LIGHT_MODE', 'server')
+        if self._sound_light_mode not in SOUND_LIGHT_MODES:
+            raise ValueError(
+                f"SOUND_LIGHT_MODE环境变量只能是{SOUND_LIGHT_MODES}之一，当前值={self._sound_light_mode!r}"
+            )
+        # server模式的请求发布者，第一次play_sound_light()时才创建（跟下面
+        # 直连模式的懒加载同样的理由：不用声光的任务不应该多出一个发布者）。
+        self._sound_light_pub = None
         self._sound_light_port = os.environ.get('SOUND_LIGHT_PORT', DEFAULT_SOUND_LIGHT_PORT)
         self._sound_light_baudrate = DEFAULT_SOUND_LIGHT_BAUDRATE
         self._sound_light_timeout_s = DEFAULT_SOUND_LIGHT_TIMEOUT_S
@@ -1376,7 +1433,12 @@ class DroneSDK:
         # 踩的坑，不是理论上的边界情况）。
         params = [float('nan')] * 6
         params[index - 1] = float(value)
+        self._send_actuator_set(params, f'set_actuator[{index}]={value}', timeout)
+        self._progress(f"已设置Actuator Set{index} = {value}")
 
+    def _send_actuator_set(self, params: List[float], action_name: str, timeout: float) -> None:
+        """发一条`MAV_CMD_DO_SET_ACTUATOR`，`params`是Set1~6六个槽位的值，
+        不改的槽位必须是NaN（见`set_actuator()`里的说明）。"""
         request = self._CommandLong.Request()
         request.broadcast = False
         request.command = 187  # MAV_CMD_DO_SET_ACTUATOR
@@ -1386,10 +1448,71 @@ class DroneSDK:
         request.param7 = 0.0  # Actuator Set索引，0=Set1~6（这个方法只支持这一组）
 
         ok, response = self._call_service_blocking(self._command_long_cli, request, timeout_s=timeout)
-        action_name = f'set_actuator[{index}]={value}'
         if not ok or response is None or not response.success:
             raise ActionFailedError(action_name=action_name, timeout_s=timeout, namespace=self.namespace)
-        self._progress(f"已设置Actuator Set{index} = {value}")
+
+    @property
+    def servos(self) -> Dict[int, ServoSpec]:
+        """这架飞机上可以用`set_servo()`控制的舵机：{舵机编号: 配置}，
+        没有舵机的飞机返回空字典。"""
+        return dict(SERVO_CONFIG.get(self.namespace, {}))
+
+    def set_servo(self, servo: int, pwm: int, timeout: float = 5.0) -> None:
+        """把舵机转到指定PWM位置（微秒）。发出后飞控会一直保持这个位置，
+        直到下一次设置，不需要反复调用。
+
+        用法（NX02上的两个舵机，PWM范围800~2000）::
+
+            sdk.set_servo(1, 2000)   # 舵机1（MAIN7）转到2000
+            sdk.set_servo(2, 800)    # 舵机2（MAIN9）转到800
+
+        飞控把`COM_PREARM_MODE`设成2之后，**不解锁也能动**（电机不会转）。
+        这个方法只等飞控回"收到"，舵机没有位置反馈，转到位需要的时间
+        （通常零点几秒）要自己`time.sleep()`等。
+
+        Args:
+            servo: 舵机编号（1或2），可用的编号见`sdk.servos`。
+            pwm: 目标PWM（微秒），必须在该舵机配置的最小~最大值之间。
+            timeout: 等飞控确认的超时秒数。
+
+        Raises:
+            ValueError: 这架飞机没有这个舵机，或PWM超出范围。
+            ActionFailedError: 飞控没有确认（mavros/飞控链路没连上等）。
+        """
+        self.set_servos({servo: pwm}, timeout=timeout)
+
+    def set_servos(self, positions: Dict[int, int], timeout: float = 5.0) -> None:
+        """同时设置多个舵机：一条指令发给飞控，几个舵机同一时刻开始转
+        （分开调用`set_servo()`会差几十毫秒）。
+
+        用法::
+
+            sdk.set_servos({1: 2000, 2: 2000})   # 两个舵机同时到2000
+
+        Args:
+            positions: {舵机编号: 目标PWM}。
+            timeout: 等飞控确认的超时秒数。
+
+        Raises:
+            ValueError: 有舵机编号不存在或PWM超出范围——此时一个都不会发。
+            ActionFailedError: 飞控没有确认。
+        """
+        if not positions:
+            raise ValueError('positions不能为空')
+        config = SERVO_CONFIG.get(self.namespace, {})
+        params = [float('nan')] * 6
+        for servo, pwm in positions.items():
+            spec = config.get(servo)
+            if spec is None:
+                raise ValueError(
+                    f"{self.namespace}上没有舵机{servo!r}，"
+                    + (f"可用的舵机编号：{sorted(config)}" if config else
+                       f"这架飞机没有配置舵机（舵机在：{sorted(SERVO_CONFIG)}）")
+                )
+            params[spec.actuator_set - 1] = servo_pwm_to_normalized(spec, int(pwm))
+        desc = '，'.join(f"舵机{k}（{config[k].output}）-> PWM {int(v)}" for k, v in positions.items())
+        self._send_actuator_set(params, f'set_servos {positions}', timeout)
+        self._progress(desc)
 
     # ------------------------------------------------------------------
     # 2.1节能力7：编队跟随开关（一次性触发调用，不做持续订阅/计算）
@@ -1581,7 +1704,7 @@ class DroneSDK:
         2026-09-17新增（用户明确要求"这是所有起飞都应该用的流程"，对
         所有飞机一视同仁）：完整流程现在是——①前置检查PX4飞控已连接、
         UWB/里程计定位数据已就绪（各自独立超时，报错能说清楚具体卡在
-        哪一步）；②给一次声光反馈（`play_sound_light('正在起飞')`，
+        哪一步）；②给一次声光反馈（按角色播'侦察机起飞'/'任务机起飞'，
         硬件不存在时只警告不阻断）；③发布起飞指令，等`armed=True`+
         位置稳定（原有逻辑，见下面说明）；④额外强制悬停`HOVER_AFTER_
         TAKEOFF_S`（5秒）才真正返回，给控制器更充分的收敛裕量。全程
@@ -1640,7 +1763,7 @@ class DroneSDK:
         # 明确要求）——起飞前先确认PX4飞控已连接、UWB/里程计定位数据已经
         # 就绪，两项检查各自独立报超时原因（不要笼统报成"没等到armed"，
         # 那样排查时看不出到底是连接问题还是定位问题）；给一次声光反馈
-        # （'正在起飞'，硬件板九个预置事件之一）；起飞过程/前置检查的每
+        # （按角色播'侦察机起飞'/'任务机起飞'）；起飞过程/前置检查的每
         # 个关键节点都用`_progress()`往外报状态（这是这个SDK一贯的"回传
         # 消息"机制，所有阻塞方法都在用，不是新发明一套）。
         ok = self._poll_until(
@@ -1665,14 +1788,9 @@ class DroneSDK:
                 stage='preflight_uwb')
         self._progress('起飞前置检查：UWB/里程计定位数据已就绪')
 
-        # 声光反馈是可选外设——很多仿真环境根本没接这块硬件（见
-        # `play_sound_light()`docstring/`__init__`里"很多任务/仿真环境
-        # 根本没接这块硬件"那条说明），板子不存在不应该阻止飞机起飞，
-        # 这里只捕获`SoundLightError`转成警告，不让它中断起飞流程。
-        try:
-            self.play_sound_light('正在起飞')
-        except SoundLightError as exc:
-            self._progress(f'声光反馈板不可用，跳过（不影响起飞）：{exc}')
+        # 声光反馈是可选外设——很多仿真环境根本没接这块硬件，板子不存在
+        # 不应该阻止飞机起飞，`_play_role_sound_light()`只打警告不抛异常。
+        self._play_role_sound_light('起飞')
 
         # 必须用"稳定后"的 yaw，不能用 get_current_yaw() 的瞬时第一帧——
         # 见 YAW_SETTLE_SAMPLES 上面那段实测说明（起飞前读到 0°、飞机实际
@@ -1860,12 +1978,9 @@ class DroneSDK:
                 `exceptions.py::LandTimeoutError`docstring关于"为什么
                 不复用`TakeoffTimeoutError`"的说明）。
         """
-        # 2026-09-17新增：跟`takeoff()`对称的声光反馈（'正在降落'，同样
-        # 是可选外设，板子不存在不应该阻止降落，捕获异常转成警告）。
-        try:
-            self.play_sound_light('正在降落')
-        except SoundLightError as exc:
-            self._progress(f'声光反馈板不可用，跳过（不影响降落）：{exc}')
+        # 2026-09-17新增：跟`takeoff()`对称的声光反馈（同样是可选外设，
+        # 板子不存在不应该阻止降落）。
+        self._play_role_sound_light('降落')
 
         self._publish_takeoff_land(self._TakeoffLand.LAND)
 
@@ -2134,64 +2249,101 @@ class DroneSDK:
     # 的能力，见上面`DEFAULT_SOUND_LIGHT_PORT`常量定义处的说明。
     # ------------------------------------------------------------------
 
-    def play_sound_light(self, event: str, repeat: int = 1, interval_ms: int = 0) -> None:
-        """触发机载声光反馈板（WS2812D灯带+扬声器），播放九条预置事件之一。
+    def play_sound_light(
+        self, event: str, repeat: Optional[int] = None, interval_ms: Optional[int] = None,
+    ) -> None:
+        """触发地面站声光反馈板（WS2812D灯带+扬声器），播放20条预置事件之一。
 
-        板子是纯单向UART接收、不回确认，这个方法只是"写一次串口就返回"，
-        不会阻塞等待/轮询任何状态——跟这个文件其它"发指令+等确认"的方法
-        （`goto`/`do_action`等）不是同一种模式，调用一次就是发送一次。
+        默认（`SOUND_LIGHT_MODE=server`）只是往`/sound_light/request`话题发
+        一条请求就返回，真正写串口的是常驻程序`sound_light_server.py`——
+        两架飞机共用一块板子，由它统一排队（两条之间至少间隔2.5秒，不会
+        互相覆盖）。常驻程序没在线时这里只打一行警告，不抛异常。
+        `SOUND_LIGHT_MODE=direct`时退回本进程直接开串口（第一次调用额外
+        等约2秒板子复位，见`_sound_light_port.py`模块头"真机踩坑"）。
 
-        ⚠️ 第一次调用（这个`DroneSDK`实例第一次用到这块硬件）会真正打开
-        串口并额外等待约2秒——真机实测发现这块板子在串口`open()`时会被
-        硬件复位（DTR跳变触发，常见于Arduino兼容板卡），复位期间收到的
-        指令会被吞掉，所以连接一旦建立就会复用到这个`DroneSDK`生命周期
-        结束，不会每次调用都重新开关（`_sound_light_port.py`模块头有
-        这次踩坑的完整记录）。后续调用没有这个额外延迟。
+        ⚠️ direct模式下板子收到新指令会立刻切换，**不会排队**——连续调用
+        之间要自己加够`time.sleep()`；server模式由常驻程序负责间隔。
 
-        串口设备路径默认`/dev/ttyUSB0`，可以用`SOUND_LIGHT_PORT`环境变量
-        覆盖（不是构造函数参数——跟`trigger_alarm()`的`_alarm_url`一样，
-        这类底层传输配置不进`DroneSDK.__init__`的必填参数列表）：设备
-        插拔顺序变化、多台USB转串口设备同时接入、或者两架飞机各自映射
-        的端口号不一样时，改环境变量就行，不需要碰SDK代码。
-
-        ⚠️ 板子收到新指令会立刻切换灯光/声音状态，**不会排队等上一条播完**
-        ——紧接着连续调用两次（尤其是后一次是`mute_sound_light()`）会让
-        前一条的效果几乎瞬间被覆盖，人眼/耳朵根本来不及反应（2026-09-16
-        真机联调时，一度被这个现象误判成"硬件没反应"，见`DEBUG_JOURNAL.md`
-        同日条目最终定案的那部分）。想让某个效果被看到/听到，两次调用
-        之间自己加够`time.sleep()`。
-            event: 事件名，必须是`DroneSDK.SOUND_LIGHT_EVENTS`九个键
-                之一：`'发现地面火情'`/`'发现高楼火情'`/`'发射破窗弹'`/
-                `'发射灭火弹'`/`'正在起飞'`/`'正在降落'`/`'发现灭火弹'`/
-                `'抓取灭火弹'`/`'释放灭火弹'`（逐字对应接口文档sheet1）。
-            repeat: 循环播放次数，默认1（对应文档默认值）。
-            interval_ms: 每次循环之间的间隔（毫秒），默认0。
+        Args:
+            event: 事件名，必须是`DroneSDK.SOUND_LIGHT_EVENTS`的20个键之一
+                （逐字对应《声光反馈程序接口.xlsx》"语音"列，比如
+                `'侦察机发现地面火情'`/`'任务机抓取灭火弹'`）。
+            repeat: 循环播放次数，默认`None`=用表格里的值。
+            interval_ms: 每次循环之间的间隔（毫秒），默认`None`=用表格里的值。
 
         Raises:
-            ValueError: `event`不在预置九条之内，或`repeat`/`interval_ms`
+            ValueError: `event`不在20条预置事件之内，或`repeat`/`interval_ms`
                 为负数。
-            SoundLightError: 串口打开/写入失败（设备未接好、被占用、
-                权限不足等，见该异常docstring的排查提示）。
+            SoundLightError: 仅direct模式——串口打开/写入失败（设备未接好、
+                被占用、权限不足等，见该异常docstring的排查提示）。
         """
+        if self._sound_light_mode == 'server':
+            self._request_sound_light(
+                _build_sound_light_request(event, repeat, interval_ms, source=self.namespace), event)
+            return
         if event not in SOUND_LIGHT_EVENTS:
             raise ValueError(
                 f"未知声光事件：{event!r}，可选：{list(SOUND_LIGHT_EVENTS)}"
             )
-        r, g, b, sound = SOUND_LIGHT_EVENTS[event]
-        command = _encode_sound_light_command(r, g, b, sound, repeat, interval_ms)
+        r, g, b, sound, default_repeat, default_interval_ms = SOUND_LIGHT_EVENTS[event]
+        command = _encode_sound_light_command(
+            r, g, b, sound,
+            default_repeat if repeat is None else repeat,
+            default_interval_ms if interval_ms is None else interval_ms,
+        )
         self._send_sound_light(command)
         self._progress(f"声光反馈：{event}（{command.strip()!r}）")
 
     def mute_sound_light(self) -> None:
-        """熄灯+静音（发送`0,0,0,0,1,0`）。"""
-        command = _encode_sound_light_command(0, 0, 0, 0, 1, 0)
+        """熄灯+静音（`0,0,0,0,1,0`）。server模式下会清空常驻程序的待播队列。"""
+        if self._sound_light_mode == 'server':
+            self._request_sound_light(_build_sound_light_request(mute=True, source=self.namespace), '熄灯静音')
+            return
+        command = _encode_sound_light_command(*_SOUND_LIGHT_MUTE_ARGS)
         self._send_sound_light(command)
         self._progress("声光反馈：熄灯静音")
 
+    def _play_role_sound_light(self, action: str) -> None:
+        """`takeoff()`/`land()`用：按角色播"侦察机起飞"/"任务机降落"这类
+        事件。角色不是recon/supply时表格里没有对应语音，跳过。
+        """
+        prefix = _SOUND_LIGHT_ROLE_PREFIX.get(self.role)
+        if prefix is None:
+            return
+        try:
+            self.play_sound_light(f'{prefix}{action}')
+        except SoundLightError as exc:
+            self._progress(f'声光反馈板不可用，跳过（不影响{action}）：{exc}')
+
+    def _request_sound_light(self, payload: str, label: str) -> None:
+        """server模式：往常驻程序的请求话题发一条（懒加载发布者）。"""
+        from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+        from std_msgs.msg import String
+
+        if self._sound_light_pub is None:
+            qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
+                depth=50, durability=DurabilityPolicy.VOLATILE,
+            )
+            self._sound_light_pub = self._node.create_publisher(String, _SOUND_LIGHT_REQUEST_TOPIC, qos)
+            # 刚创建的发布者要等DDS发现常驻程序的订阅者才能投递，否则第一条
+            # 会发到空处。本机回环发现通常几十毫秒，最多等1秒。
+            deadline = time.monotonic() + 1.0
+            while self._sound_light_pub.get_subscription_count() == 0 and time.monotonic() < deadline:
+                time.sleep(0.05)
+        if self._sound_light_pub.get_subscription_count() == 0:
+            self._progress(
+                f"[警告] 声光常驻程序不在线（{_SOUND_LIGHT_REQUEST_TOPIC}没有订阅者），"
+                f"'{label}'这条声光反馈不会被播放，不影响任务继续。检查"
+                f"start_sound_light_server.sh起的容器是否在运行。"
+            )
+        self._sound_light_pub.publish(String(data=payload))
+        self._progress(f"声光反馈：{label}（已发给常驻程序）")
+
     def _send_sound_light(self, command: str) -> None:
-        """`play_sound_light()`/`mute_sound_light()`共用：懒加载/复用同一个
-        `SoundLightPort`连接（见该类docstring"真机踩坑"说明——不能每次
-        发送都各自开关串口）。
+        """direct模式：`play_sound_light()`/`mute_sound_light()`共用，懒加载/
+        复用同一个`SoundLightPort`连接（见该类docstring"真机踩坑"说明——
+        不能每次发送都各自开关串口）。
         """
         if self._sound_light_conn is None:
             self._sound_light_conn = _SoundLightPort(

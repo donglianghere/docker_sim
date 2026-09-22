@@ -21,7 +21,15 @@
 # 有一条路径漏掉。
 set -eo pipefail
 
-echo "== [contestant-sdk] ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-<未设置>} RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-<未设置>}（CycloneDDS锁lo回环，跟仿真栈同机发现；这几个值在镜像构建时已经写死为ENV，此处只是回显确认）=="
+# 2026-09-21：镜像默认是仿真（21+锁lo回环）；连真机时由启动脚本传
+# -e ROS_DOMAIN_ID=20 和换过的CYCLONEDDS_URI（见contestant_template/
+# contestant_network.sh），这里按实际值回显，不再一律说"锁lo回环"。
+case "${ROS_DOMAIN_ID:-}" in
+    21) _mode="仿真" ;;
+    20) _mode="真机" ;;
+    *)  _mode="⚠️ 既不是仿真(21)也不是真机(20)，SDK会拒绝启动" ;;
+esac
+echo "== [contestant-sdk] ${_mode}：ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-<未设置>} RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-<未设置>} CYCLONEDDS_URI=${CYCLONEDDS_URI:-<未设置>} =="
 
 # 先不开-u：下面`source /opt/ros/humble/setup.bash`是ROS官方脚本，内部会引用
 # 一些没有预先赋值的变量，跟set -u（nounset）不兼容，直接开-u source会崩——

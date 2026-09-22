@@ -35780,3 +35780,51 @@ D5/D6 搜索阶段，长机回到起飞点立刻又飞出去找目标。改成�
   的根因仍未查（这也是僚机返航改用 `goto_direct()` 的原因）。
 - `_fly_route()` 之后重新起飞才进搜索阶段，多了一次起降耗时。如果赛场计时不允许，需要
   重新讨论"编队收尾"和"搜索开始"之间要不要真的落地。
+
+## 2026-09-21 声光反馈常驻程序`sound_light_server`：新版20条事件表落地 + 地面站单板仲裁
+
+用户给了新版《声光反馈程序接口.xlsx》（20条，`/home/robots/ai_uav/`下），要求"设计一个常驻选手容器的程序，通过SDK启动，随时待命，接收对应消息则发出相应指令"。这就是09-17讨论过、一直没实现的"地面中转进程"（地面站只有一块板、两架飞机的任务进程同机共用）。
+
+**实现**：
+- `_sound_light_port.py`：`SOUND_LIGHT_EVENTS`换成20条，值扩成6元组(R,G,B,声音,循环,间隔)；旧九条事件名作废（声音编号已重新分配）。新增`REQUEST_TOPIC=/sound_light/request`、`STATUS_TOPIC=/sound_light/status`、纯函数`build_request()`/`parse_request()`（JSON；也接受纯文本事件名/编号/`mute`方便`ros2 topic pub`手测）。`SoundLightPort`加`ensure_open()`/`is_open`/`port`，串口改`exclusive=True`（两个进程抢同一个口时明确报错，不再悄悄互相DTR复位）。默认端口常量从`capabilities.py`挪到这里共用。
+- `sound_light_server.py`（新增，`python3 -m contest_sdk.sound_light_server`或console script `contest-sound-light-server`）：`SoundLightScheduler`不依赖ROS——排队逐条发、两条间隔≥2.5s（循环次数>1按倍数放大）、静音插队清队列、排队超15s丢弃、队列上限20、串口不存在/掉线不退出每3s重连、写失败请求放回队首；SIGTERM时熄灯静音再退出。ROS侧复用`RclpyRuntime('sound_light')`（带ROS_DOMAIN_ID校验）。
+- `capabilities.py`：`SOUND_LIGHT_MODE`环境变量，默认`server`（发话题，常驻程序不在线只警告），`direct`保留原来本进程直连串口。`play_sound_light(event, repeat=None, interval_ms=None)`，None=表格值。`takeoff()`/`land()`按角色播"侦察机/任务机 起飞/降落"。
+- `/home/robots/ai_uav/start_sound_light_server.sh`/`stop_sound_light_server.sh`：独立容器`contestant-sound-light`，`--restart unless-stopped`，`-v /dev:/dev`+`--device-cgroup-rule 'c 188:* rmw'`/`'c 166:* rmw'`（不用`--device`：启动时板子不在或拔插改编号都不用重启容器）。脚本会检测镜像是否是旧版。
+
+**⚠️ 表格疑似笔误**：第13行"侦察机任务完成"原文`0,255,0,9,12,0`（声音9=侦察机发射破窗弹、循环12次），与其余19行规律不符，按`0,255,0,12,1,0`实现，待跟表格作者确认。另：xlsx里"侦察机降落"颜色是(255,200,0)，跟`双机声光反馈事件对照表.md`的(30,180,180)不同，以xlsx为准。
+
+**验证**：`test_sound_light_port.py`（更新）+`test_sound_light_server.py`（新增）共24个测试在`contestant-sdk`镜像里全过；容器内用pty伪串口跑真实server+真实`DroneSDK`端到端：请求按间隔落到串口、repeat/interval覆盖生效、旧事件名当场ValueError、静音插队、SIGTERM熄灯退出；按启动脚本同款docker参数、无板子场景：常驻不退、每3s重试、`ros2 topic pub`纯文本请求被接收、status话题可读。**未做**：真板实测；镜像未重新build（启动脚本会拦下旧镜像）；`mission.py`其余18个事件点未接线。
+
+### 续：真板实测 + 编队示例接入（用户确认"正确"）
+
+- brltty抢占CH340（`1a86:7523`）导致`/dev/ttyUSB0`插上1秒即消失，用户卸载/禁用brltty后恢复，by-id路径`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`。
+- 用镜像（已重新build）+`start_sound_light_server.sh <by-id路径>`起常驻容器，两个选手容器扮演NX01/NX02用真实`DroneSDK`按1→20每3秒各发自己角色的事件，全部写入串口；两机同刻触发时第二条被排队延后3秒，未覆盖。
+- `编队飞行示例.py`：表里只有6条适用——起飞/降落4条由SDK按角色自动播，补2条：长机落地后`侦察机任务完成`、僚机落地后`任务机已降落`。"僚机就位/航线完成"两个节点表里无对应语音，未加（20条编号已用满）。仿真完整编队一次，两机退出码0，6条按序送达真板（降落/落地两对同刻请求均被排队间隔发出），**用户确认颜色和语音全部正确**——包括按`0,255,0,12,1,0`实现的"侦察机任务完成"，第13行笔误判断成立。
+
+## 2026-09-21 NX02双舵机SDK接口`DroneSDK.set_servo(servo, pwm)`
+
+用户给定：NX02上两个舵机，MAIN7=Peripheral via Actuator Set 1、MAIN9=Set 2，PWM 800~2000，50Hz，要求不解锁也能动。
+
+- `capabilities.py`新增`ServoSpec`+`SERVO_CONFIG`（按飞机编号配置，目前只有NX02的1/2号舵机）、`servo_pwm_to_normalized()`、`sdk.servos`属性、`sdk.set_servo(servo, pwm)`（内部走已有的`set_actuator()`/`MAV_CMD_DO_SET_ACTUATOR`）。选手按舵机编号+PWM微秒调用，不用管槽位/归一化；飞机上没这个舵机、PWM越界都当场ValueError。`test_servo.py`：800~2000全部801个PWM经PX4输出侧`interpolate+lroundf`后精确还原，28个SDK测试全过。
+- 源码确认（PX4 v1.16.0）：commander对`DO_SET_ACTUATOR`回ACCEPTED；非电机输出在armed或prearmed时才生效，`COM_PREARM_MODE=2`开机5秒后进入prearm（MicoAir无安全开关，=1等于永不进入）；电机`allowPrearmControl()=false`，预解锁不会转；上锁/无指令时输出`PWM_MAIN_DISn`。
+- 真机NX02(192.168.2.102)只读核对：FUNC7/9=301/302、MIN=800、TIM1~3=50、`COM_PREARM_MODE=2`、DIS7/9=1000、FAIL=-1均符合；**MAX7/9实际是2200**，用户选择把飞控改成2000（mavros `set_parameters`写入并读回确认）。
+- ⚠️ **NX02机载进程`ROS_DOMAIN_ID=20`，SDK/GCS约定21**——地面站`gcs-backend`看不到任何`/NX02`话题，大概率就是这个原因；选手SDK（`RclpyRuntime`校验21）也连不上这架飞机。未改动，待用户决定。另外GCS→.102 ping丢包50%/78ms。
+- 用户明确："选手调试真机当然需要将选手容器设为20"——SDK写死21是bug。`_rclpy_runtime.py`改成放行`SIM_ROS_DOMAIN_ID='21'`/`REAL_ROS_DOMAIN_ID='20'`两个值（跟`gcs/backend/app.py`同名常量一致），其余值照拦。
+- `_sound_light_port.py`的`import serial`改成可选：缺pyserial不再让整个`contest_sdk`导入失败，只在真正开串口时报OSError。
+- 飞行栈容器缺`vision_msgs`，不适合跑SDK；改按选手真机调试的真实路径：GCS上`contestant-sdk`容器`-e ROS_DOMAIN_ID=20`+`gcs/cyclonedds_gcs.xml`，用未修改的新SDK测：越界/无此舵机3种错误当场拦截；上锁状态（armed=False）下舵机1、2各800→1400→2000，飞控ACK 20~59ms，最后回1000。之前GCS看不到/NX02话题是因为测试容器用了镜像默认21，不是链路问题。
+- 遗留：①声光常驻程序容器是21域，真机模式下（任务进程20域）收不到请求；②还没有"选手容器连真机"的启动脚本（需要`-e ROS_DOMAIN_ID=20`+GCS的DDS配置，镜像入口的"锁lo回环"提示在这种用法下不准确）。
+
+### 续：`set_servos()`同时下发 + 选手容器按仿真(21)/真机(20)分域
+
+- `capabilities.py`：新增`set_servos({舵机: PWM})`，多个舵机合进一条`DO_SET_ACTUATOR`（Set1~6各占一个param），同一时刻生效；任一项越界/无此舵机则整条不发。`set_servo()`改为调它；`set_actuator()`的发送部分抽成`_send_actuator_set()`。真机NX02实测（GCS选手容器20域）：越界整条拦截；两舵机同时→2000（ACK 19ms）→3s→同时→800（45ms），全程armed=False，最后停在800。
+- 用户明确：选手容器调试仿真用21域、调试真机用20域。新增`contestant_template/contestant_network.sh`（`contestant_net_args sim|real`）：sim=`-e ROS_DOMAIN_ID=21`+镜像自带lo配置；real=`-e ROS_DOMAIN_ID=20`+按`gcs/gcs_network_state.json`（或`REAL_IFACE/REAL_PEERS`）生成的CycloneDDS配置（写到`~/.cache/contest_sdk/cyclonedds_real.xml`，跟GCS真机模式同一份网卡/对端），网卡IP不在本机时直接报错。
+- 接入：`运行仿真.sh`加`--real`（不重建仿真）；新增`运行真机.sh`（=`运行仿真.sh --real`）；`/home/robots/ai_uav/start_contestant_shell.sh`、`start_contestant_task.sh`、`start_sound_light_server.sh`都加`--real`。镜像入口按实际域回显"仿真/真机"，不再一律说"锁lo回环"。重新build了`contestant-sdk:latest`。
+- 验证：真机模式shell容器（新镜像、未挂源码）`DroneSDK(NX02)`连上真机、看到`set_servos`；声光常驻程序`--real`后，真机模式容器发`任务机起飞`被接收并写串口；仿真模式容器域21、看不到`/NX02/mavros/state`（隔离有效）。**没有**用`运行仿真.sh --real`实跑（会让真机按`我的任务.py`起飞），只做了语法检查。
+- 现状：声光常驻容器留在**真机模式**（用户正在调真机）；回仿真需`stop_sound_light_server.sh`后不带`--real`重启。
+
+### 续：舵机走service的说明 + 真机模式选手程序"舵机+声光"联测
+
+- 用户问舵机用action/service/topic：SDK走mavros的`mavros/cmd/command` **service**（CommandLong→MAVLink DO_SET_ACTUATOR→PX4 ACK）。一次性指令、飞控自己保持、需要确认送达→service；topic无确认；action适合长时+过程反馈（舵机无位置反馈）。
+- `运行仿真.sh`新增`--task 文件名`（默认仍是`我的任务.py`）；新增不起飞的`contestant_template/舵机声光示例.py`（GRAB_PWM=2000/DROP_PWM=800，待按实际机构调整）。
+- 实测`bash 运行真机.sh --task 舵机声光示例.py --single --leader NX02 --follower NX01`：真机模式(20域)正常，"任务机抓取灭火弹"+两舵机同时→2000，3秒后"任务机投放灭火弹"+同时→800，常驻程序15:37:14/17写串口，退出码0。
+- 用户反馈"语音和动作对不上"：NX02机构实测 **800=抓紧、2000=松开**，`舵机声光示例.py`改为GRAB_PWM=800/DROP_PWM=2000，重跑15:39:00抓取+800、15:39:03投放+2000。飞控`PWM_MAIN_DIS7/9=1000`靠近抓紧一侧（上锁/开机默认偏抓紧）。
