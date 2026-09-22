@@ -41,7 +41,8 @@ class FireWatcher:
     def __init__(self, sdk):
         self.sdk = sdk
         self.found = threading.Event()
-        self.fire_local = None          # 火点的局部坐标（x, y）
+        self.fire_local = None          # 解算出的火点局部坐标（x, y），没解算出来是 None
+        self.seen_from = None           # 看到火点时飞机的局部坐标，只用来飞回去再看，不当火点坐标
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -57,15 +58,14 @@ class FireWatcher:
                 self.sdk.wait_for_detection(GROUND_FIRE, timeout=5.0, camera='down')
             except DetectionTimeoutError:
                 continue
+            self.seen_from = self.sdk.get_local_position()
             # 趁火点还在画面里、边飞边定位：飞行栈按拍照时刻的位姿算，已经
             # 补偿了飞行中的检测延迟。只取 3 帧，求快——悬停后还会再精测一次。
             try:
                 fire = self.sdk.locate_target(GROUND_FIRE, timeout=2.0, samples=3)
                 self.fire_local = (fire.x, fire.y)
             except DetectionTimeoutError:
-                # 火点刚擦过画面边缘就出去了，退而求其次用飞机当时的位置
-                x, y, _ = self.sdk.get_local_position()
-                self.fire_local = (x, y)
+                pass                    # 火点擦过画面边缘就出去了；悬停阶段飞回去再解算
             self.found.set()
             self.sdk.play_sound_light('侦察机发现地面火情')
             # 连打断两次：主线程可能正好在两个航点之间，第一次打断落空，
@@ -102,20 +102,33 @@ def search(sdk, watcher):
 
 
 def hover_over_fire(sdk, watcher):
-    # 1. 直线飞到算出来的火点正上方，高度不变。刚飞过、只有一两米，用直线飞。
-    fx, fy = watcher.fire_local
+    """飞到火点上方悬停，报告火点坐标。报告的坐标只来自二维码解算，
+    不拿飞机自己的位置充数；解算不出来就如实报"没解算出来"。"""
     _, _, z = sdk.get_local_position()
-    sdk.goto_direct(fx, fy, z)
+    # 1. 飞到火点上方：飞行中解算出来了就直接去火点正上方；没解算出来就
+    #    回到看到它的位置（那里火点一定在画面里）。刚飞过、只有一两米，直线飞。
+    if watcher.fire_local is not None:
+        tx, ty = watcher.fire_local
+    else:
+        tx, ty, _ = watcher.seen_from
+    sdk.goto_direct(tx, ty, z)
 
-    # 2. 在正上方再精测一次：火点在画面中央，畸变和姿态误差影响最小，飞机也
-    #    停稳了，比飞行中擦边看到时准。偏差超过 0.1 米就再挪一下。
+    # 2. 在上方再精测一次：火点靠近画面中央，飞机也停稳了，比飞行中擦边看到
+    #    时准。偏差超过 0.1 米就挪到正上方。
     try:
         fire = sdk.locate_target(GROUND_FIRE, timeout=5.0, samples=10)
-        if abs(fire.x - fx) > 0.1 or abs(fire.y - fy) > 0.1:
+        if abs(fire.x - tx) > 0.1 or abs(fire.y - ty) > 0.1:
             sdk.goto_direct(fire.x, fire.y, z)
-        fx, fy, how = fire.x, fire.y, f'精测（{fire.samples}帧，离散 {fire.spread_m:.2f}m）'
+        fx, fy = fire.x, fire.y
+        how = f'悬停时解算（{fire.samples}帧，离散 {fire.spread_m:.2f}m）'
     except DetectionTimeoutError:
-        how = '飞行中测得'           # 正上方没看到，用发现时算的坐标
+        if watcher.fire_local is None:
+            print(f'[{sdk.namespace}] 看到了地面火情但没能解算出坐标（火点不在下视画面里），不报坐标',
+                  flush=True)
+            time.sleep(HOVER_S)
+            return
+        fx, fy = watcher.fire_local
+        how = '飞行中解算'
     wx, wy, _ = sdk.local_to_world(fx, fy, 0.0)
     print(f'[{sdk.namespace}] 悬停在地面火情上方，火点世界坐标 ({wx:.2f}, {wy:.2f})，{how}',
           flush=True)
