@@ -166,6 +166,40 @@ class TestGenerateGroundScanWaypoints(unittest.TestCase):
             )
 
 
+
+class TestScanSpacingWithTargetSize(unittest.TestCase):
+    """航线间距扣掉目标尺寸（2026-09-22）。"""
+
+    def _rows(self, **kw):
+        wps = generate_ground_scan_waypoints(
+            room_min_x=-8.0, room_max_x=7.0, room_min_y=-10.0, room_max_y=10.0, **kw)
+        return sorted(set(round(y, 6) for _, y, _ in wps))
+
+    def test_default_unchanged(self):
+        # 不传 target_size_m 时行为跟原来完全一致
+        a = self._rows(altitude_agl=1.5)
+        b = self._rows(altitude_agl=1.5, target_size_m=0.0)
+        self.assertEqual(a, b)
+
+    def test_target_fully_visible_in_some_row(self):
+        # 在搜索区里任意放一个目标，至少有一行能把它完整拍进画面
+        w, h = compute_ground_footprint(2.5, 1.3963, 480.0 / 640.0)
+        half_ok = (min(w, h) - 0.5) / 2.0
+        rows = self._rows(altitude_agl=2.5, target_size_m=0.5, overlap_ratio=0.2)
+        y = -9.0
+        while y <= 9.0:
+            self.assertLessEqual(min(abs(y - r) for r in rows), half_ok + 1e-9,
+                                 f'y={y:.2f} 的目标没有任何一行能完整拍到')
+            y += 0.05
+
+    def test_target_bigger_than_footprint_rejected(self):
+        with self.assertRaises(ValueError):
+            self._rows(altitude_agl=0.3, target_size_m=0.5)
+
+    def test_higher_flight_fewer_rows(self):
+        self.assertLess(len(self._rows(altitude_agl=2.5, target_size_m=0.5)),
+                        len(self._rows(altitude_agl=1.5, target_size_m=0.5)))
+
 class TestGotoStalled(unittest.TestCase):
     """goto() 卡住检测（2026-09-21）。"""
 

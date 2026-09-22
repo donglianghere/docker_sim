@@ -336,6 +336,25 @@ class CenteredPose:
     y: float
 
 
+@dataclass
+class TargetPosition:
+    """`sdk.locate_target()`的返回值：目标在**飞机自己的局部系**下的实际
+    坐标（跟`get_local_position()`同一个系，要报世界坐标用`local_to_world()`
+    转）。由飞行栈`target_locate_node`用相机内参、拍照时刻的位姿和测距仪
+    估的地面高度算出来，不是飞机自己的位置。
+
+    `spread_m`是参与取中位数的各帧结果离中位数的最大水平距离，几厘米说明
+    结果稳定；零点几米以上说明各帧不一致（比如目标在画面边缘时进出画面），
+    可以飞近一点再测一次。
+    """
+
+    x: float
+    y: float
+    z: float
+    samples: int
+    spread_m: float
+
+
 def _stamp_to_sec(stamp: Any) -> float:
     """`builtin_interfaces/Time`（`header.stamp`）-> 单个float秒数。"""
     return stamp.sec + stamp.nanosec * 1e-9
@@ -602,7 +621,7 @@ class DroneSDK:
         from nav_msgs.msg import Odometry, Path
         from quadrotor_msgs.msg import PositionCommand, TakeoffLand
         from std_msgs.msg import Empty, String
-        from vision_msgs.msg import Detection2DArray
+        from vision_msgs.msg import Detection2DArray, Detection3DArray
 
         self._TakeoffLand = TakeoffLand
 
@@ -717,7 +736,17 @@ class DroneSDK:
         # 结果的原始消息缓存在_latest_detections，wait_for_detection()自己
         # 决定要不要拿这一帧、要不要继续等下一帧。
         self._latest_detections: Optional[Any] = None
+        # 2026-09-22：按相机分别缓存最新一条。前视、下视两路检测都发到同一个
+        # vision/detections，只靠 header.frame_id 区分；只存"最新一条"的话，
+        # 两路交替发布，下视的检测有一半时间会被前视的空结果覆盖掉。
+        self._latest_detections_by_frame: Dict[str, Any] = {}
         self._node.create_subscription(Detection2DArray, 'vision/detections', self._on_detections, 10)
+        # 2026-09-22：飞行栈 target_locate_node 算好的目标实际坐标，只存最近
+        # 一小段（locate_target() 只取调用之后新到的）。
+        self._target_positions: List[Tuple[float, str, float, float, float]] = []
+        self._target_positions_lock = threading.Lock()
+        self._node.create_subscription(
+            Detection3DArray, 'vision/target_positions', self._on_target_positions, 10)
 
         # ---- do_action：actuator_action_node ----
         self._node.create_subscription(String, 'action_status', self._on_action_status, 10)
@@ -808,14 +837,27 @@ class DroneSDK:
         self._fire_pillar_aim_pose_xyyaw = (
             msg.position.x, msg.position.y, msg.yaw)
 
+    def _on_target_positions(self, msg: Any) -> None:
+        now = time.monotonic()
+        with self._target_positions_lock:
+            for det in msg.detections:
+                if det.results:
+                    p = det.results[0].pose.pose.position
+                    self._target_positions.append(
+                        (now, det.results[0].hypothesis.class_id, p.x, p.y, p.z))
+            del self._target_positions[:-200]
+
     def _on_detections(self, msg: Any) -> None:
         self._latest_detections = msg
+        self._latest_detections_by_frame[msg.header.frame_id] = msg
 
     # ------------------------------------------------------------------
     # 2.1节能力1：统一的检测结果接口
     # ------------------------------------------------------------------
 
-    def wait_for_detection(self, class_id: str, timeout: float) -> Detection:
+    def wait_for_detection(
+        self, class_id: str, timeout: float, camera: Optional[str] = None,
+    ) -> Detection:
         """阻塞等待`vision/detections`里出现`class_id`匹配的检测结果。
 
         Args:
@@ -823,6 +865,10 @@ class DroneSDK:
                 视觉检测节点实际发布的`results[0].hypothesis.class_id`
                 完全一致才算匹配（大小写敏感）。
             timeout: 超时秒数。
+            camera: 只认哪一路相机的检测（`'down'`/`'front'`），默认`None`
+                不限（跟原来行为一致）。2026-09-22新增：地面火情应该只认
+                下视相机——前视相机斜着看到地面标签也会命中，那时飞机还在
+                火点前方两三米，"发现即悬停"就停错了地方。
 
         Returns:
             `Detection`实例（见该类docstring关于字段命名的说明）。
@@ -833,9 +879,22 @@ class DroneSDK:
         holder: Dict[str, Detection] = {}
 
         def _check() -> bool:
-            msg = self._latest_detections
-            if msg is None:
-                return False
+            if camera is None:
+                # 不限相机时查每一路各自的最新一条，不能只看"全局最新一条"：
+                # 检测节点每帧都发布（没检测到就发空数组，2026-09-22 起），
+                # 两路交替发，只看全局最新的话，一路的命中随时会被另一路紧接着
+                # 发来的空结果覆盖掉。
+                msgs = list(self._latest_detections_by_frame.values())
+            else:
+                # frame_id 形如 NX01_camera_down_optical_frame
+                tag = f'_camera_{camera}_'
+                msgs = [m for fid, m in list(self._latest_detections_by_frame.items()) if tag in fid]
+            for msg in msgs:
+                if _match(msg):
+                    return True
+            return False
+
+        def _match(msg: Any) -> bool:
             for det in msg.detections:
                 if det.results and det.results[0].hypothesis.class_id == class_id:
                     holder['det'] = Detection(
@@ -858,6 +917,41 @@ class DroneSDK:
         if not ok:
             raise DetectionTimeoutError(class_id=class_id, timeout_s=timeout, namespace=self.namespace)
         return holder['det']
+
+    def locate_target(self, class_id: str, timeout: float = 5.0, samples: int = 5) -> TargetPosition:
+        """目标在地面上的**实际坐标**（飞机自己的局部系）。
+
+        坐标由飞行栈的`target_locate_node`算：下视相机检测结果的像素位置 +
+        相机内参 + 拍照时刻的位姿（按图像时间戳插值，飞行中按速度外推补偿
+        检测延迟）+ 测距仪估的地面高度。这里只等调用之后新到的`samples`帧
+        结果、取中位数，飞行中调用也可以。只对下视相机看到的目标有效。
+
+        Raises:
+            DetectionTimeoutError: `timeout`秒内没凑够`samples`帧（目标不在
+                下视画面里，或者飞行栈没起`target_locate_node`）。
+        """
+        t0 = time.monotonic()
+
+        def _fresh() -> List[Tuple[float, float, float]]:
+            with self._target_positions_lock:
+                return [(x, y, z) for t, cid, x, y, z in self._target_positions
+                        if t >= t0 and cid == class_id]
+
+        ok = self._poll_until(
+            lambda: len(_fresh()) >= samples,
+            timeout,
+            lambda: self._progress(f"等待目标'{class_id}'的定位结果（{len(_fresh())}/{samples}帧）…"),
+            poll_interval_s=0.05,
+        )
+        pts = _fresh()
+        if not ok:
+            raise DetectionTimeoutError(class_id=class_id, timeout_s=timeout, namespace=self.namespace)
+        pts = pts[:samples]
+        mx = sorted(p[0] for p in pts)[len(pts) // 2]
+        my = sorted(p[1] for p in pts)[len(pts) // 2]
+        mz = sorted(p[2] for p in pts)[len(pts) // 2]
+        spread = max(math.hypot(p[0] - mx, p[1] - my) for p in pts)
+        return TargetPosition(x=mx, y=my, z=mz, samples=len(pts), spread_m=spread)
 
     # ------------------------------------------------------------------
     # 2.1节能力2：任务状态发布/查询

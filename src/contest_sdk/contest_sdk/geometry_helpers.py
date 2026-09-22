@@ -125,6 +125,7 @@ def generate_ground_scan_waypoints(
     image_aspect_ratio: float = 480.0 / 640.0,
     overlap_ratio: float = 0.3,
     wall_margin: float = 1.0,
+    target_size_m: float = 0.0,
 ) -> List[Tuple[float, float, float]]:
     """生成弓字形（沿x方向来回扫，行与行之间沿y方向递进）固定航点序列。
 
@@ -141,6 +142,12 @@ def generate_ground_scan_waypoints(
             （不管相机实际是横着装还是竖着装，都按更保守的那个方向留
             间距，保证真的有重叠，不会因为搞错哪个轴对应飞行方向就漏扫）。
         wall_margin: 离四面墙的安全距离（米），航点不会贴到墙上。
+        target_size_m: 要找的目标自身尺寸（米），默认0（跟原来行为一致）。
+            2026-09-22新增：检测器必须看到**完整**的目标才认得出来，只露出
+            一部分时画面对比度会升高、但检测为0——实测1.5米搜索时有一行离火点
+            约0.5米经过，标签被画面边缘截断，没检出。所以有效覆盖宽度要扣掉
+            目标尺寸：行间距 = (覆盖较窄边 - target_size_m) * (1 - overlap_ratio)，
+            保证任何位置的目标都至少在某一行里完整入画。
 
     Returns:
         (x, y, z)航点列表，按扫描顺序排列（第一行从x_min飞到x_max，
@@ -154,7 +161,11 @@ def generate_ground_scan_waypoints(
     footprint_w, footprint_h = compute_ground_footprint(altitude_agl, hfov_rad, image_aspect_ratio)
     # 保守起见取较窄的一边当扫描行间距基准——不假设相机哪个轴对准了
     # 飞行方向，宁可扫描行数偏多（保守），也不要因为猜错方向导致漏扫。
-    sweep_span = min(footprint_w, footprint_h)
+    sweep_span = min(footprint_w, footprint_h) - target_size_m
+    if sweep_span <= 0:
+        raise ValueError(
+            f'target_size_m={target_size_m}米不小于这个高度下的覆盖宽度'
+            f'{min(footprint_w, footprint_h):.2f}米，目标不可能完整入画，要飞高一点')
     row_spacing = sweep_span * (1.0 - overlap_ratio)
     if row_spacing <= 0:
         raise ValueError(f'overlap_ratio={overlap_ratio}太大，算出的row_spacing<=0，扫描行会重叠成同一条线')

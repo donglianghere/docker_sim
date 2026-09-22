@@ -110,6 +110,14 @@ if [ "${PLANNER}" = "ego_planner" ]; then
       </Interfaces>
       <AllowMulticast>true</AllowMulticast>
     </General>
+    <Internal>
+      <!-- 2026-09-22：图像一帧约900KB，默认socket接收缓冲只有208KB，仿真把CPU压满时
+           分片来不及取就被内核丢掉（/proc/net/snmp 的 RcvbufErrors 实测10秒涨1731次），
+           一帧缺一片就整帧作废，表现为"某一路相机收不到"。用 max 不用 min：
+           max 是"尽量申请这么大、内核给不到就用它能给的最大值"，min 是硬性要求、
+           给不到DDS直接起不来。真正生效还需要宿主机 net.core.rmem_max 够大。 -->
+      <SocketReceiveBufferSize max="16MB"/>
+    </Internal>
   </Domain>
 </CycloneDDS>
 EOF

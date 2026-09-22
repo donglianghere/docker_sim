@@ -316,6 +316,14 @@ if [ "${PLANNER:-ego_planner}" = "ego_planner" ]; then
         <Peer address="${GCS_PEER_ADDRESS}"/>
       </Peers>
     </Discovery>
+    <Internal>
+      <!-- 2026-09-22：图像一帧约900KB，默认socket接收缓冲只有208KB，仿真把CPU压满时
+           分片来不及取就被内核丢掉（/proc/net/snmp 的 RcvbufErrors 实测10秒涨1731次），
+           一帧缺一片就整帧作废，表现为"某一路相机收不到"。用 max 不用 min：
+           max 是"尽量申请这么大、内核给不到就用它能给的最大值"，min 是硬性要求、
+           给不到DDS直接起不来。真正生效还需要宿主机 net.core.rmem_max 够大。 -->
+      <SocketReceiveBufferSize max="16MB"/>
+    </Internal>
   </Domain>
 </CycloneDDS>
 EOF
@@ -331,6 +339,14 @@ EOF
       </Interfaces>
       <AllowMulticast>true</AllowMulticast>
     </General>
+    <Internal>
+      <!-- 2026-09-22：图像一帧约900KB，默认socket接收缓冲只有208KB，仿真把CPU压满时
+           分片来不及取就被内核丢掉（/proc/net/snmp 的 RcvbufErrors 实测10秒涨1731次），
+           一帧缺一片就整帧作废，表现为"某一路相机收不到"。用 max 不用 min：
+           max 是"尽量申请这么大、内核给不到就用它能给的最大值"，min 是硬性要求、
+           给不到DDS直接起不来。真正生效还需要宿主机 net.core.rmem_max 够大。 -->
+      <SocketReceiveBufferSize max="16MB"/>
+    </Internal>
   </Domain>
 </CycloneDDS>
 EOF
@@ -346,6 +362,14 @@ EOF
       </Interfaces>
       <AllowMulticast>true</AllowMulticast>
     </General>
+    <Internal>
+      <!-- 2026-09-22：图像一帧约900KB，默认socket接收缓冲只有208KB，仿真把CPU压满时
+           分片来不及取就被内核丢掉（/proc/net/snmp 的 RcvbufErrors 实测10秒涨1731次），
+           一帧缺一片就整帧作废，表现为"某一路相机收不到"。用 max 不用 min：
+           max 是"尽量申请这么大、内核给不到就用它能给的最大值"，min 是硬性要求、
+           给不到DDS直接起不来。真正生效还需要宿主机 net.core.rmem_max 够大。 -->
+      <SocketReceiveBufferSize max="16MB"/>
+    </Internal>
   </Domain>
 </CycloneDDS>
 EOF
@@ -1562,13 +1586,30 @@ if [ "${DEPLOY_TARGET}" != "hw" ]; then
         # （1-based）错开：NX01=8180起、NX02=8190起，每机预留10个端口的
         # 间隔（当前只用2个，front/down各一个，留余量给以后可能加的相机）。
         # 8180起是刻意避开GCS自己占用的8080，不是随便挑的数字。
-        MJPEG_PORT_BASE=$((8180 + (AGENT_INDEX - 1) * 10))
-        echo "== [flight-stack:${NAMESPACE}] 启动 qr_apriltag_detect_node（仿真侧感知栈，cameras=${CAMERAS}，MJPEG端口起始=${MJPEG_PORT_BASE}） =="
-        ros2 run contest_mission qr_apriltag_detect_node \
-            --ros-args -r __ns:="/${NAMESPACE}" \
-            -p cameras:="[${CAMERAS}]" \
-            -p mjpeg_port_base:="${MJPEG_PORT_BASE}" &
+        # 2026-09-22：换成 camera_tag_detect_node，**每路相机一个独立进程**
+        # （用户要求）。"某一路相机收不到图像"的根因**不是**检测节点，是socket
+        # 接收缓冲太小丢分片——见上面CycloneDDS配置里SocketReceiveBufferSize
+        # 那段。换节点是为了：一路出问题不连带另一路；每帧都发布（没检测到就
+        # 发空数组），话题频率能直接当健康信号；状态日志按相机分开可以当证据
+        # （旧节点两路共用一个日志限流点，某一路的行数不代表它在不在处理）。
+        for cam in $(echo "${CAMERAS}" | tr ',' ' '); do
+            echo "== [flight-stack:${NAMESPACE}] 启动 camera_tag_detect_node（${cam} 相机，独立进程） =="
+            ros2 run contest_mission camera_tag_detect_node \
+                --ros-args -r __ns:="/${NAMESPACE}" \
+                -r __node:="camera_tag_detect_${cam}" \
+                -p camera:="${cam}" &
+        done
     fi
+
+    # 2026-09-22：下视相机目标定位——检测结果的像素位置 + 相机内参 + 拍照时刻
+    # 的位姿（按图像时间戳插值/按速度外推）+ 测距仪估的地面高度，算出目标在
+    # 地面上的实际坐标，发到 vision/target_positions。仿真里里程计时间戳是
+    # "仿真时间+1735689600"（gt_odom_bridge / 打过补丁的雷达插件都这样），
+    # 图像是仿真时间，所以偏移填 1735689600；真机两者都是墙钟，填 0。
+    echo "== [flight-stack:${NAMESPACE}] 启动 target_locate_node（下视相机目标定位） =="
+    ros2 run contest_mission target_locate_node \
+        --ros-args -r __ns:="/${NAMESPACE}" \
+        -p odom_stamp_offset_s:="${TARGET_LOCATE_ODOM_STAMP_OFFSET_S:-1735689600.0}" &
 
     # 2026大赛任务系统阶段6.2：精降视觉伺服，同样只在仿真侧启动（依赖
     # 阶段2的vision/detections + dlio/odom_node/odom，真机侧走独立的

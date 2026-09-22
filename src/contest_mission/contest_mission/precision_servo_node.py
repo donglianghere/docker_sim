@@ -518,6 +518,11 @@ class PrecisionServoNode(Node):
     def _on_detections(self, msg: Detection2DArray):
         if self._odom_xy_z_yaw is None:
             return
+        # 2026-09-22：只认下视相机。像素偏移->地面偏移的换算只对朝下的相机
+        # 成立，前视相机斜着看到同一个标签时算出来的偏移是错的，会把飞机
+        # 带偏。两路相机的检测结果发在同一个话题上，靠frame_id区分。
+        if '_camera_down_' not in msg.header.frame_id:
+            return
         target_id = self.get_parameter('target_class_id').value
         match = None
         for det in msg.detections:

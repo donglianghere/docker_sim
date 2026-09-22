@@ -309,7 +309,26 @@ def generate_launch_description():
     #     异性比例是C++里硬编码的常量，没有暴露成参数，如果调大
     #     swarm_clearance之后"头顶飞过"还是频繁出现，说明问题在这个比例
     #     本身太小，需要再写一个patch把`a`/`b`也提出来当参数，这次先不做。
-    dist0 = LaunchConfiguration('dist0', default=EnvironmentVariable('EGO_DIST0', default_value='1.0'))
+    # 2026-09-22 虚拟天花板 2.9 -> 4.5 米（用户决定，配合 2.5 米巡航搜索地面火情）。
+    # 2.9 米时，天花板这一层体素在 2.8 米（代码是 floor(...)-1），再减掉优化器
+    # 安全距离 dist0，推开代价从 1.8 米就开始了——2.5 米巡航的飞机一直处在
+    # 天花板的推开区里，持续受到向下的推力。空旷处这股推力跟"跟住目标高度"
+    # 相互抵消，飞机稳在 2.36~2.46 米；一旦旁边有立柱，侧向推力叠加上来，
+    # 合力就是往下：实测 2.5 米穿 3 号立柱时一路掉到 0.8 米、卡在立柱跟前。
+    # 注意天花板这一层是在膨胀之后直接写进膨胀地图的（grid_map.cpp 的
+    # "add virtual ceiling"），本身**不**膨胀，只有 0.1 米厚。
+    # 4.5 米时天花板层在 4.4 米，dist0=1.5 的推开区从 2.9 米开始，2.5 米巡航
+    # 留 0.4 米余量。**改巡航高度或 dist0 时必须回头核这条关系**：
+    #     巡航高度 < virtual_ceil_height - 0.1 - dist0
+    # 上限还受地图高度约束：grid_map.cpp 会把它钳到 ground_height+map_size_z
+    # （这里是 -0.01+5.0=4.99）。
+    # ⚠️ 仿真场地高 6 米；真实场馆的层高要现场确认，天花板不能高于真实屋顶。
+    virtual_ceil_height = LaunchConfiguration(
+        'virtual_ceil_height',
+        default=EnvironmentVariable('EGO_VIRTUAL_CEIL_HEIGHT', default_value='4.5'))
+    # 2026-09-22 dist0 默认 1.0 -> 1.5（用户决定），同时见上面天花板那段的高度约束。
+    # 调大之后绕障碍物的弯会更大（离障碍物表面至少 膨胀+dist0 才没有代价）。
+    dist0 = LaunchConfiguration('dist0', default=EnvironmentVariable('EGO_DIST0', default_value='1.5'))
     swarm_clearance = LaunchConfiguration('swarm_clearance', default=EnvironmentVariable('EGO_SWARM_CLEARANCE', default_value='1.0'))
     # docker_sim 2026-08-13：原来硬编码1.0（upstream demo默认值），改读
     # 环境变量。含义：离目标点还剩多远时"停止重规划、冻结当前这条轨迹
@@ -440,7 +459,7 @@ def generate_launch_description():
             {'grid_map/min_ray_length': min_ray_length},
             {'grid_map/max_ray_length': max_ray_length},
 
-            {'grid_map/virtual_ceil_height': 2.9},
+            {'grid_map/virtual_ceil_height': virtual_ceil_height},
             {'grid_map/visualization_truncate_height': 1.8},
             {'grid_map/show_occ_time': False},
             {'grid_map/pose_type': 2},  # ODOMETRY（跟odom_sub_同步用，不是POSE_STAMPED）
