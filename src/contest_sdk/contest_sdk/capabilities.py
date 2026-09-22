@@ -60,6 +60,7 @@ from contest_sdk.exceptions import (
     ActionFailedError,
     DetectionTimeoutError,
     GotoTimeoutError,
+    GotoUnreachableError,
     LandTimeoutError,
     SoundLightError,
     TakeoffTimeoutError,
@@ -69,6 +70,10 @@ from contest_sdk.geometry_helpers import (
 )
 from contest_sdk.geometry_helpers import (
     generate_orbit_waypoints as _generate_orbit_waypoints,
+)
+from contest_sdk.geometry_helpers import goto_stalled as _goto_stalled
+from contest_sdk.geometry_helpers import (
+    pull_waypoints_out_of_circles as _pull_waypoints_out_of_circles,
 )
 from contest_sdk.mission_state_helpers import VALID_MISSION_STATES, is_valid_mission_state
 from contest_sdk.reliability import ReliableEventChannel
@@ -243,6 +248,14 @@ YAW_SOURCE_AGREE_DEG = 10.0
 #: preflight_timeout_s(45) + armed_timeout_s(45) + goal.timeout_s(60) = 150，
 #: 取 240 留余量。改机载那三个值时必须回头核这一行。
 TAKEOFF_ACTION_HARD_TIMEOUT_S = 240.0
+
+#: goto() 卡住检测（2026-09-21）：规划器接收目标之后，飞机在这么多秒内
+#: 三维位移小于 GOTO_STALL_MIN_MOVE_M、并且离目标还有 GOTO_STALL_MIN_DIST_M
+#: 以上，就判定到不了，尽快抛 GotoUnreachableError，不再干等满 timeout。
+#: 三个数的取值理由见 geometry_helpers.goto_stalled() 的说明。
+GOTO_STALL_WINDOW_S = 5.0
+GOTO_STALL_MIN_MOVE_M = 0.5
+GOTO_STALL_MIN_DIST_M = 0.5
 
 ACTION_SERVER_PROBE_TIMEOUT_S = 2.0
 
@@ -1836,12 +1849,42 @@ class DroneSDK:
                 f'waypoint_state={self._waypoint_state!r}'
             )
 
+        # 卡住检测：只在规划器已经接收目标（waypoint_state=executing）之后
+        # 才开始记位置。还没 executing 就不动，说明目标点根本没送达/没被
+        # 接收，那是另一类问题，走下面原有的超时，不能报成"不可达"。
+        history: List[Tuple[float, float, float, float]] = []
+        stalled = {'hit': False}
+
         def _check() -> bool:
             # 'cancelled'见下面的说明：这里判断"已经不需要继续等待"，
             # 不是判断"已经到达"——goto()对cancelled的处理见下方。
-            return self._waypoint_state in ('completed', 'cancelled')
+            if self._waypoint_state in ('completed', 'cancelled'):
+                return True
+            if self._waypoint_state == 'executing' and self._odom_xyz is not None:
+                now = time.monotonic()
+                history.append((now,) + tuple(self._odom_xyz))
+                while history and history[0][0] < now - 2 * GOTO_STALL_WINDOW_S:
+                    history.pop(0)
+                if _goto_stalled(history, (x, y, z), GOTO_STALL_WINDOW_S,
+                                 GOTO_STALL_MIN_MOVE_M, GOTO_STALL_MIN_DIST_M):
+                    stalled['hit'] = True
+                    return True
+            return False
 
         ok = self._poll_until(_check, timeout, _progress)
+        if stalled['hit']:
+            cur = self._odom_xyz
+            dist = math.sqrt(sum((cur[i] - (x, y, z)[i]) ** 2 for i in range(3)))
+            # 先撤掉这个目标再抛：不然规划器还在反复尝试一个到不了的点，
+            # 调用方如果没有立刻发下一个 goto，飞机就一直在那儿折腾。
+            self.cancel_goto()
+            self._progress(
+                f'目标点({x:.2f}, {y:.2f}, {z:.2f})不可达：已停在'
+                f'({cur[0]:.2f}, {cur[1]:.2f}, {cur[2]:.2f})，离目标{dist:.2f}米，放弃这个点'
+            )
+            raise GotoUnreachableError(
+                target_xyz=(x, y, z), stopped_xyz=tuple(round(v, 2) for v in cur),
+                distance_m=dist, namespace=self.namespace)
         if not ok:
             raise GotoTimeoutError(timeout_s=timeout, target_xyz=(x, y, z), namespace=self.namespace)
 
@@ -1936,6 +1979,11 @@ class DroneSDK:
 
     def generate_ground_scan_waypoints(self, *args: Any, **kwargs: Any):
         return _generate_ground_scan_waypoints(*args, **kwargs)
+
+    def pull_waypoints_out_of_circles(self, *args: Any, **kwargs: Any):
+        """把落进已知圆形障碍物（含余量）里的航点沿来路往回挪到外面。
+        见 geometry_helpers.pull_waypoints_out_of_circles()。"""
+        return _pull_waypoints_out_of_circles(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # 2.1节能力9：驱动地面站声光装置（链路D，唯一一处刻意不抛异常）

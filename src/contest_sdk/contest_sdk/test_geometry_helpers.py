@@ -17,6 +17,7 @@ _PACKAGE_PARENT_DIR = os.path.dirname(_THIS_DIR)
 if _PACKAGE_PARENT_DIR not in sys.path:
     sys.path.insert(0, _PACKAGE_PARENT_DIR)
 
+from contest_sdk.geometry_helpers import goto_stalled, pull_waypoints_out_of_circles  # noqa: E402
 from contest_sdk.geometry_helpers import (  # noqa: E402
     angle_from_center_to_point,
     compute_ground_footprint,
@@ -164,6 +165,125 @@ class TestGenerateGroundScanWaypoints(unittest.TestCase):
                 altitude_agl=2.0, overlap_ratio=-0.1,
             )
 
+
+class TestGotoStalled(unittest.TestCase):
+    """goto() 卡住检测（2026-09-21）。"""
+
+    W, MOVE, DIST = 5.0, 0.5, 0.5
+
+    def _hist(self, pts, dt=0.2):
+        return [(i * dt, x, y, z) for i, (x, y, z) in enumerate(pts)]
+
+    def test_normal_flight_not_stalled(self):
+        # 以 1m/s 朝 x 飞，5 秒走 5 米，不算卡住
+        h = self._hist([(0.2 * i, 0.0, 1.5) for i in range(40)])
+        self.assertFalse(goto_stalled(h, (20.0, 0.0, 1.5), self.W, self.MOVE, self.DIST))
+
+    def test_stuck_at_obstacle_edge_is_stalled(self):
+        # 目标在障碍圆柱正中心(7,0)，飞机停在它边上 0.9 米处不动——
+        # 这正是"目标点在障碍物里"的典型样子
+        h = self._hist([(6.1, 0.0, 1.5)] * 40)
+        self.assertTrue(goto_stalled(h, (7.0, 0.0, 1.5), self.W, self.MOVE, self.DIST))
+
+    def test_threshold_1m_would_miss_the_typical_case(self):
+        # 说明为什么 min_dist 不能取 1 米：障碍圆柱半径0.25+膨胀0.6，
+        # 飞机停在约 0.9 米处，门限 1 米会把它当成"已经很近了"放过
+        h = self._hist([(6.1, 0.0, 1.5)] * 40)
+        self.assertFalse(goto_stalled(h, (7.0, 0.0, 1.5), self.W, self.MOVE, 1.0))
+
+    def test_hovering_at_goal_not_stalled(self):
+        # 已经到了（离目标 < 0.5 米）只是 waypoint_state 还没更新，不算卡住
+        h = self._hist([(6.8, 0.0, 1.5)] * 40)
+        self.assertFalse(goto_stalled(h, (7.0, 0.0, 1.5), self.W, self.MOVE, self.DIST))
+
+    def test_position_noise_does_not_hide_stall(self):
+        # 位置有 ±0.1 米抖动（实测量级），5 秒内来回晃但没有真的前进
+        import random
+        random.seed(1)
+        h = self._hist([(6.1 + random.uniform(-0.1, 0.1), random.uniform(-0.1, 0.1), 1.5)
+                        for _ in range(40)])
+        self.assertTrue(goto_stalled(h, (7.0, 0.0, 1.5), self.W, self.MOVE, self.DIST))
+
+    def test_pure_climb_not_stalled(self):
+        # 只升高度（x、y 不变）——按水平位移算会误判成卡住，所以必须用三维
+        h = self._hist([(0.0, 0.0, 0.5 + 0.1 * i) for i in range(40)])
+        self.assertFalse(goto_stalled(h, (0.0, 0.0, 6.0), self.W, self.MOVE, self.DIST))
+
+    def test_not_enough_history(self):
+        # 刚起步（采样不满一个窗口）一律不算卡住——规划器还在出轨迹
+        h = self._hist([(0.0, 0.0, 1.5)] * 10)   # 只有 1.8 秒
+        self.assertFalse(goto_stalled(h, (10.0, 0.0, 1.5), self.W, self.MOVE, self.DIST))
+
+    def test_detour_not_stalled(self):
+        # 绕障碍物时离目标的距离会先变大，但飞机在动，不能判成卡住
+        h = self._hist([(5.0, 0.2 * i, 1.5) for i in range(40)])
+        self.assertFalse(goto_stalled(h, (8.0, 0.0, 1.5), self.W, self.MOVE, self.DIST))
+
+
+class TestPullWaypointsOutOfCircles(unittest.TestCase):
+    """把落进已知立柱（含余量）里的航点沿来路挪出来（2026-09-21）。"""
+
+    PILLAR = (4.0, 4.0, 0.42)   # 边长0.6米的方立柱，半对角线0.42
+
+    def test_outside_untouched(self):
+        wps = [(0.0, 0.0, 1.5), (2.0, 0.0, 1.5)]
+        self.assertEqual(pull_waypoints_out_of_circles(wps, [self.PILLAR], 0.8), wps)
+
+    def test_endpoint_inside_pulled_back_along_lane(self):
+        # 扫描线 (0,4)->(4,4)，端点正好在立柱中心
+        wps = [(0.0, 4.0, 1.5), (4.0, 4.0, 1.5)]
+        out = pull_waypoints_out_of_circles(wps, [self.PILLAR], 0.8)
+        self.assertEqual(len(out), 2)
+        x, y, z = out[1]
+        self.assertAlmostEqual(y, 4.0, places=6)                    # 仍在原扫描线上
+        self.assertAlmostEqual(z, 1.5, places=6)
+        self.assertAlmostEqual(4.0 - x, 0.42 + 0.8, places=4)      # 刚好退到圈外
+        self.assertLess(x, 4.0)                                      # 是往回退，不是穿过去
+
+    def test_clearance_covers_real_inflation(self):
+        # 挪出来的点到立柱中心的距离必须 >= 半对角线 + 余量，否则规划器照样到不了
+        wps = [(0.0, 3.5, 1.5), (4.3, 3.9, 1.5)]
+        out = pull_waypoints_out_of_circles(wps, [self.PILLAR], 0.8)
+        x, y, _ = out[1]
+        self.assertGreaterEqual(math.hypot(x - 4.0, y - 4.0), 0.42 + 0.8 - 1e-4)
+
+    def test_first_waypoint_uses_next_segment(self):
+        # 第一个航点在圈里：没有"上一个"，沿它和下一个航点那条线段挪
+        wps = [(4.0, 4.0, 1.5), (0.0, 4.0, 1.5)]
+        out = pull_waypoints_out_of_circles(wps, [self.PILLAR], 0.8)
+        self.assertEqual(len(out), 2)
+        self.assertGreaterEqual(math.hypot(out[0][0] - 4.0, out[0][1] - 4.0), 1.22 - 1e-4)
+
+    def test_whole_segment_inside_dropped(self):
+        # 参照点也在圈里（整段都在障碍物上）：丢掉，那块地本来就被占着
+        wps = [(4.1, 4.0, 1.5), (4.0, 4.1, 1.5)]
+        out = pull_waypoints_out_of_circles(wps, [self.PILLAR], 0.8)
+        self.assertEqual(out, [])
+
+    def test_does_not_modify_input(self):
+        wps = [(0.0, 4.0, 1.5), (4.0, 4.0, 1.5)]
+        before = list(wps)
+        pull_waypoints_out_of_circles(wps, [self.PILLAR], 0.8)
+        self.assertEqual(wps, before)
+
+    def test_real_lawnmower_with_three_pillars(self):
+        # 用真的弓字航线 + 题目给的3根立柱。注意：弓字航线沿 x 来回扫，端点
+        # 只落在左右边界上，立柱在场地内部时根本不会有端点落进去（那种情况
+        # 靠规划器绕行，不需要挪点）。所以这里故意把右边界设成让端点 x=4.0，
+        # 正好压在立柱 (4,4) 那一列上，先确认输入里**确实有**违规点，否则
+        # 这个测试什么都没验证。
+        pillars = [(4.0, 4.0, 0.42), (0.0, 8.0, 0.42), (-5.0, 2.0, 0.42)]
+        wps = generate_ground_scan_waypoints(
+            room_min_x=-10.0, room_max_x=5.0, room_min_y=-12.5, room_max_y=12.5,
+            altitude_agl=1.5)
+
+        def violations(points):
+            return sum(1 for x, y, _ in points for cx, cy, r in pillars
+                       if math.hypot(x - cx, y - cy) < r + 0.8 - 1e-4)
+
+        self.assertGreater(violations(wps), 0, '输入里没有违规点，测试没有意义')
+        out = pull_waypoints_out_of_circles(wps, pillars, 0.8)
+        self.assertEqual(violations(out), 0)
 
 if __name__ == '__main__':
     unittest.main()

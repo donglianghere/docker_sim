@@ -84,6 +84,34 @@ class GotoTimeoutError(ContestSdkError):
         )
 
 
+class GotoUnreachableError(GotoTimeoutError):
+    """`sdk.goto()`检测到飞机已经卡住、到不了目标点（2026-09-21新增）。
+
+    典型原因是目标点落在障碍物（含规划器的膨胀区）里：规划器会把轨迹终点
+    推到障碍物边缘，飞机停在那儿悬停，`waypoint_state`一直是`executing`，
+    永远不会变成`completed`。原来`goto()`只能干等满`timeout`秒抛
+    `GotoTimeoutError`；现在检测到"飞机不动了、离目标还有距离"就尽快抛这个。
+
+    继承`GotoTimeoutError`：原来捕获`GotoTimeoutError`的代码不用改，照样能
+    接住这种情况，只是更早拿到。想区分"卡住"和"真超时"时单独捕获这个。
+
+    弓字形搜索这类场景的推荐用法是捕获它、跳过这个航点、飞下一个——地面
+    火情不可能在障碍物底下，而飞机绕行时下视相机已经扫过了障碍物周边。
+    """
+
+    def __init__(self, target_xyz, stopped_xyz, distance_m: float, namespace: str):
+        ContestSdkError.__init__(
+            self,
+            f"目标点{target_xyz}不可达：飞机停在{stopped_xyz}不动，离目标还有"
+            f"{distance_m:.2f}米（namespace={namespace}）。最常见的原因是目标点落在"
+            f"障碍物或规划器的膨胀区里，规划器把轨迹终点推到了障碍物边缘。"
+            f"搜索类任务可以捕获这个异常，跳过这个航点继续飞下一个。"
+        )
+        self.target_xyz = target_xyz
+        self.stopped_xyz = stopped_xyz
+        self.distance_m = distance_m
+
+
 class LandTimeoutError(ContestSdkError):
     """`sdk.land()`等待`armed`变为`false`超时。
 

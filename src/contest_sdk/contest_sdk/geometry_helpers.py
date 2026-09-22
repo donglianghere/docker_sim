@@ -27,7 +27,7 @@ helpers import generate_orbit_waypoints`直接当纯函数用，不依赖任何
 `DroneSDK`实例，方便写不需要真实ROS2环境的单元测试）。
 """
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 # ============================================================
@@ -181,3 +181,132 @@ def generate_ground_scan_waypoints(
         y += row_spacing
 
     return waypoints
+
+
+def goto_stalled(
+    history: List[Tuple[float, float, float, float]],
+    target_xyz: Tuple[float, float, float],
+    window_s: float,
+    min_move_m: float,
+    min_dist_m: float,
+) -> bool:
+    """判断飞往目标点的过程中飞机是否已经卡住（2026-09-21）。
+
+    `history`是按时间顺序的`(t, x, y, z)`位置采样。卡住的定义：最近
+    `window_s`秒内（三维）位移小于`min_move_m`，**并且**当前离目标还有
+    `min_dist_m`以上。
+
+    为什么用"一段时间内的位移"而不是"瞬时速度"：实测里程计速度大小的噪声
+    均值约0.04m/s、峰值超过0.1m/s（2026-09-21 静止时测的，见
+    scripts/measure_static_noise.py），"瞬时速度连续5秒都低于0.1"即使飞机
+    完全静止也很难满足；而位置噪声的最大偏移实测只有0.2米左右，"5秒内
+    位移小于0.5米"对噪声很稳。
+
+    为什么用三维而不是水平：纯升降的goto（x、y不变只改z）水平位移恒为0，
+    按水平算会被误判成卡住。
+
+    为什么`min_dist_m`取得比较小（调用方默认0.5米）：目标点落在障碍物正中
+    心时，飞机停下的位置离目标 = 障碍物半径 + 膨胀半径。仿真里障碍圆柱
+    半径0.25、膨胀0.6，停在约0.85~0.95米处——门限要是取1米，恰好会把这个
+    最典型的情况漏掉。
+
+    采样跨度不足`window_s`时一律返回False：刚起步时规划器还没出轨迹、
+    飞机还在加速，那段不能算卡住。
+    """
+    if len(history) < 2:
+        return False
+    t_now = history[-1][0]
+    if t_now - history[0][0] < window_s:
+        return False
+    # 取窗口起点：最后一个不晚于 t_now - window_s 的样本
+    start = history[0]
+    for sample in history:
+        if sample[0] <= t_now - window_s:
+            start = sample
+        else:
+            break
+    cur = history[-1]
+    moved = math.sqrt(sum((cur[i] - start[i]) ** 2 for i in (1, 2, 3)))
+    dist = math.sqrt(sum((cur[i + 1] - target_xyz[i]) ** 2 for i in range(3)))
+    return moved < min_move_m and dist > min_dist_m
+
+
+def pull_waypoints_out_of_circles(
+    waypoints: List[Tuple[float, float, float]],
+    circles: List[Tuple[float, float, float]],
+    clearance_m: float,
+) -> List[Tuple[float, float, float]]:
+    """把落进已知圆形障碍物（含余量）里的航点沿来路往回挪到外面（2026-09-21）。
+
+    用于弓字形搜索航线：已知坐标的障碍物（比如题目给的3根立柱）在规划航线
+    时就能处理掉，不用等飞过去卡住再说。未知坐标的障碍物（障碍圆柱、仿地
+    模块——按方案不能把坐标写进代码）处理不了，那部分靠`goto()`的卡住检测
+    兜底，见`GotoUnreachableError`。
+
+    Args:
+        waypoints: `(x, y, z)`航点序列。
+        circles: `(cx, cy, r)`已知障碍物的外接圆。方形立柱传半对角线长度
+            （比如边长0.6米的立柱传0.42），不是半边长——按半边长算，从对角
+            方向过来的航点会漏判。
+        clearance_m: 在`r`之外再留的余量。**必须不小于规划器的障碍物膨胀
+            半径**（仿真0.6、真机0.8，见`EGO_OBSTACLES_INFLATION`），否则挪出
+            来的点仍在膨胀区里，规划器照样到不了。
+
+    怎么挪：沿"上一个航点 -> 这个航点"这条线段往回退，退到刚好出圆的位置。
+    这样挪完的点仍然在原来那条扫描线上，弓字结构不被打乱；径向往外推会把
+    点推离扫描线。第一个航点没有"上一个"，用它和下一个航点那条线段。
+    整条线段都在圆里（退不出来）的航点直接丢掉——那一段地面本来就被障碍物
+    占着，不可能有地面火情。
+
+    Returns:
+        处理后的新航点列表（不修改传入的列表）。
+    """
+    expanded = [(cx, cy, r + clearance_m) for cx, cy, r in circles]
+
+    def inside(x: float, y: float) -> bool:
+        return any((x - cx) ** 2 + (y - cy) ** 2 < rr * rr for cx, cy, rr in expanded)
+
+    def entry_t(qx, qy, px, py, cx, cy, rr) -> Optional[float]:
+        """线段 Q->P 进入圆的参数 t（P 在圆内时，返回最后一个在圆外的 t）。"""
+        dx, dy = px - qx, py - qy
+        fx, fy = qx - cx, qy - cy
+        a = dx * dx + dy * dy
+        if a < 1e-12:
+            return None
+        b = 2 * (fx * dx + fy * dy)
+        c = fx * fx + fy * fy - rr * rr
+        disc = b * b - 4 * a * c
+        if disc < 0:
+            return None
+        t1 = (-b - math.sqrt(disc)) / (2 * a)
+        return t1 if t1 >= 0.0 else None
+
+    out: List[Tuple[float, float, float]] = []
+    for i, (px, py, pz) in enumerate(waypoints):
+        if not inside(px, py):
+            out.append((px, py, pz))
+            continue
+        if out:
+            qx, qy, _ = out[-1]
+        elif i + 1 < len(waypoints):
+            qx, qy, _ = waypoints[i + 1]
+        else:
+            continue          # 唯一一个航点还在圆里，没有参照线段，丢掉
+        if inside(qx, qy):
+            continue          # 参照点自己也在圆里，整段退不出来，丢掉
+        t = 1.0
+        for _ in range(len(expanded) + 1):   # 多个圆时逐个退，直到都在外面
+            x, y = qx + t * (px - qx), qy + t * (py - qy)
+            hit = [(cx, cy, rr) for cx, cy, rr in expanded
+                   if (x - cx) ** 2 + (y - cy) ** 2 < rr * rr]
+            if not hit:
+                break
+            ts = [entry_t(qx, qy, px, py, *c) for c in hit]
+            if any(v is None for v in ts):
+                t = None
+                break
+            t = min(ts) - 1e-6
+        if t is None or t <= 0.0:
+            continue
+        out.append((qx + t * (px - qx), qy + t * (py - qy), pz))
+    return out
