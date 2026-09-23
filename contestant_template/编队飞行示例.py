@@ -28,9 +28,20 @@ READY = 'formation_standby'   # 僚机 -> 长机
 ROUTE_DONE = 'route_done'     # 长机 -> 僚机
 
 
-def leader(sdk, route_xy):
-    inbox = _Inbox(sdk, READY)          # 必须在僚机可能发事件之前注册
-    sdk.takeoff()
+def listen_standby(sdk):
+    """提前注册"僚机就位"的收件箱。必须在僚机可能发事件之前调用——可靠事件
+    通道是先回 ACK 再查处理函数，没注册的事件会被确认后丢弃。"""
+    return _Inbox(sdk, READY)
+
+
+def leader_route(sdk, route_xy, inbox=None):
+    """长机的编队任务段：等僚机就位 -> 按航线飞一圈 -> 通知僚机航线已完成。
+
+    **不起飞、不降落**，留给调用方决定，这样《双机全流程示例.py》能把编队接在
+    别的任务前面，中间不落地。
+    """
+    if inbox is None:
+        inbox = listen_standby(sdk)
     inbox.wait(READY, STANDBY_WAIT_S)   # 不等僚机就起步，就不是编队了
 
     pad = _own_pad(sdk)
@@ -42,11 +53,20 @@ def leader(sdk, route_xy):
         sdk.goto(*sdk.world_to_local(wx, wy, CRUISE_AGL_M))
 
     sdk.send_to_teammate(ROUTE_DONE)    # 只有长机知道哪个是最后一个航点
+
+
+def leader(sdk, route_xy):
+    """长机：起飞 -> 编队航线 -> 返航降落（单独跑这个示例时的完整流程）。"""
+    inbox = listen_standby(sdk)         # 必须在僚机可能发事件之前注册
+    sdk.takeoff()
+    leader_route(sdk, route_xy, inbox)
     _land_at_pad(sdk)
     sdk.play_sound_light('侦察机任务完成')
 
 
 def follower(sdk, spacing_m):
+    """僚机：起飞 -> 跟队 -> 回起飞点降落。任务机每个任务都要落地，所以这一段
+    本来就自带起降，可以直接被《双机全流程示例.py》复用。"""
     inbox = _Inbox(sdk, ROUTE_DONE)
     sdk.takeoff()
     # 这个方法返回的含义是"机载已接管、在自己起飞点上空保持"，不是"已入列"。
