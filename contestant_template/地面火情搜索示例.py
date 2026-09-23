@@ -49,6 +49,7 @@ SUPPLY_TAG = 'apriltag:0'
 GRAB_PWM = 800               # 抓紧——2026-09-21 NX02 真机实测确认
 DROP_PWM = 2000              # 松开
 SERVO_TRAVEL_S = 2.0         # 等舵机转到位（舵机没有位置反馈，只能等）
+PRECISION_LAND_S = 30.0      # 精降时限：30 秒内必须落下来，超时就改用普通降落
 DROP_HOLD_S = 3.0            # 投放后在火点上方多停一会，确认弹已脱手
 
 # 题目给的 3 根立柱（坐标已知，可以写进程序）。r 是方立柱的半对角线（边长
@@ -244,8 +245,16 @@ def pick_up_supply(sdk):
     if aim_at(sdk, SUPPLY_TAG, '灭火弹') is not None:
         sdk.play_sound_light('任务机发现灭火弹')
 
-    # 精准降落：对准一点、下降一点、再对准，最后一段交给飞控 AUTO_LAND
-    sdk.precision_land_and_confirm(SUPPLY_TAG, timeout=90.0)
+    # 精准降落：对准一点、下降一点、再对准，最后一段交给飞控 AUTO_LAND。
+    # 限时 30 秒——看不清标志时精降会一直悬着不下来，任务不能耗在这儿；
+    # 到点就放弃精度、直接落。
+    try:
+        sdk.precision_land_and_confirm(SUPPLY_TAG, timeout=PRECISION_LAND_S)
+    except ActionFailedError:
+        print(f'[{sdk.namespace}] 精降 {PRECISION_LAND_S:.0f} 秒没完成，改用普通降落', flush=True)
+        # 必须先让精降节点交出控制：它超时了也还在发指令，不停掉会和 land() 抢
+        sdk.stop_precision_servo()
+        sdk.land()
     print(f'[{sdk.namespace}] 已降落在物资点，开始抓取', flush=True)
 
     sdk.play_sound_light('任务机抓取灭火弹')

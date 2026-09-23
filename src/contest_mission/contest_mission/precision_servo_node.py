@@ -496,6 +496,18 @@ class PrecisionServoNode(Node):
         # 本身（只借这个回调当"新任务开始"的信号），永远返回successful，
         # 不影响参数系统正常赋值。
         if any(p.name == 'servo_mode' for p in params):
+            # 2026-09-23：被设回待命（servo_mode=''）时，把relay_mode交还
+            # 'normal'——文件头"谁接管的谁负责交还"那条原则，原来只在正常
+            # 完成（landed/centered/arrived）的路径上做了，"半路被叫停"这条
+            # 路径漏了：选手放弃精降改用普通降落时（SDK的
+            # stop_precision_servo()）节点确实不再发指令，但relay还停在
+            # 'precision_land'，后面所有goto()的position_cmd都会被中继丢掉，
+            # 飞机看着"收到指令却不动"。这里要在下面那批状态被清零之前读
+            # _relay_mode_active，因为紧接着就会把它置False。
+            new_mode = next(
+                (p.value for p in params if p.name == 'servo_mode'), None)
+            if not new_mode and self._relay_mode_active:
+                self._set_relay_mode('normal')
             self._centered_notified = False
             self._arrived_notified = False
             self._landing_triggered = False

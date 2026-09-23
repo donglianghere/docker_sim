@@ -1,0 +1,26 @@
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+@@ -123,3 +123,22 @@
+ param set-default EKF2_EV_CTRL 11
+ param set-default EKF2_HGT_REF 3
+ param set-default EKF2_GPS_CTRL 0
++# docker_sim 2026-09-23：仿真电池不再随飞行时间耗尽。
++#
++# SITL的battery_simulator按SIM_BAT_DRAIN(默认60秒，从满电放到SIM_BAT_MIN_PCT)
++# 模拟放电，下限SIM_BAT_MIN_PCT默认50%。单段任务没问题，但本项目的完整流程是
++# "编队 -> 地面火情 -> 高楼火情"三段连做、任务机要起降三次、总时长13分钟以上
++# ——2026-09-23实测撞上：任务机飞完第一段降落后再起飞，PX4报
++# `Preflight Fail: Battery unhealthy` + `Arming denied: Resolve system health
++# failures first`，pt4ctrl收到`ARM rejected by PX4!`之后卡在AUTO_TAKEOFF状态
++# 出不来，后面15次起飞指令全部无效，任务链断在这里。侦察机不受影响，因为它
++# 全程只解锁一次。
++#
++# 把下限提到100%、放电时间拉到1小时，等于"仿真里电池不掉电"。这是**仿真专有**
++# 设置：只在gazebo-classic SITL机型文件里生效，不会带到真机。
++#
++# 注意不要改成"绕过电池相关的arming check"——那是一条真实的安全保护，真机侧
++# 万一复用同一套参数就危险了。这里只改仿真电池模型本身，检查逻辑原样保留，
++# 需要验证"电池低会拒绝解锁"时把SIM_BAT_MIN_PCT调低即可复现。
++param set-default SIM_BAT_MIN_PCT 100
++param set-default SIM_BAT_DRAIN 3600

@@ -2468,6 +2468,26 @@ class DroneSDK:
             raise ActionFailedError(action_name=action_name, timeout_s=timeout, namespace=self.namespace)
         self._progress(f"精降抓取'{class_id}'已完成并确认落地")
 
+    def stop_precision_servo(self, timeout: float = 5.0) -> None:
+        """让`precision_servo_node`退回待命（`servo_mode=''`），把控制权交还给
+        正常的位置指令通路。
+
+        2026-09-23新增。`precision_land_and_confirm()`/`precision_land_at()`
+        超时抛异常时，精降节点**并没有停**——它还在按自己的分级下降逻辑发
+        `precision_land_cmd`、relay 也还在`precision_land`模式，这时候如果
+        直接调`land()`，两条控制通路会抢同一架飞机。要放弃精降改用普通降落，
+        必须先调这个方法。
+
+        Raises:
+            ActionFailedError: 参数设置被拒绝（节点没起来等）。
+        """
+        ok = self._call_set_parameters_blocking(
+            self._precision_servo_params_cli, {'servo_mode': ''}, timeout_s=timeout)
+        if not ok:
+            raise ActionFailedError(
+                action_name='stop_precision_servo', timeout_s=timeout, namespace=self.namespace)
+        self._progress('精降视觉伺服已退回待命')
+
     def precision_land_at(self, x: float, y: float, timeout: float = 90.0) -> None:
         """飞到一个**提前已知的坐标点**精确降落（2026-09-14新增，用户
         提出的场景：起飞前记录起降点坐标，返回降落时用精准降落，不是
