@@ -395,7 +395,8 @@ def run_supply(sdk, teammate, notice=None):
         sdk.goto(*sdk.world_to_local(pad[0], pad[1], aim[2]))
     except GotoUnreachableError:
         pass
-    sdk.precision_land_at(0.0, 0.0, timeout=90.0)   # 最后一段收准，不走规划器
+    sdk.goto_direct(0.0, 0.0, aim[2])           # 最后一段收准再落
+    sdk.land()                                  # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
 
 

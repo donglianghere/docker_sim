@@ -270,10 +270,11 @@ def drop_on_fire(sdk, fire_world_xy):
 
 
 def supply_return_and_land(sdk):
-    """返回自己的起飞点精准降落（起飞点就是局部系原点）。"""
+    """返回自己的起飞点降落（起飞点就是局部系原点）。"""
     pad_x, pad_y, _ = sdk.local_to_world(0.0, 0.0, 0.0)
     fly_above(sdk, pad_x, pad_y, '起飞点')
-    sdk.precision_land_at(0.0, 0.0, timeout=90.0)   # 最后一段收准，不走规划器
+    sdk.goto_direct(0.0, 0.0, CRUISE_AGL_M)     # 最后一段收准再落
+    sdk.land()                                  # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
     print(f'[{sdk.namespace}] 已返回起飞点降落', flush=True)
 
