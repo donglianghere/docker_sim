@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""弓字搜索地面火情：扫编队航线围成的四边形，下视相机看到火点就停下悬停。
+"""双机地面灭火：侦察机搜火情并通报，任务机取灭火弹、投放、返航。
 
-    python3 地面火情搜索示例.py --namespace NX01 --teammate NX02
+    bash 运行仿真.sh --task 地面火情搜索示例.py
 
-主线程按弓字航线逐点飞；后台线程全程盯着下视相机，一看到火点就打断当前
-航段——必须这样，一条航段要飞十几秒，等它飞完再检查早就飞过火点了。
+一份代码两架飞机各起一个容器，按 --role 分工（运行脚本会传）：
+  leader（NX01，侦察机）：弓字搜索 -> 发现火点 -> 悬停解算坐标 -> 通报队友 -> 返航降落
+  follower（NX02，任务机）：等通报 -> 起飞 -> 取灭火弹（精准降落+抓取）-> 飞到火点
+                            -> 对准 -> 投放 -> 返回起飞点精准降落
+
+侦察机这边，主线程按弓字航线逐点飞；后台线程全程盯着下视相机，一看到火点就
+打断当前航段——必须这样，一条航段要飞十几秒，等它飞完再检查早就飞过火点了。
 
 火点坐标用 sdk.locate_target() 取：飞行栈按相机内参、拍照时刻的位姿和地面
 高度算出的火点实际位置，不是飞机自己的位置（火点在画面边缘时两者能差 1.5 米）。
 
-关键节点的声音：起飞、降落由 takeoff()/land() 自动播，这里只播发现火情、
-通报火情、任务完成三条（手动再播起降会重复）。
+通报走 send_to_teammate()：带应用层 ACK + 1Hz 重发，对方确认收到才返回，
+所以两架的启动先后无所谓（任务机先起来就一直等）。
+
+关键节点都有声光：起飞、降落由 takeoff()/land() 按角色自动播，其余（发现/
+通报火情、收到通报、发现灭火弹、抓取、投放、任务完成）在下面各步里播。
 """
 import argparse
 import threading
 import time
 
 from contest_sdk import DroneSDK
-from contest_sdk.exceptions import DetectionTimeoutError, GotoUnreachableError
+from contest_sdk.exceptions import (
+    ActionFailedError,
+    DetectionTimeoutError,
+    GotoUnreachableError,
+    TeammateUnreachableError,
+)
 
 # 搜索区域：编队航线四个航点围成的四边形（世界坐标）
 AREA = [(7.0, -10.0), (7.0, 10.0), (-8.0, 10.0), (-8.0, -10.0)]
@@ -27,6 +40,16 @@ GROUND_FIRE = 'apriltag:2'
 FIRE_MARKER_SIZE_M = 0.5    # 地面火点标志尺寸：航线间距要扣掉它，保证目标能完整入画
 OVERLAP = 0.2               # 扣掉目标尺寸之后，再留 20% 给定位误差
 HOVER_S = 10.0              # 找到后在火点上方悬停多久，再返航降落
+FIRE_REPORT_EVENT = '地面火情通报'   # 两架飞机约定的事件名，改一处就要改两处
+
+# ---- 任务机（follower）用的常量 ----
+WAIT_REPORT_S = 900.0        # 等通报等多久：侦察机要扫完弓字航线才可能发现火点
+SUPPLY_POINT = (-4.0, -6.0)  # 物资点（灭火弹）世界坐标，题目给定，贴 AprilTag ID0
+SUPPLY_TAG = 'apriltag:0'
+GRAB_PWM = 800               # 抓紧——2026-09-21 NX02 真机实测确认
+DROP_PWM = 2000              # 松开
+SERVO_TRAVEL_S = 2.0         # 等舵机转到位（舵机没有位置反馈，只能等）
+DROP_HOLD_S = 3.0            # 投放后在火点上方多停一会，确认弹已脱手
 
 # 题目给的 3 根立柱（坐标已知，可以写进程序）。r 是方立柱的半对角线（边长
 # 0.6 米 -> 0.42），余量必须不小于规划器的障碍物膨胀半径（仿真0.6、真机0.8）。
@@ -133,10 +156,16 @@ def hover_over_fire(sdk, watcher):
     print(f'[{sdk.namespace}] 悬停在地面火情上方，火点世界坐标 ({wx:.2f}, {wy:.2f})，{how}',
           flush=True)
     sdk.play_sound_light('侦察机通报地面火情')
+    # 通报给任务机：带 ACK + 1Hz 重发，对方确认收到才返回；对方没起来时
+    # 抛超时——这时也别卡住不动，照样返航降落，坐标已经打印在日志里了
+    try:
+        sdk.send_to_teammate(FIRE_REPORT_EVENT, x=wx, y=wy)
+    except TeammateUnreachableError as exc:
+        print(f'[{sdk.namespace}] 火情通报没送达队友：{exc}', flush=True)
     time.sleep(HOVER_S)
 
 
-def return_and_land(sdk):
+def recon_return_and_land(sdk):
     pad = sdk.local_to_world(0.0, 0.0, 0.0)
     home = sdk.world_to_local(pad[0], pad[1], CRUISE_AGL_M)
     try:
@@ -147,13 +176,110 @@ def return_and_land(sdk):
     sdk.land()                      # 自动播"侦察机降落"
 
 
-def main():
-    ap = argparse.ArgumentParser(description='弓字搜索地面火情')
-    ap.add_argument('--namespace', default='NX01')
-    ap.add_argument('--teammate', default='NX02')
-    args = ap.parse_args()
+# ======================== 任务机（follower） ========================
 
-    sdk = DroneSDK(namespace=args.namespace, role='recon', teammate_namespace=args.teammate)
+
+class FireReport:
+    """等侦察机发来的火情通报。回调在 SDK 的后台线程里跑，只存数据、不干活。"""
+
+    def __init__(self):
+        self.received = threading.Event()
+        self.world_xy = None
+
+    def on_event(self, x=None, y=None, **_ignored):
+        if x is None or y is None:      # 字段不全的通报当没收到，继续等下一条
+            return
+        self.world_xy = (float(x), float(y))
+        self.received.set()
+
+    def wait(self, timeout):
+        return self.received.wait(timeout)
+
+
+def drive_servos(sdk, pwm, label):
+    """抓取/投放机构：两个舵机同时动。仿真里飞控不一定配了舵机输出，
+    动不了就打印出来、继续飞完流程，不让整个任务中断。"""
+    try:
+        sdk.set_servos({s: pwm for s in sorted(sdk.servos)})
+    except (ActionFailedError, ValueError) as exc:
+        print(f'[{sdk.namespace}] {label}：舵机没动（{exc}）——真机上需要飞控配好 MAIN7/MAIN9',
+              flush=True)
+        return
+    time.sleep(SERVO_TRAVEL_S)
+
+
+def fly_above(sdk, world_x, world_y, what):
+    """飞到某个世界坐标的上方（走规划器，有避障）。"""
+    print(f'[{sdk.namespace}] 飞往{what} ({world_x:.2f}, {world_y:.2f})', flush=True)
+    sdk.goto(*sdk.world_to_local(world_x, world_y, CRUISE_AGL_M))
+
+
+def aim_at(sdk, tag, what):
+    """对准目标：先确认下视相机看得见，再让飞机挪到目标正上方。
+
+    返回解算出的目标世界坐标（对不准就返回 None）。
+    """
+    try:
+        sdk.wait_for_detection(tag, timeout=15.0, camera='down')
+    except DetectionTimeoutError:
+        print(f'[{sdk.namespace}] 下视相机没看到{what}（{tag}）', flush=True)
+        return None
+    try:
+        sdk.center_on_target(tag, timeout=30.0)
+    except ActionFailedError as exc:
+        print(f'[{sdk.namespace}] 对准{what}没收敛（{exc}），按当前位置继续', flush=True)
+    try:
+        target = sdk.locate_target(tag, timeout=5.0, samples=10)
+    except DetectionTimeoutError:
+        return None
+    wx, wy, _ = sdk.local_to_world(target.x, target.y, 0.0)
+    print(f'[{sdk.namespace}] 已对准{what}，解算坐标 ({wx:.2f}, {wy:.2f})'
+          f'（{target.samples}帧，离散 {target.spread_m:.2f}m）', flush=True)
+    return wx, wy
+
+
+def pick_up_supply(sdk):
+    """飞到物资点，对准灭火弹，精准降落并抓取，再起飞。"""
+    fly_above(sdk, SUPPLY_POINT[0], SUPPLY_POINT[1], '物资点')
+    if aim_at(sdk, SUPPLY_TAG, '灭火弹') is not None:
+        sdk.play_sound_light('任务机发现灭火弹')
+
+    # 精准降落：对准一点、下降一点、再对准，最后一段交给飞控 AUTO_LAND
+    sdk.precision_land_and_confirm(SUPPLY_TAG, timeout=90.0)
+    print(f'[{sdk.namespace}] 已降落在物资点，开始抓取', flush=True)
+
+    sdk.play_sound_light('任务机抓取灭火弹')
+    drive_servos(sdk, GRAB_PWM, '抓取')
+    sdk.takeoff()               # 自动播"任务机起飞"
+
+
+def drop_on_fire(sdk, fire_world_xy):
+    """飞到火点，对准后投放灭火弹。"""
+    fly_above(sdk, fire_world_xy[0], fire_world_xy[1], '地面火情')
+    solved = aim_at(sdk, GROUND_FIRE, '地面火情')
+    if solved is not None:
+        dx = solved[0] - fire_world_xy[0]
+        dy = solved[1] - fire_world_xy[1]
+        print(f'[{sdk.namespace}] 自己解算的火点与侦察机通报的相差 '
+              f'({dx:+.2f}, {dy:+.2f}) 米', flush=True)
+
+    sdk.play_sound_light('任务机投放灭火弹')
+    drive_servos(sdk, DROP_PWM, '投放')
+    time.sleep(DROP_HOLD_S)
+    print(f'[{sdk.namespace}] 灭火弹已投放', flush=True)
+
+
+def supply_return_and_land(sdk):
+    """返回自己的起飞点精准降落（起飞点就是局部系原点）。"""
+    pad_x, pad_y, _ = sdk.local_to_world(0.0, 0.0, 0.0)
+    fly_above(sdk, pad_x, pad_y, '起飞点')
+    sdk.precision_land_at(0.0, 0.0, timeout=90.0)   # 最后一段收准，不走规划器
+    sdk.play_sound_light('任务机已降落')
+    print(f'[{sdk.namespace}] 已返回起飞点降落', flush=True)
+
+
+def run_recon(sdk):
+    """侦察机：弓字搜索，发现火点就悬停解算坐标并通报任务机，然后返航。"""
     watcher = FireWatcher(sdk)
     try:
         sdk.takeoff()               # 自动播"侦察机起飞"
@@ -165,12 +291,55 @@ def main():
             hover_over_fire(sdk, watcher)
         else:
             print(f'[{sdk.namespace}] 整个区域扫完，没有发现地面火情', flush=True)
-        return_and_land(sdk)
+        recon_return_and_land(sdk)
         if found:
             sdk.play_sound_light('侦察机任务完成')
-        print(f'[{sdk.namespace}] 结束', flush=True)
     finally:
         watcher.stop()
+
+
+def run_supply(sdk, teammate):
+    """任务机：等火情通报，取灭火弹投到火点，返回起飞点。"""
+    report = FireReport()
+    # 先注册再等：侦察机的通报带 ACK+重发，只要本程序在它超时之前起来就收得到
+    sdk.on_teammate_event(FIRE_REPORT_EVENT, report.on_event)
+    print(f'[{sdk.namespace}] 等 {teammate} 通报地面火情…', flush=True)
+    if not report.wait(WAIT_REPORT_S):
+        print(f'[{sdk.namespace}] {WAIT_REPORT_S:.0f} 秒内没收到火情通报，不起飞', flush=True)
+        return
+    fire_world_xy = report.world_xy
+    print(f'[{sdk.namespace}] 收到火情通报：火点世界坐标 '
+          f'({fire_world_xy[0]:.2f}, {fire_world_xy[1]:.2f})', flush=True)
+    sdk.play_sound_light('任务机收到地面火情')
+
+    sdk.takeoff()                   # 自动播"任务机起飞"
+    try:
+        pick_up_supply(sdk)
+        drop_on_fire(sdk, fire_world_xy)
+    except GotoUnreachableError as exc:
+        # 目标点被判定不可达（落在障碍物里等），不硬飞，直接返航
+        print(f'[{sdk.namespace}] 航点不可达：{exc}，提前返航', flush=True)
+    supply_return_and_land(sdk)
+
+
+def main():
+    ap = argparse.ArgumentParser(description='双机地面灭火（按 --role 分工）')
+    ap.add_argument('--namespace', default='NX01')
+    ap.add_argument('--role', default='leader', choices=['leader', 'follower'])
+    ap.add_argument('--teammate', default='NX02')
+    args = ap.parse_args()
+
+    is_recon = args.role == 'leader'
+    sdk = DroneSDK(namespace=args.namespace,
+                   role='recon' if is_recon else 'supply',
+                   teammate_namespace=args.teammate)
+    try:
+        if is_recon:
+            run_recon(sdk)
+        else:
+            run_supply(sdk, args.teammate)
+        print(f'[{sdk.namespace}] 结束', flush=True)
+    finally:
         sdk.shutdown()
 
 
