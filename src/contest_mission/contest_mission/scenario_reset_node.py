@@ -69,8 +69,14 @@ from contest_mission.layout_loader import load_layout
 # 北侧，远离原点）是对的，但extra_yaw=π会让贴图正面转回朝南（对着
 # 原点），等于白挪位置——改回extra_yaw=0，此时tag_yaw=pyaw(0)+0=0，
 # 贴图正面朝北，背对原点/NX01起降点，位置和朝向才是一致的。
+# 2026-09-23修正'+X'的extra_yaw：+π/2 会把贴图正面（薄板的本地+Y面，
+# <size>0.5 0.01 0.5</size>里厚度那一维就是本地Y）转到世界-X，即**背对**
+# 该面外侧，飞机从+X方向看到的是镜像的背面，AprilTag解不出来。绕Z转θ时
+# 本地+Y映射到世界(-sinθ, cosθ)：要正面朝世界+X得θ=-π/2。'-X'面用+π/2
+# 正好把正面转到世界-X，本来就是对的。'+Y'面长期在用、实测能检出，是
+# "本地+Y就是正面"这个前提的依据。
 FIRE_TAG_FACE_LOCAL_OFFSETS = {
-    '+X': (1.0, 0.0, math.pi / 2.0),
+    '+X': (1.0, 0.0, -math.pi / 2.0),
     '-X': (-1.0, 0.0, math.pi / 2.0),
     '+Y': (0.0, 1.0, 0.0),
     '-Y': (0.0, -1.0, 0.0),
@@ -229,8 +235,12 @@ class ScenarioResetNode(Node):
         # 世界位置 + 沿(立柱当前yaw+所选面本地朝向)方向偏移
         # mount_standoff_m"；现在3根立柱yaw都固定0，`+Y`面直接对应
         # 世界+Y方向偏移，不再跟pillar自身旋转hack混在一起算。
+        # 2026-09-23用户要求：2#立柱上的高层火情点转 -90°，朝向 1# 立柱。
+        # 新布局里 1# 在 (4.5,7)、2# 在 (-4.5,7)，同一条 y=7 上、1# 在 2# 的
+        # 正东，所以"朝向1#"就是贴在 2# 的 +X 面（立柱 yaw 固定 0，局部 +X
+        # 就是世界 +X）。原来是 +Y 面（朝北）。
         chosen_pillar = 'pillar_2'
-        chosen_face = '+Y'
+        chosen_face = '+X'
         px, py, pyaw = pillar_poses[chosen_pillar]
         unit_dx, unit_dy, extra_yaw = FIRE_TAG_FACE_LOCAL_OFFSETS[chosen_face]
         standoff = self.fire_apriltag_mount_standoff_m

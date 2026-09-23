@@ -3,7 +3,7 @@
 """双机一字纵队编队飞行。两机跑同一份代码，靠 --role 区分。
 
     python3 编队飞行示例.py --namespace NX01 --role leader  --teammate NX02 \
-        --route "7,-10 7,10 -8,10 -8,-10" --spacing 3.5
+        --route "7,-9.5 7,9.5 -7,9.5 -7,-9.5" --spacing 3.5
     python3 编队飞行示例.py --namespace NX02 --role follower --teammate NX01 --spacing 3.5
 
 航点是世界坐标 (x, y)，至少两个，按顺序飞。僚机不需要知道航线，它沿长机

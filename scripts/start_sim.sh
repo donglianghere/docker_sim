@@ -128,26 +128,23 @@ if [ -n "$bad" ]; then
     exit 1
 fi
 
-# ---- 5. 图形界面：gzclient 由 sim-world 的 launch 带起，RViz 这里单独起 ----
+# ---- 5. 图形界面：gzclient 和 rviz2 都由 sim-world 的 launch 带起来 ----
+# 只检查、不重复启动：RViz 在 sim-world 容器里（不是 flight-stack），早先在
+# flight-stack 里找不到就自己再起一个，等于每跑一次脚本就多一个 RViz 窗口。
 if [ "$GUI" = "1" ]; then
-    if docker exec docker_sim-sim-world-1 pgrep -x gzclient >/dev/null 2>&1; then
-        log "Gazebo 图形界面已启动"
-    else
-        echo "!! gzclient 没起来（X 授权/显卡问题），画面看不到 !!" >&2
-    fi
-    if ! docker exec docker_sim-flight-stack-nx01-1 pgrep -x rviz2 >/dev/null 2>&1; then
-        docker exec -d -e DISPLAY="${DISPLAY}" docker_sim-flight-stack-nx01-1 bash -lc \
-            'source /opt/ros/humble/setup.bash; source /opt/mighty_ws/install/setup.bash 2>/dev/null;
-             export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp;
-             export CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml;
-             rviz2 -d /opt/mighty_ws/src/mighty/rviz/multi_ego_planner.rviz' >/dev/null 2>&1 || true
-        sleep 6
-    fi
-    if docker exec docker_sim-flight-stack-nx01-1 pgrep -x rviz2 >/dev/null 2>&1; then
-        log "RViz 已启动"
-    else
-        echo "!! rviz2 没起来，检查 DISPLAY=${DISPLAY} 和 xhost 授权 !!" >&2
-    fi
+    for proc in gzclient rviz2; do
+        ok=0
+        for _ in $(seq 1 15); do
+            if docker exec docker_sim-sim-world-1 pgrep -x "$proc" >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+        done
+        if [ "$ok" = "1" ]; then
+            log "${proc} 已在运行"
+        else
+            echo "!! ${proc} 没起来：确认 xhost 授权（宿主机跑 xhost +local:root）、DISPLAY=${DISPLAY}，" >&2
+            echo "!! 以及 sim-world 是带 USE_GAZEBO_GUI=true 起的（本脚本默认就是，--no-gui 会关掉） !!" >&2
+        fi
+    done
 fi
 
 # ---- 6. 打印这次的场景坐标，省得去猜/去用 gz 命令查 ----

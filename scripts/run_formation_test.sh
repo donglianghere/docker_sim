@@ -13,7 +13,7 @@ set -eo pipefail
 
 cd "$(dirname "$0")/.."
 
-ROUTE="7,-10 7,10 -8,10 -8,-10"
+ROUTE="7,-9.5 7,9.5 -7,9.5 -7,-9.5"
 SPACING=3.5
 RESTART=1
 KEEP=0

@@ -53,15 +53,17 @@ apriltag_size_m: 0.5
 # Y轴正方向=90度，不是标识贴图本身的朝向——H字母上下/左右对称，贴图
 # 不需要跟着转），sim-world-entrypoint.sh的fire_drill_room专属spawn
 # 分支直接读这两个点。
+# 2026-09-23用户重新指定：两个起降点挪到 (±2, -9.5)，比原来 (±1.5, -10)
+# 彼此远 1 米、离南墙远 0.5 米。
 takeoff_landing_pads:
   - id: nx01
-    x: 1.5
-    y: -10.0
+    x: 2.0
+    y: -9.5
     z: 0.1
     yaw_deg: 90.0
   - id: nx02
-    x: -1.5
-    y: -10.0
+    x: -2.0
+    y: -9.5
     z: 0.1
     yaw_deg: 90.0
 
@@ -95,17 +97,22 @@ supply_point:
 # 立柱那个面"该在的世界坐标（算法：立柱世界位置+沿该面法线方向偏移
 # 0.31米，法线方向=立柱当前随机yaw+所选面的本地朝向）。原来`fire_
 # pillar_id`这个"写死指定哪根立柱"的字段已经没有意义，删掉。
+# 2026-09-23用户重新指定三根立柱坐标和截面（0.6 -> 1.0 米）。
+# 截面变大之后"禁入半径"= 半对角0.71 + 规划器膨胀0.6 = 1.31 米（原来
+# 1.02 米），绕飞半径 3.0 米仍然够用；但 3# 在 (0,0) 正处地面搜索区中心，
+# 弓字行距 2.52 米下最近的行离柱心最多只能做到 1.26 米（<1.31），必然要
+# 靠规划器绕一下，见 contestant_template/地面火情搜索示例.py 里的说明。
 pillars:
   - id: pillar_1
-    x: 4.0
-    y: 4.0
+    x: 4.5
+    y: 7.0
   - id: pillar_2
-    x: 0.0
-    y: 8.0
+    x: -4.5
+    y: 7.0
   - id: pillar_3
-    x: -5.0
-    y: 2.0
-pillar_size: 0.6
+    x: 0.0
+    y: 0.0
+pillar_size: 1.0
 pillar_height: 6.0
 fire_apriltag_id: 1
 fire_apriltag_height_m: 3.0
@@ -116,18 +123,22 @@ fire_apriltag_height_m: 3.0
 # 不再是world文件里的静态sub-visual。初始/默认坐标随便给一个（容器
 # 启动后5秒scenario_reset_node会自动reset一次，立刻被挪到正确位置，
 # 这个默认值只在reset触发前的一瞬间可见）。
+# 2026-09-23：立柱截面改成 1.0 米后挂载偏移跟着改成 0.5（半宽）+0.01
+# （避免跟柱身共面 Z-fighting）= 0.51；默认坐标跟着 2# 立柱的新位置走，
+# 且贴在朝向 1# 立柱的那一面（+X 面，见 scenario_reset_node 的说明）。
 fire_apriltag_marker:
-  mount_standoff_m: 0.31
-  default_x: 0.0
-  default_y: 8.0
+  mount_standoff_m: 0.51
+  default_x: -3.99
+  default_y: 7.0
   default_z: 3.0
 
 # 地面火情标识：AprilTag ID2，2026-09-09起**独立固定坐标，不跟随任何
 # 立柱**（原设计是贴在火情立柱脚下共址，现在两者是完全独立的两个目标）。
 # 2026-09-11坐标按等比例布局图重新指定。
+# 2026-09-23用户重新指定坐标（当天先给的 (4,-2)，随后改成 (0,-4)）。
 ground_fire_point:
   x: 0.0
-  y: -2.0
+  y: -4.0
   apriltag_id: 2
 
 # 独立障碍物圆柱：跟三根方形立柱区分开（直径0.5米 vs 立柱截面0.6米，

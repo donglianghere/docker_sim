@@ -262,11 +262,11 @@ for i in $(seq 1 "${NUM_AGENTS}"); do
     # 不能因为这次场景重新设计就动了那套机制的默认行为）。
     if [ "${WORLD_ENV}" = "fire_drill_room" ]; then
         if [ "${NS}" = "NX01" ]; then
-            SPAWN_X="1.5"
+            SPAWN_X="2.0"
         else
-            SPAWN_X="-1.5"
+            SPAWN_X="-2.0"
         fi
-        SPAWN_Y="-10.0"
+        SPAWN_Y="-9.5"
         SPAWN_Z="0.1"
         SPAWN_YAW_DEG="90"
         SPAWN_YAW=$(awk -v d="${SPAWN_YAW_DEG}" 'BEGIN{printf "%.16f", d*atan2(0,-1)/180}')
