@@ -264,11 +264,15 @@ def recon_return_and_land(sdk):
     sdk.land()                      # 自动播"侦察机降落"
 
 
-def run_recon(sdk):
-    """侦察机：逐栋绕飞找高层着火点，找到就发弹并通知任务机。"""
+def recon_orbit_and_fire(sdk):
+    """侦察机的高楼火情任务段：逐栋绕飞 -> 对准 -> 通报任务机 -> 发射破窗弹。
+    返回是否找到着火点。
+
+    **不起飞、不返航**——留给调用方决定，这样《双机灭火任务示例.py》可以把
+    这一段接在地面火情之后，中间不落地。
+    """
     watcher = TagWatcher(sdk, HIGH_FIRE, camera='front')
     try:
-        sdk.takeoff()               # 自动播"侦察机起飞"
         sdk.play_sound_light('侦察机排查高层火情')
         watcher.start()
 
@@ -283,8 +287,7 @@ def run_recon(sdk):
 
         if hit is None:
             print(f'[{sdk.namespace}] {len(BUILDINGS)} 栋楼都绕完了，没有发现高层火情', flush=True)
-            recon_return_and_land(sdk)
-            return
+            return False
 
         sdk.cancel_goto()
         lbx, lby, _ = sdk.world_to_local(hit[0], hit[1], ORBIT_AGL_M)
@@ -300,7 +303,7 @@ def run_recon(sdk):
               flush=True)
 
         # 通知任务机：瞄准位置 + 着火点坐标（任务机进场前就把朝向设成着火点，
-        # 这样飞过去的过程中机头已经转好了——悬停后再改朝向是不生效的）
+        # 这样飞过去的过程中机头已经转好了）
         sdk.play_sound_light('侦察机通报高层火情')
         try:
             sdk.send_to_teammate(FIRE_EVENT, x=hx, y=hy, z=hz, fire_x=fx, fire_y=fy)
@@ -310,11 +313,18 @@ def run_recon(sdk):
         sdk.play_sound_light('侦察机发射破窗弹')
         fire_launcher(sdk, '发射破窗弹')
         sdk.play_sound_light('侦察机破窗完成')
-
-        recon_return_and_land(sdk)
-        sdk.play_sound_light('侦察机任务完成')
+        return True
     finally:
         watcher.stop()
+
+
+def run_recon(sdk):
+    """侦察机：起飞 -> 绕飞侦察破窗 -> 返航降落（单独跑这个示例时的完整流程）。"""
+    sdk.takeoff()                   # 自动播"侦察机起飞"
+    found = recon_orbit_and_fire(sdk)
+    recon_return_and_land(sdk)
+    if found:
+        sdk.play_sound_light('侦察机任务完成')
 
 
 class Notice:
@@ -332,10 +342,27 @@ class Notice:
         return self.received.wait(timeout)
 
 
-def run_supply(sdk, teammate):
-    """任务机：等通知，飞到侦察机给的瞄准位置灭火，再返航。"""
+def listen_for_report(sdk):
+    """提前注册"高层火情通报"的处理函数，返回接收器。
+
+    ⚠️ 必须在侦察机可能发出通报之前就注册：可靠事件通道收到事件是**先回 ACK
+    再查处理函数**的（reliability.py::_handle_event），没注册就等于"确认收到
+    然后丢掉"，发送方还以为送达了。串行做多个任务时，后面那个任务的通报很
+    可能在前一个任务还没做完时就到了——实测就是这么丢的一条。
+    """
     notice = Notice()
     sdk.on_teammate_event(FIRE_EVENT, notice.on_event)
+    return notice
+
+
+def run_supply(sdk, teammate, notice=None):
+    """任务机：等通知，飞到侦察机给的瞄准位置灭火，再返航。
+
+    `notice` 可以传一个提前注册好的接收器（见 listen_for_report()）；不传就
+    在这里注册，适合单独跑这个示例。
+    """
+    if notice is None:
+        notice = listen_for_report(sdk)
 
     print(f'[{sdk.namespace}] 等 {teammate} 通报高层火情…', flush=True)
     if not notice.wait(WAIT_NOTIFY_S):

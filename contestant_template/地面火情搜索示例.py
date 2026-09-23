@@ -278,11 +278,14 @@ def supply_return_and_land(sdk):
     print(f'[{sdk.namespace}] 已返回起飞点降落', flush=True)
 
 
-def run_recon(sdk):
-    """侦察机：弓字搜索，发现火点就悬停解算坐标并通报任务机，然后返航。"""
+def recon_search_and_report(sdk):
+    """侦察机的地面火情任务段：搜索 -> 悬停解算 -> 通报任务机。返回是否找到。
+
+    **不起飞、不返航**——留给调用方决定，这样《双机灭火任务示例.py》可以把
+    这一段跟高楼火情那一段串起来，中间不落地。
+    """
     watcher = FireWatcher(sdk)
     try:
-        sdk.takeoff()               # 自动播"侦察机起飞"
         watcher.start()
         found = search(sdk, watcher)
         watcher.stop()
@@ -291,18 +294,40 @@ def run_recon(sdk):
             hover_over_fire(sdk, watcher)
         else:
             print(f'[{sdk.namespace}] 整个区域扫完，没有发现地面火情', flush=True)
-        recon_return_and_land(sdk)
-        if found:
-            sdk.play_sound_light('侦察机任务完成')
+        return found
     finally:
         watcher.stop()
 
 
-def run_supply(sdk, teammate):
-    """任务机：等火情通报，取灭火弹投到火点，返回起飞点。"""
+def run_recon(sdk):
+    """侦察机：起飞 -> 搜索通报 -> 返航降落（单独跑这个示例时的完整流程）。"""
+    sdk.takeoff()                   # 自动播"侦察机起飞"
+    found = recon_search_and_report(sdk)
+    recon_return_and_land(sdk)
+    if found:
+        sdk.play_sound_light('侦察机任务完成')
+
+
+def listen_for_report(sdk):
+    """提前注册"地面火情通报"的处理函数，返回接收器。
+
+    ⚠️ 必须在侦察机可能发出通报之前就注册：可靠事件通道收到事件是**先回 ACK
+    再查处理函数**的（reliability.py::_handle_event），没注册就等于"确认收到
+    然后丢掉"，发送方还以为送达了。
+    """
     report = FireReport()
-    # 先注册再等：侦察机的通报带 ACK+重发，只要本程序在它超时之前起来就收得到
     sdk.on_teammate_event(FIRE_REPORT_EVENT, report.on_event)
+    return report
+
+
+def run_supply(sdk, teammate, report=None):
+    """任务机：等火情通报，取灭火弹投到火点，返回起飞点。
+
+    `report` 可以传一个提前注册好的接收器（见 listen_for_report()）；不传就
+    在这里注册，适合单独跑这个示例。
+    """
+    if report is None:
+        report = listen_for_report(sdk)
     print(f'[{sdk.namespace}] 等 {teammate} 通报地面火情…', flush=True)
     if not report.wait(WAIT_REPORT_S):
         print(f'[{sdk.namespace}] {WAIT_REPORT_S:.0f} 秒内没收到火情通报，不起飞', flush=True)
