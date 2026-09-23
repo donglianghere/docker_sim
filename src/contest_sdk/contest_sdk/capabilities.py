@@ -152,6 +152,14 @@ class ServoSpec:
 # PWM_MAIN_TIM3=50），上锁时也要能动需要COM_PREARM_MODE=2——这些都是飞控
 # 侧设置，SDK这边只负责按表把PWM换算成归一化值发出去。
 SERVO_CONFIG: Dict[str, Dict[int, ServoSpec]] = {
+    'NX01': {
+        # 2026-09-23用户要求新增：侦察机也要能驱动舵机发射（高层火情那一步）。
+        # ⚠️ 接线和飞控参数还没在NX01真机上核对过，暂按NX02的第一路照搬
+        # （MAIN7、PWM 800~2000）。上真机前必须确认：PWM_MAIN_FUNC7=301、
+        # 该组频率PWM_MAIN_TIM2=50、COM_PREARM_MODE=2，以及发射机构确实接在
+        # MAIN7——接错口会驱动别的输出。核对后如有不同，改这里一行即可。
+        1: ServoSpec(actuator_set=1, output='MAIN7', pwm_min=800, pwm_max=2000),
+    },
     'NX02': {
         1: ServoSpec(actuator_set=1, output='MAIN7', pwm_min=800, pwm_max=2000),
         2: ServoSpec(actuator_set=2, output='MAIN9', pwm_min=800, pwm_max=2000),
@@ -1139,6 +1147,43 @@ class DroneSDK:
     # ------------------------------------------------------------------
     # 2026-09-18新增：单相机+可动关节两档预设视角
     # ------------------------------------------------------------------
+
+    def face_point(self, x: float, y: float, timeout: float = 10.0,
+                   tolerance_deg: float = 5.0) -> float:
+        """悬停着把机头转到对准某个点，转到位（或超时）才返回，返回最终朝向。
+
+        2026-09-23新增。`set_yaw_mode_point()`只是把朝向目标发给`traj_server`，
+        飞机**在飞**的时候才会跟着转；停着的时候机头锁在进入悬停那一刻的角度
+        （pt4ctrl的AUTO_HOVER用的是`hover_pose(3)`，见`PX4CtrlFSM.cpp`）。
+        飞行栈的`traj_server`打了`ego_planner_traj_server_yaw_hold.patch`之后，
+        空闲时收到新的朝向目标会以当前位置为目标持续发`position_cmd`、只转
+        yaw，这个方法就是"发目标 + 等它转到位"。
+
+        没打那个补丁的旧飞行栈上不会报错，只是转不动、超时后返回当前朝向——
+        调用方拿返回值跟期望角度比一下就知道。
+
+        Args:
+            x/y: 要对准的点，这架飞机自己的局部坐标系（跟`goto()`同一套）。
+            timeout: 最多等多久。
+            tolerance_deg: 朝向差多少度以内算对准。
+        """
+        self.set_yaw_mode_point(x, y)
+        tol = math.radians(tolerance_deg)
+
+        def _aimed() -> bool:
+            px, py, _ = self._odom_xyz or (0.0, 0.0, 0.0)
+            want = math.atan2(y - py, x - px)
+            err = (self.get_current_yaw() - want + math.pi) % (2 * math.pi) - math.pi
+            return abs(err) <= tol
+
+        self._poll_until(
+            _aimed, timeout,
+            lambda: self._progress(f'转向对准({x:.2f}, {y:.2f})中…'),
+            poll_interval_s=0.2,
+        )
+        yaw = self.get_current_yaw()
+        self._progress(f'朝向 {math.degrees(yaw):.1f}°')
+        return yaw
 
     def set_camera_view(self, view: str) -> None:
         """把这架飞机唯一那个真实相机转到`'front'`（前视）或`'down'`

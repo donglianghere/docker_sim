@@ -1,0 +1,192 @@
+diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
+--- a/src/planner/plan_manage/src/traj_server.cpp
++++ b/src/planner/plan_manage/src/traj_server.cpp
+@@ -74,9 +74,69 @@
+ double yaw_target_x_ = 0.0;   // yaw_mode_==POINT时使用，跟pos同一个局部坐标系
+ double yaw_target_y_ = 0.0;
+ 
++// docker_sim 2026-09-23：原地转向（悬停时改朝向）。
++//
++// 背景：飞机停下来之后没有任何地方在发position_cmd——本文件到达终点后只再
++// 发HOVER_AFTER_FINISH_SEC就主动停发（见cmdCallback里的说明），pt4ctrl于是
++// 退回AUTO_HOVER，而AUTO_HOVER的des.yaw取的是**进入悬停那一刻**的yaw
++// （PX4CtrlFSM.cpp::set_hover_with_odom()），之后不再更新。结果就是"悬停时
++// 调set_yaw_mode_point()没有任何反应"：实测悬停着连发4次yaw微调，画面里目标
++// 的偏差从-21.9°只动到-21.2°。高层火情要"悬停并对准着火点"，绕不过这一条。
++//
++// 做法：空闲（没有轨迹在跑）时收到新的yaw模式/参数，就以**收到那一刻的位置**
++// 为固定目标位置持续发position_cmd，只让yaw按限速转向目标角度；转到位（或超时）
++// 后停发，交还给pt4ctrl的AUTO_HOVER——它重新进入悬停时会把新的朝向记进
++// hover_pose，所以转完就稳在新朝向上。
++//
++// 几条刻意的约束：
++// - 位置目标是**转向开始那一刻锁存**的，不是每周期取当前里程计（后者会随噪声
++//   漂移，等于让飞机跟着自己的测量误差走）。
++// - 里程计太旧（超过ODOM_STALE_SEC）不发指令：宁可不转，也不能拿着过期位置
++//   去发位置指令。
++// - 有轨迹在跑时这套逻辑完全不介入，正常飞行的行为一字不变。
++constexpr double YAW_HOLD_MAX_SEC = 8.0;      // 最多转这么久，超时就放弃
++constexpr double YAW_HOLD_TOL_RAD = 0.035;    // 约2°，到这个精度就算转到位
++constexpr double YAW_HOLD_SETTLE_SEC = 0.5;   // 到位后再发一会，让控制器收敛
++constexpr double ODOM_STALE_SEC = 0.5;
++
++bool yaw_hold_active_ = false;
++rclcpp::Time yaw_hold_start_;
++rclcpp::Time yaw_hold_reached_;
++bool yaw_hold_reached_valid_ = false;
++Eigen::Vector3d yaw_hold_pos_(0, 0, 0);
++
++Eigen::Vector3d odom_pos_(0, 0, 0);
++double odom_yaw_ = 0.0;
++bool have_odom_ = false;
++rclcpp::Time odom_stamp_;
++
++void odomCallback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
++{
++  odom_pos_ << msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z;
++  const auto &q = msg->pose.pose.orientation;
++  odom_yaw_ = atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
++  odom_stamp_ = rclcpp::Clock(RCL_ROS_TIME).now();
++  have_odom_ = true;
++}
++
++// 收到新的朝向指令：没有轨迹在跑就启动一次原地转向
++void startYawHoldIfIdle()
++{
++  if (receive_traj_ || !have_odom_)
++    return;
++  rclcpp::Clock clock(RCL_ROS_TIME);
++  yaw_hold_active_ = true;
++  yaw_hold_reached_valid_ = false;
++  yaw_hold_start_ = clock.now();
++  yaw_hold_pos_ = odom_pos_;      // 锁存位置，见上面说明
++  last_yaw_ = odom_yaw_;          // 从实际朝向接着转，避免跳变
++  last_yaw_dot_ = 0.0;
++}
++
+ void yawModeCallback(std_msgs::msg::Int32::ConstSharedPtr msg)
+ {
+   yaw_mode_ = msg->data;
++  startYawHoldIfIdle();
+ }
+ 
+ void yawParamCallback(geometry_msgs::msg::Point::ConstSharedPtr msg)
+@@ -89,6 +149,7 @@
+   yaw_constant_ = msg->x;
+   yaw_target_x_ = msg->x;
+   yaw_target_y_ = msg->y;
++  startYawHoldIfIdle();
+ }
+ 
+ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
+@@ -284,11 +345,95 @@
+   return std::pair<double, double>(yaw, yawdot);
+ }
+ 
++// 原地转向的一个周期：返回true表示这一周期已经发了指令（调用方直接返回）
++bool publishYawHold()
++{
++  rclcpp::Clock clock(RCL_ROS_TIME);
++  rclcpp::Time now = clock.now();
++  if (!have_odom_ || (now - odom_stamp_).seconds() > ODOM_STALE_SEC)
++  {
++    yaw_hold_active_ = false;     // 里程计不新鲜，不发位置指令
++    return false;
++  }
++  if ((now - yaw_hold_start_).seconds() > YAW_HOLD_MAX_SEC)
++  {
++    yaw_hold_active_ = false;
++    return false;
++  }
++
++  double yaw_target;
++  if (yaw_mode_ == YAW_MODE_POINT)
++    yaw_target = atan2(yaw_target_y_ - yaw_hold_pos_(1), yaw_target_x_ - yaw_hold_pos_(0));
++  else if (yaw_mode_ == YAW_MODE_CONSTANT)
++    yaw_target = yaw_constant_;
++  else
++  {
++    yaw_hold_active_ = false;     // VELOCITY模式原地没有速度方向可言
++    return false;
++  }
++
++  static rclcpp::Time yaw_hold_last = now;
++  double dt = (now - yaw_hold_last).seconds();
++  yaw_hold_last = now;
++  dt = std::max(0.0, std::min(dt, 0.1));
++
++  double err = yaw_target - last_yaw_;
++  while (err > M_PI) err -= 2 * M_PI;
++  while (err < -M_PI) err += 2 * M_PI;
++
++  if (fabs(err) <= YAW_HOLD_TOL_RAD)
++  {
++    if (!yaw_hold_reached_valid_)
++    {
++      yaw_hold_reached_ = now;
++      yaw_hold_reached_valid_ = true;
++    }
++    else if ((now - yaw_hold_reached_).seconds() > YAW_HOLD_SETTLE_SEC)
++    {
++      // 转到位并稳住了：停发，交还pt4ctrl的AUTO_HOVER（它会把新朝向记进
++      // hover_pose，所以松手之后不会转回去）
++      yaw_hold_active_ = false;
++      return false;
++    }
++  }
++  else
++  {
++    yaw_hold_reached_valid_ = false;
++  }
++
++  double step = yaw_dot_max_ * dt;               // 按跟飞行时同一个限速转
++  double yaw = last_yaw_ + std::max(-step, std::min(err, step));
++  while (yaw > M_PI) yaw -= 2 * M_PI;
++  while (yaw < -M_PI) yaw += 2 * M_PI;
++
++  cmd.header.stamp = now;
++  cmd.header.frame_id = "world";
++  cmd.trajectory_flag = quadrotor_msgs::msg::PositionCommand::TRAJECTORY_STATUS_READY;
++  cmd.trajectory_id = traj_id_;
++  cmd.position.x = yaw_hold_pos_(0);
++  cmd.position.y = yaw_hold_pos_(1);
++  cmd.position.z = yaw_hold_pos_(2);
++  cmd.velocity.x = cmd.velocity.y = cmd.velocity.z = 0.0;
++  cmd.acceleration.x = cmd.acceleration.y = cmd.acceleration.z = 0.0;
++  cmd.jerk.x = cmd.jerk.y = cmd.jerk.z = 0.0;
++  cmd.yaw = yaw;
++  cmd.yaw_dot = (fabs(err) <= YAW_HOLD_TOL_RAD) ? 0.0 : (err > 0 ? yaw_dot_max_ : -yaw_dot_max_);
++  last_yaw_ = yaw;
++  pos_cmd_pub->publish(cmd);
++  return true;
++}
++
+ void cmdCallback()
+ {
+   /* no publishing before receive traj_ */
+   if (!receive_traj_)
++  {
++    // 没有轨迹时唯一会发指令的情况：原地转向（见上面 startYawHoldIfIdle）
++    if (yaw_hold_active_)
++      publishYawHold();
+     return;
++  }
++  yaw_hold_active_ = false;       // 有轨迹就交给正常的轨迹跟踪
+ 
+   // 统一时间源
+   rclcpp::Clock clock(RCL_ROS_TIME);  
+@@ -400,6 +545,14 @@
+       10,
+       yawParamCallback);
+ 
++  // docker_sim 2026-09-23：原地转向要知道飞机当前在哪、朝哪。话题名做成参数，
++  // 默认用飞行栈统一的里程计话题（相对名，按namespace分机）。
++  std::string odom_topic;
++  node->declare_parameter("traj_server/odom_topic", std::string("dlio/odom_node/odom"));
++  node->get_parameter("traj_server/odom_topic", odom_topic);
++  auto odom_sub = node->create_subscription<nav_msgs::msg::Odometry>(
++      odom_topic, 10, odomCallback);
++
+   // docker_sim: 改成相对话题名，配合namespace=${NAMESPACE}按机分开，
+   // 避免双机场景下两架飞机的traj_server都发到同一个全局/position_cmd
+   // （跟px4ctrl_ros2_namespace.patch解决的是同一类问题）

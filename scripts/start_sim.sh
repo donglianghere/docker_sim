@@ -2,9 +2,12 @@
 # 启动仿真机队，并**验证相机真的在出图**之后才返回。所有仿真测试都应该用
 # 这个脚本启动，不要直接 docker compose up。
 #
-#   ./scripts/start_sim.sh                 # 重启仿真，等就绪，验证相机
-#   ./scripts/start_sim.sh --gui           # 同时开 Gazebo 图形界面
+#   ./scripts/start_sim.sh                 # 重启仿真（带 Gazebo GUI + RViz），验证相机
+#   ./scripts/start_sim.sh --no-gui        # 不开图形界面（无人值守/纯 SSH 时用）
 #   ./scripts/start_sim.sh --no-restart    # 沿用当前在跑的仿真，只做验证
+#
+# 默认开图形界面：调试时必须能看到 Gazebo 和 RViz 画面（用户 2026-09-23 要求），
+# 不该靠人每次记得加参数。
 #
 # 为什么要有这个脚本（2026-09-23）：之前有两轮测试"搜索不到地面火点"，排查
 # 半天发现是**宿主机 X 授权掉了**——容器里是 root，`xhost` 只授权了宿主机
@@ -21,13 +24,14 @@ set -eo pipefail
 cd "$(dirname "$0")/.."
 
 RESTART=1
-GUI=0
+GUI=1                 # 默认开 Gazebo GUI + RViz，见文件头
 READY_TIMEOUT_S=240
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-restart) RESTART=0; shift ;;
-        --gui)        GUI=1; shift ;;
+        --gui)        GUI=1; shift ;;       # 保留：现在本来就是默认
+        --no-gui)     GUI=0; shift ;;
         --timeout)    READY_TIMEOUT_S="$2"; shift 2 ;;
         -h|--help)    sed -n '2,9p' "$0"; exit 0 ;;
         *) echo "未知参数: $1（用 --help 看用法）" >&2; exit 2 ;;
@@ -124,7 +128,29 @@ if [ -n "$bad" ]; then
     exit 1
 fi
 
-# ---- 5. 打印这次的场景坐标，省得去猜/去用 gz 命令查 ----
+# ---- 5. 图形界面：gzclient 由 sim-world 的 launch 带起，RViz 这里单独起 ----
+if [ "$GUI" = "1" ]; then
+    if docker exec docker_sim-sim-world-1 pgrep -x gzclient >/dev/null 2>&1; then
+        log "Gazebo 图形界面已启动"
+    else
+        echo "!! gzclient 没起来（X 授权/显卡问题），画面看不到 !!" >&2
+    fi
+    if ! docker exec docker_sim-flight-stack-nx01-1 pgrep -x rviz2 >/dev/null 2>&1; then
+        docker exec -d -e DISPLAY="${DISPLAY}" docker_sim-flight-stack-nx01-1 bash -lc \
+            'source /opt/ros/humble/setup.bash; source /opt/mighty_ws/install/setup.bash 2>/dev/null;
+             export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp;
+             export CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml;
+             rviz2 -d /opt/mighty_ws/src/mighty/rviz/multi_ego_planner.rviz' >/dev/null 2>&1 || true
+        sleep 6
+    fi
+    if docker exec docker_sim-flight-stack-nx01-1 pgrep -x rviz2 >/dev/null 2>&1; then
+        log "RViz 已启动"
+    else
+        echo "!! rviz2 没起来，检查 DISPLAY=${DISPLAY} 和 xhost 授权 !!" >&2
+    fi
+fi
+
+# ---- 6. 打印这次的场景坐标，省得去猜/去用 gz 命令查 ----
 scenario="$(docker logs docker_sim-sim-world-1 2>&1 | grep -o "NX01->.*checkpoint已重置" | tail -1 || true)"
 [ -n "$scenario" ] && log "本次场景：$scenario"
 log "仿真就绪，相机正常"
