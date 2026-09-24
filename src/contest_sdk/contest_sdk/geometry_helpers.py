@@ -126,6 +126,7 @@ def generate_ground_scan_waypoints(
     overlap_ratio: float = 0.3,
     wall_margin: float = 1.0,
     target_size_m: float = 0.0,
+    start_from_x_max: bool = False,
 ) -> List[Tuple[float, float, float]]:
     """生成弓字形（沿x方向来回扫，行与行之间沿y方向递进）固定航点序列。
 
@@ -148,10 +149,17 @@ def generate_ground_scan_waypoints(
             约0.5米经过，标签被画面边缘截断，没检出。所以有效覆盖宽度要扣掉
             目标尺寸：行间距 = (覆盖较窄边 - target_size_m) * (1 - overlap_ratio)，
             保证任何位置的目标都至少在某一行里完整入画。
+        start_from_x_max: 第一行从x_max端起扫（默认False=从x_min端起）。
+            2026-09-24新增，用户提的：飞机停在场地哪一侧，就该从那一侧
+            开始扫——侦察机起降点在x正方向那一半，原来固定从x_min起扫，
+            开扫之前要先空飞整个场地宽度（实测8米）到对面去，而那条"去
+            程"贴着两机起降点的连线飞，那条线上按规则不会摆火情目标，
+            等于纯浪费时间。哪一端更近由调用方判断（它才知道飞机在哪），
+            这里只负责按要求生成，覆盖范围两种起法完全一样。
 
     Returns:
-        (x, y, z)航点列表，按扫描顺序排列（第一行从x_min飞到x_max，
-        第二行从x_max飞回x_min，如此往复，"弓字形"由此得名）。
+        (x, y, z)航点列表，按扫描顺序排列（第一行从起扫那一端飞到对面，
+        第二行折回来，如此往复，"弓字形"由此得名）。
     """
     if room_max_x - 2 * wall_margin <= room_min_x or room_max_y - 2 * wall_margin <= room_min_y:
         raise ValueError('wall_margin太大，房间可用范围被挤没了')
@@ -177,7 +185,7 @@ def generate_ground_scan_waypoints(
 
     waypoints: List[Tuple[float, float, float]] = []
     y = y0
-    left_to_right = True
+    left_to_right = not start_from_x_max
     while True:
         y_clamped = min(y, y1)
         if left_to_right:

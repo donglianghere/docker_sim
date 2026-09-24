@@ -130,8 +130,10 @@ def inspect_for_fire(sdk):
         h1, h2 = INSPECT_HEIGHTS_M
         print(f'[{sdk.namespace}] 水平点 {n}/{len(plan)}：中点 ({mid[0]:.1f}, {mid[1]:.1f})',
               flush=True)
+        first_local = sdk.world_to_local(mid[0], mid[1], h1)
         try:
-            sdk.goto(*sdk.world_to_local(mid[0], mid[1], h1))
+            with sdk.fixed_altitude(first_local[2]):    # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+                sdk.goto(*first_local)
         except GotoUnreachableError:
             print(f'[{sdk.namespace}] 这个水平点不可达，跳过', flush=True)
             continue
@@ -288,7 +290,8 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
                   f'（这一面朝 ({pillar[0]:.1f}, {pillar[1]:.1f})）', flush=True)
             sdk.set_yaw_mode_point(*fire_local)     # 出发前设好，路上机头就转到位
             try:
-                sdk.goto(aim_xy[0], aim_xy[1], az)
+                with sdk.fixed_altitude(az):            # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+                    sdk.goto(aim_xy[0], aim_xy[1], az)
             except GotoUnreachableError:
                 print(f'[{sdk.namespace}] 这个正对位置不可达，换下一个候选', flush=True)
                 continue
@@ -313,7 +316,8 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
         if best is not None and best[1] != aim_xy:
             # 试到最后停在别的候选上，回到看得最清楚的那个
             try:
-                sdk.goto(best[1][0], best[1][1], az)
+                with sdk.fixed_altitude(az):            # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+                    sdk.goto(best[1][0], best[1][1], az)
             except GotoUnreachableError:
                 pass
 
@@ -403,8 +407,10 @@ def run_supply(sdk, teammate, 通报=None):
         sx, sy, sz = standby_point(aim, aim[2], recon_home)
         print(f'[{sdk.namespace}] 到待命点 ({sx:.2f}, {sy:.2f}, {sz:.2f}) 等侦察机破窗', flush=True)
         sdk.set_yaw_mode_point(*sdk.world_to_local(fire[0], fire[1], sz)[:2])
+        standby_local = sdk.world_to_local(sx, sy, sz)
         try:
-            sdk.goto(*sdk.world_to_local(sx, sy, sz))
+            with sdk.fixed_altitude(standby_local[2]):  # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+                sdk.goto(*standby_local)
         except GotoUnreachableError as exc:
             # 待命点只是个等待的地方，进不去就在原地等——绝不能因此跳过报到，
             # 那样侦察机会一直等我们（2026-09-24 实测过一次）
@@ -420,7 +426,9 @@ def run_supply(sdk, teammate, 通报=None):
         else:
             print(f'[{sdk.namespace}] 等了 {WAIT_BREACH_S:.0f} 秒没等到破窗通知，自行进场', flush=True)
 
-        sdk.goto(*sdk.world_to_local(*aim))
+        aim_local = sdk.world_to_local(*aim)
+        with sdk.fixed_altitude(aim_local[2]):          # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+            sdk.goto(*aim_local)
         sdk.play_sound_light('任务机到达瞄准点')
         fire_local = sdk.world_to_local(fire[0], fire[1], aim[2])[:2]
         buildings_local = [sdk.world_to_local(bx, by, aim[2])[:2] for bx, by in BUILDINGS]
@@ -436,8 +444,10 @@ def run_supply(sdk, teammate, 通报=None):
 
     pad = sdk.local_to_world(0.0, 0.0, 0.0)
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
+    home = sdk.world_to_local(pad[0], pad[1], aim[2])
     try:
-        sdk.goto(*sdk.world_to_local(pad[0], pad[1], aim[2]))
+        with sdk.fixed_altitude(home[2]):               # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+            sdk.goto(*home)
     except GotoUnreachableError:
         pass
     sdk.goto_direct(0.0, 0.0, aim[2])           # 最后一段收准再落

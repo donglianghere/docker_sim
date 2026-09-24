@@ -6,18 +6,18 @@
 
 一份代码两架飞机各起一个容器，按 --role 分工（运行脚本会传）：
 
-  leader（NX01，侦察机）：起飞 -> 弓字搜索地面火情、通报 -> 回起飞点**悬停**
-      -> 逐栋绕飞找高层火情、对准、通报、发射破窗弹 -> 回起飞点 -> 降落
+  leader（NX01，侦察机）：起飞 -> 弓字搜索地面火情、通报 -> 回起飞点**降落**
+      -> 等任务机落地后再起飞 -> 逐栋绕飞找高层火情、对准、通报、发射破窗弹
+      -> 回起飞点降落
 
   follower（NX02，任务机）：等地面火情通报 -> 起飞取灭火弹、投到火点 -> 回起飞点
       **降落** -> 等高层火情通报 -> 起飞、飞到瞄准位置、发射灭火弹 -> 回起飞点降落
 
-三条规则（用户 2026-09-23 要求）：
+三条规则（用户 2026-09-23 定、2026-09-24 改了第二条）：
   · 每个任务结束两架都要回到自己的起飞点；
-  · 侦察机回到起飞点后**不降落**，直接接着做下一个任务；任务机每个任务都
-    **必须降落**；
-  · 侦察机要**等任务机降落之后**才开始下一个任务——任务机每落一次就发一条
-    事件通知侦察机，侦察机在起飞点悬停着等这条事件。
+  · 两架**每段任务结束都降落**（原来是侦察机悬停等着，改成落地等——干等着
+    没意义，天上少一架也更安全）；
+  · 侦察机要**等任务机降落之后**才起飞做下一个任务。
 
 任务段的具体实现直接复用两个单任务示例，不再抄一遍：地面火情来自
 《地面火情搜索示例.py》，高楼火情来自《高楼火情示例.py》（跟本文件放在同一个
@@ -37,22 +37,32 @@ SUPPLY_LANDED_EVENT = '任务机本阶段已降落'
 WAIT_SUPPLY_S = 900.0                # 侦察机等任务机降落最多等多久
 
 
-def return_home_hover(sdk):
-    """回到起飞点上方悬停（不降落）。起飞点就是自己局部系的原点。"""
+def return_home_and_land(sdk):
+    """回到起飞点上方，然后降落。起飞点就是自己局部系的原点。
+
+    用户 2026-09-24 改的规则：原来是"回起飞点悬停着等任务机降落、全程只起飞
+    一次"，改成**每段任务结束就落地**，下一段等任务机也落回来之后再起飞。理由
+    是干等期间没事可做，落地等更合理——天上少一架飞机，也不用一直耗电占空域。
+    """
     print(f'[{sdk.namespace}] 返回起飞点', flush=True)
     home = (0.0, 0.0, RETURN_AGL_M)
     try:
-        sdk.goto(*home)             # 远距离回程走规划器，有避障
+        # 转场段定高：这一段最长（从场地另一头飞回来），不钉住的话规划器高频
+        # 重规划会把轨迹高度压得很低——用户 2026-09-24 实测高层段返航时看到过
+        with sdk.fixed_altitude(RETURN_AGL_M):
+            sdk.goto(*home)         # 远距离回程走规划器，有避障
     except GotoUnreachableError:
         pass
-    sdk.goto_direct(*home)          # 最后一段收准，下一个任务从同一个点出发
-    # 机头恢复成起飞时的朝向：上一个任务把它锁在了对准火点的方向上
+    sdk.goto_direct(*home)          # 最后一段收准，下一次起飞还是这个点
+    # 机头恢复成起飞时的朝向：上一个任务可能把它锁在了对准火点的方向上，
+    # 带着那个朝向落地、再起飞，下一个任务的画面朝向就不可预期了
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
+    sdk.land()                      # 自动播"侦察机降落"
 
 
 def wait_supply_landed(sdk, 通知):
     """在起飞点悬停着等任务机落地。等不到也继续往下做，但要说清楚。"""
-    print(f'[{sdk.namespace}] 在起飞点等任务机完成本阶段并降落…', flush=True)
+    print(f'[{sdk.namespace}] 已降落，在起飞点等任务机完成本阶段并降落…', flush=True)
     if 通知.wait(WAIT_SUPPLY_S):
         print(f'[{sdk.namespace}] 任务机已降落，开始下一个任务', flush=True)
     else:
@@ -69,13 +79,12 @@ def run_recon(sdk):
     sdk.takeoff()                   # 自动播"侦察机起飞"
 
     found_ground = 地面.recon_search_and_report(sdk)
-    return_home_hover(sdk)
+    return_home_and_land(sdk)
     wait_supply_landed(sdk, 任务机已降落)
 
+    sdk.takeoff()                   # 任务机已落地，起飞做高楼任务
     found_high = 高楼.recon_orbit_and_fire(sdk)
-    return_home_hover(sdk)
-
-    sdk.land()                      # 全部任务做完才降落，自动播"侦察机降落"
+    return_home_and_land(sdk)       # 最后一段，落地即收工
     if found_ground or found_high:
         sdk.play_sound_light('侦察机任务完成')
     print(f'[{sdk.namespace}] 地面火情{"已" if found_ground else "未"}发现，'

@@ -12,10 +12,10 @@
 一份代码两架飞机各起一个容器，按 --role 分工（运行脚本会传）：
 
   leader（NX01，侦察机/长机）
-      起飞 -> ① 带僚机飞编队航线 -> 回起飞点悬停、等任务机降落
-           -> ② 弓字搜索地面火情、通报 -> 回起飞点悬停、等任务机降落
-           -> ③ 定点巡检高层火情 -> 判是否正对、必要时挪到正对位置 -> 通报
-              -> 等任务机到待命点 -> 发射破窗弹 -> 回起飞点 -> 降落
+      ① 起飞带僚机飞编队航线 -> 回起飞点降落、等任务机降落
+      ② 起飞弓字搜索地面火情、通报 -> 回起飞点降落、等任务机降落
+      ③ 起飞定点巡检高层火情 -> 判是否正对、必要时挪到正对位置 -> 通报
+         -> 等任务机到待命点 -> 发射破窗弹 -> 回起飞点降落
 
   follower（NX02，任务机/僚机）
       ① 起飞跟队，航线飞完回起飞点降落
@@ -23,10 +23,11 @@
       ③ 收到高层火情通报 -> 起飞到待命点报到 -> 等破窗 -> 进场发射灭火弹
          -> 原地等 5 秒让侦察机先返航 -> 降落
 
-三条规则（用户 2026-09-23 要求）：
+三条规则（用户 2026-09-23 定、2026-09-24 改了第二条）：
   · 每个任务结束两架都要回到自己的起飞点；
-  · 侦察机在起飞点**上空悬停等待**，全部任务做完才降落；任务机每段都**必须降落**；
-  · 侦察机要**等任务机降落之后**才开始下一个任务。
+  · 两架**每段任务结束都降落**（原来是侦察机悬停等着，改成落地等——干等着
+    没意义，天上少一架也更安全）；
+  · 侦察机要**等任务机降落之后**才起飞做下一个任务。
 
 各段实现直接复用单任务示例（同一个文件夹，容器里一起挂到 /workspace），这里只
 负责串起来：编队飞行示例.py / 地面火情搜索示例.py / 高层火情巡检版示例.py
@@ -50,22 +51,32 @@ SUPPLY_LANDED_EVENT = '任务机本阶段已降落'
 WAIT_SUPPLY_S = 900.0                # 侦察机等任务机降落最多等多久
 
 
-def return_home_hover(sdk):
-    """回到起飞点上方悬停（不降落）。起飞点就是自己局部系的原点。"""
+def return_home_and_land(sdk):
+    """回到起飞点上方，然后降落。起飞点就是自己局部系的原点。
+
+    用户 2026-09-24 改的规则：原来是"回起飞点悬停着等任务机降落、全程只起飞
+    一次"，改成**每段任务结束就落地**，下一段等任务机也落回来之后再起飞。理由
+    是干等期间没事可做，落地等更合理——天上少一架飞机，也不用一直耗电占空域。
+    """
     print(f'[{sdk.namespace}] 返回起飞点', flush=True)
     home = (0.0, 0.0, RETURN_AGL_M)
     try:
-        sdk.goto(*home)             # 远距离回程走规划器，有避障
+        # 转场段定高：这一段最长（从场地另一头飞回来），不钉住的话规划器高频
+        # 重规划会把轨迹高度压得很低——用户 2026-09-24 实测高层段返航时看到过
+        with sdk.fixed_altitude(RETURN_AGL_M):
+            sdk.goto(*home)         # 远距离回程走规划器，有避障
     except GotoUnreachableError:
         pass
-    sdk.goto_direct(*home)          # 最后一段收准，下一个任务从同一个点出发
-    # 机头恢复成起飞时的朝向：上一个任务可能把它锁在了对准火点的方向上
+    sdk.goto_direct(*home)          # 最后一段收准，下一次起飞还是这个点
+    # 机头恢复成起飞时的朝向：上一个任务可能把它锁在了对准火点的方向上，
+    # 带着那个朝向落地、再起飞，下一个任务的画面朝向就不可预期了
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
+    sdk.land()                      # 自动播"侦察机降落"
 
 
 def wait_supply_landed(sdk, 通知):
     """在起飞点悬停着等任务机落地。等不到也继续往下做，但要说清楚。"""
-    print(f'[{sdk.namespace}] 在起飞点等任务机完成本阶段并降落…', flush=True)
+    print(f'[{sdk.namespace}] 已降落，在起飞点等任务机完成本阶段并降落…', flush=True)
     if 通知.wait(WAIT_SUPPLY_S):
         print(f'[{sdk.namespace}] 任务机已降落，开始下一个任务', flush=True)
     else:
@@ -94,23 +105,29 @@ def run_recon(sdk):
     sdk.on_teammate_event(巡检.STANDBY_EVENT, 任务机就位.on_event)
     僚机就位 = 编队.listen_standby(sdk)
 
-    sdk.takeoff()                   # 自动播"侦察机起飞"，全程只起飞这一次
+    sdk.takeoff()                   # 自动播"侦察机起飞"；每段任务各起飞一次
 
-    # ① 编队飞行
-    编队.leader_route(sdk, ROUTE, 僚机就位)
-    return_home_hover(sdk)
+    # ① 编队飞行：全程唯一开定高的一段。本项目默认 LOCALIZATION_SOURCE=uwb_imu，
+    # 那套定位的 z 就是离地高度，所以"钉住高度"= 仿地飞行（见 SDK 里
+    # set_fixed_altitude 的说明）。开关持续生效，用 try/finally 保证异常时也关掉。
+    # ⚠️ 只对长机生效：僚机走 formation_follower_node 直发 position_cmd，
+    # 不经过 traj_server。
+    # 定高的 z 必须跟 goto() 同一套局部坐标系，不能直接传世界高度（见 SDK 说明）
+    with sdk.fixed_altitude(sdk.world_to_local(0.0, 0.0, 编队.CRUISE_AGL_M)[2]):
+        编队.leader_route(sdk, ROUTE, 僚机就位)
+    return_home_and_land(sdk)
     wait_supply_landed(sdk, 任务机已降落)
 
-    # ② 地面火情
+    # ② 地面火情（任务机已落地，起飞做下一段）
+    sdk.takeoff()
     found_ground = 地面.recon_search_and_report(sdk)
-    return_home_hover(sdk)
+    return_home_and_land(sdk)
     wait_supply_landed(sdk, 任务机已降落)
 
     # ③ 高层火情（定点巡检版）
+    sdk.takeoff()
     found_high = 巡检.recon_inspect_and_fire(sdk, 任务机就位)
-    return_home_hover(sdk)
-
-    sdk.land()                      # 三段都做完才降落，自动播"侦察机降落"
+    return_home_and_land(sdk)       # 最后一段，落地即收工
     sdk.play_sound_light('侦察机任务完成')
     print(f'[{sdk.namespace}] 地面火情{"已" if found_ground else "未"}发现，'
           f'高层火情{"已" if found_high else "未"}发现', flush=True)

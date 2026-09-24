@@ -117,25 +117,34 @@ class FireWatcher:
 def build_route(sdk):
     xs = [p[0] for p in AREA]
     ys = [p[1] for p in AREA]
+    # 从离飞机近的那一端起扫（用户 2026-09-24 提的）：起降点在场地 x 正方向
+    # 这一半，默认的"从 x_min 端起扫"要先空飞整个场地宽度（8 米）到对面去才
+    # 开始扫，而这条去程贴着两机起降点的连线飞——按赛场规则火情目标不会摆在
+    # 那条线上，这段纯属浪费。两种起法覆盖范围完全一样，只是省掉这段去程。
+    here = sdk.local_to_world(*sdk.get_local_position())
     route = sdk.generate_ground_scan_waypoints(
         room_min_x=min(xs), room_max_x=max(xs),
         room_min_y=min(ys), room_max_y=max(ys),
-        altitude_agl=CRUISE_AGL_M, target_size_m=FIRE_MARKER_SIZE_M, overlap_ratio=OVERLAP)
+        altitude_agl=CRUISE_AGL_M, target_size_m=FIRE_MARKER_SIZE_M, overlap_ratio=OVERLAP,
+        start_from_x_max=here[0] > (min(xs) + max(xs)) / 2.0)
     return sdk.pull_waypoints_out_of_circles(route, PILLARS, CLEARANCE_M)
 
 
 def search(sdk, watcher):
     route = build_route(sdk)
     print(f'[{sdk.namespace}] 弓字搜索开始，共 {len(route)} 个航点', flush=True)
-    for i, (wx, wy, wz) in enumerate(route, start=1):
-        if watcher.found.is_set():
-            break
-        print(f'[{sdk.namespace}] 航点 {i}/{len(route)}: ({wx:.1f}, {wy:.1f})', flush=True)
-        try:
-            sdk.goto(*sdk.world_to_local(wx, wy, wz))
-        except GotoUnreachableError:
-            # 航点落在障碍物里（未知坐标的那些），跳过——火点不会在障碍物底下
-            print(f'[{sdk.namespace}] 航点 {i} 不可达，跳过', flush=True)
+    # 整条搜索航线定高：航点本来就都是同一个高度，钉住之后下视相机的地面覆盖
+    # 宽度也恒定（行距就是按这个高度算的），不会因为轨迹高度波动漏扫
+    with sdk.fixed_altitude(sdk.world_to_local(0.0, 0.0, CRUISE_AGL_M)[2]):
+        for i, (wx, wy, wz) in enumerate(route, start=1):
+            if watcher.found.is_set():
+                break
+            print(f'[{sdk.namespace}] 航点 {i}/{len(route)}: ({wx:.1f}, {wy:.1f})', flush=True)
+            try:
+                sdk.goto(*sdk.world_to_local(wx, wy, wz))
+            except GotoUnreachableError:
+                # 航点落在障碍物里（未知坐标的那些），跳过——火点不会在障碍物底下
+                print(f'[{sdk.namespace}] 航点 {i} 不可达，跳过', flush=True)
     return watcher.found.is_set()
 
 
@@ -184,7 +193,8 @@ def recon_return_and_land(sdk):
     pad = sdk.local_to_world(0.0, 0.0, 0.0)
     home = sdk.world_to_local(pad[0], pad[1], CRUISE_AGL_M)
     try:
-        sdk.goto(*home)             # 远距离回程走规划器，有避障
+        with sdk.fixed_altitude(home[2]):   # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+            sdk.goto(*home)         # 远距离回程走规划器，有避障
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准，落点精度高一个量级

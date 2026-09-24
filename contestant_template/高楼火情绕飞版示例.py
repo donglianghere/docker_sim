@@ -211,7 +211,8 @@ def orbit_building(sdk, watcher, world_xy):
     for k in ENTRY_CANDIDATES:
         j = k % len(ring)
         try:
-            sdk.goto(*ring[j])      # 到起点这一段走规划器，有避障
+            with sdk.fixed_altitude(lz):    # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+                sdk.goto(*ring[j])  # 到起点这一段走规划器，有避障
         except GotoUnreachableError:
             print(f'[{sdk.namespace}] 绕飞起点 {j} 进不去，换一个', flush=True)
             continue
@@ -232,7 +233,8 @@ def orbit_building(sdk, watcher, world_xy):
             return True
         print(f'[{sdk.namespace}] 绕飞点 {step + 1}/{len(ring) + 1}', flush=True)
         try:
-            sdk.goto(*ring[idx])
+            with sdk.fixed_altitude(lz):    # 绕飞一周高度恒定，前视画面才稳
+                sdk.goto(*ring[idx])
         except GotoUnreachableError:
             continue                # 个别点被别的障碍物占了就跳过，继续绕
         if watcher.found.is_set():
@@ -281,7 +283,8 @@ def recon_return_and_land(sdk):
     home = sdk.world_to_local(pad[0], pad[1], ORBIT_AGL_M)
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
     try:
-        sdk.goto(*home)             # 远距离回程走规划器，有避障
+        with sdk.fixed_altitude(home[2]):   # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+            sdk.goto(*home)         # 远距离回程走规划器，有避障
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准
@@ -332,7 +335,8 @@ def recon_orbit_and_fire(sdk):
         _, _, az = sdk.world_to_local(0.0, 0.0, ORBIT_AGL_M)
         sdk.set_yaw_mode_point(*fire_local)
         try:
-            sdk.goto(ax, ay, az)
+            with sdk.fixed_altitude(az):    # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+                sdk.goto(ax, ay, az)
         except GotoUnreachableError:
             print(f'[{sdk.namespace}] 瞄准位置不可达，就地对准', flush=True)
         _, fire_local = aim_at_fire(sdk, fire_local, buildings_local)
@@ -420,7 +424,9 @@ def run_supply(sdk, teammate, notice=None):
         fire_local = sdk.world_to_local(fire[0], fire[1], aim[2])[:2]
         sdk.set_yaw_mode_point(*fire_local)     # 飞过去的路上机头就转好
         print(f'[{sdk.namespace}] 飞往瞄准位置 ({aim[0]:.2f}, {aim[1]:.2f}, {aim[2]:.2f})', flush=True)
-        sdk.goto(*sdk.world_to_local(*aim))
+        aim_local = sdk.world_to_local(*aim)
+        with sdk.fixed_altitude(aim_local[2]):      # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+            sdk.goto(*aim_local)
         sdk.play_sound_light('任务机到达瞄准点')
         buildings_local = [sdk.world_to_local(bx, by, aim[2])[:2] for bx, by in BUILDINGS]
         aim_at_fire(sdk, fire_local, buildings_local)
@@ -432,8 +438,10 @@ def run_supply(sdk, teammate, notice=None):
 
     pad = sdk.local_to_world(0.0, 0.0, 0.0)
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
+    home = sdk.world_to_local(pad[0], pad[1], aim[2])
     try:
-        sdk.goto(*sdk.world_to_local(pad[0], pad[1], aim[2]))
+        with sdk.fixed_altitude(home[2]):       # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
+            sdk.goto(*home)
     except GotoUnreachableError:
         pass
     sdk.goto_direct(0.0, 0.0, aim[2])           # 最后一段收准再落
