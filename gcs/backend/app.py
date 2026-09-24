@@ -1500,6 +1500,31 @@ def hw_fleet_vision_mode(ns: str, req: HwFleetVisionModeReq):
     return _hw_fleet_proxy(ns, "POST", "/vision/mode", body, timeout=20)
 
 
+# ---- 参数编辑器（2026-09-24新增）----------------------------------
+# 飞机端 GET/POST /params：改 .env 里的任意参数（不只是4个模式项）。
+# 这里只做透传，所有校验/备份/回滚都在飞机端做——地面站不复制一份校验
+# 逻辑，避免两边规则漂移（飞机端才是唯一知道 compose 里声明了哪些变量、
+# .env 长什么样的一方）。
+# POST 的超时给到 130 秒：带 restart:true 时飞机端要跑
+# `up -d --force-recreate flight-stack-hw`，真机上这一步可能要一分多钟。
+@app.get("/api/hw-fleet/{ns}/params")
+def hw_fleet_get_params(ns: str):
+    return _hw_fleet_proxy(ns, "GET", "/params", None, timeout=30)
+
+
+class HwFleetParamsReq(BaseModel):
+    changes: dict[str, str] = {}
+    remove: list[str] = []
+    note: str | None = None
+    restart: bool = False
+    allow_unknown: bool = False
+
+
+@app.post("/api/hw-fleet/{ns}/params")
+def hw_fleet_set_params(ns: str, req: HwFleetParamsReq):
+    return _hw_fleet_proxy(ns, "POST", "/params", req.model_dump(), timeout=130)
+
+
 class HwFleetRenameReq(BaseModel):
     namespace: str
     confirm: bool = True

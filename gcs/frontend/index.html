@@ -269,6 +269,29 @@
   .configBox { border: 1px solid #3a4a63; border-radius: 6px; padding: 10px 12px;
     margin-top: 10px; background: #171d27; }
   .configBoxTitle { font-size: 12px; color: #7bb8ff; font-weight: 600; margin-bottom: 6px; }
+  /* 2026-09-24 参数编辑器。83个参数一屏放不下，表格区固定高度自己滚，
+     不让整张卡片被撑成几屏高（"一机一tab"那次改动的初衷就是别让页面太长）。*/
+  .paramToolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12px; color: #9aa4b2; margin: 6px 0; }
+  .paramToolbar input[type=text] { flex: 1; min-width: 120px; }
+  .paramTableWrap { max-height: 300px; overflow: auto; border: 1px solid #2c3648;
+    border-radius: 4px; }
+  table.paramTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.paramTable th { position: sticky; top: 0; background: #202836; color: #9aa4b2;
+    text-align: left; font-weight: 600; padding: 4px 6px; z-index: 1; }
+  table.paramTable td { padding: 3px 6px; border-top: 1px solid #232c3a;
+    vertical-align: middle; }
+  table.paramTable td.k { color: #cfd8e3; font-family: monospace; white-space: nowrap; }
+  table.paramTable td.dim { color: #6b7684; font-family: monospace; }
+  table.paramTable input { width: 100%; box-sizing: border-box; padding: 2px 4px;
+    background: #12161e; color: #e6edf6; border: 1px solid #2c3648; border-radius: 3px;
+    font-family: monospace; font-size: 12px; }
+  tr.paramRow.edited input { border-color: #d8a34a; background: #241f14; }
+  tr.paramRow.toRemove td { text-decoration: line-through; opacity: .6; }
+  .paramTag { font-size: 10px; padding: 0 4px; border-radius: 3px; white-space: nowrap; }
+  .paramTag.env { background: #23405e; color: #7bb8ff; }      /* 本机覆盖 */
+  .paramTag.def { background: #2a2f3a; color: #7d8794; }      /* 继承基线 */
+  .paramTag.stale { background: #5e3a23; color: #ffb37b; }    /* 改了没重启 */
   /* 2026-08-29新增：真机卡片"①控制面板/②飞机状态/③容器状态/④配置面板"
      四段用户要求"不同面板用不同底色"——用低透明度色块区分，不是纯装饰，
      文字/表格/按钮该有的颜色不受影响(半透明叠加在.droneCard的#1c222b
@@ -1985,6 +2008,13 @@ function newHwFleetRow() {
     // 配合下面的<input value="...">回填 + 被动重建的跳过条件，做法上
     // 跟configOpen是同一个思路（用户正在操作某个输入就跳过被动重建）。
     renameDraft: "",
+    // 2026-09-24 参数编辑器的状态。paramsData是从飞机GET /params拉回来的
+    // 整份数据(83个参数×四层取值)，paramEdits/paramRemoves是"还没提交的
+    // 改动"——刻意跟paramsData分开存，这样重新读取飞机数据不会冲掉用户
+    // 正在编辑的内容，界面上也能一眼看出哪几行是改过还没保存的。
+    paramsOpen: false, paramsData: null, paramsLoading: false,
+    paramEdits: {}, paramRemoves: [], paramFilter: "", paramOnlyEnv: false,
+    paramsMsg: "", paramsMsgCls: "",
     cam0Mode: "yolo", cam0MjpegPort: 8080,
     cam1Mode: "yolo", cam1MjpegPort: 8081,
     planner: "ego_planner",  // 2026-08-26续35：默认ego_planner——真机首飞组合本来
@@ -2898,6 +2928,16 @@ function renderHwFleetRow(ns) {
         <button ${st.busy || !st.stackContract ? "disabled" : ""} onclick="doHwFleetApplyStackMode('${ns}')">应用模式（只写.env）</button>
       </div>
       <div class="row"><span class="v" style="color:#6b7684;font-size:12px;">改完模式只是写了.env，飞控还在按旧模式跑——要生效需要再去上面"①控制面板"点"flight重启"（会掐断飞控）。</span></div>
+    </div>
+    <div class="configBox">
+      <div class="configBoxTitle">④ 配置面板 · 参数编辑器（.env / docker-compose.hw.yml 全部可调参数）</div>
+      <div class="actions" style="margin-top:4px;">
+        <button ${st.paramsLoading ? "disabled" : ""} style="width:auto;padding:4px 10px;margin:0;"
+          onclick="doHwFleetLoadParams('${ns}')">${st.paramsData ? "重新读取" : "读取参数"}</button>
+        ${st.paramsData ? `<span class="v" style="font-size:12px;color:#9aa4b2;margin-left:8px;">共 ${st.paramsData.params.length} 项，其中 ${st.paramsData.params.filter((p) => p.source === "env").length} 项本机覆盖${st.paramsData.flight_up ? "" : "；flight-stack 未运行，“容器内实际”列是上次创建时固化的值"}</span>` : ""}
+      </div>
+      ${st.paramsData ? renderHwParamsTable(ns) : `<div class="row"><span class="v" style="color:#6b7684;font-size:12px;">点"读取参数"，从飞机拉 .env + docker-compose.hw.yml 里的全部可调参数（含没在 .env 里显式写、正在吃基线默认值的那些）。</span></div>`}
+      <div class="actionMsg ${st.paramsMsgCls || ""}">${escHtml(st.paramsMsg || "")}</div>
     </div>` : "";
 
   // 2026-08-29用户要求"不同面板用不同底色"——四段各包一层.panelSection+
@@ -2919,6 +2959,224 @@ function renderHwFleetRow(ns) {
       <div class="actions" style="margin-top:10px;">${configOpenBtn}</div>
       ${st.configOpen ? `<div class="panelSection panelSection-config">${configPanelHtml}</div>` : ""}
     </div>`;
+}
+
+// ---- 参数编辑器（2026-09-24新增）--------------------------------------
+// 跟2026-08-25被删掉的那个"飞行栈调参面板"的区别：那个走SSH（GCS容器挂
+// 宿主机~/.ssh、进飞机改.env再docker compose重建），删除理由是不想把SSH
+// 私钥挂进这个容器；这次走飞机端control_server的HTTP接口(GET/POST
+// /params)，跟启停容器/切检测模式同一条链路，不需要任何密钥。
+//
+// 三条设计原则，对应真机调参最容易犯的三种错：
+//   ① 每个参数同时显示"基线默认 / 本机覆盖 / 容器内实际"——"改了没生效"
+//      "改错了文件"这类问题一眼可见，不用猜
+//   ② 只写改动的那几行进.env，不把默认值全量固化进去——否则compose基线
+//      以后的修正(比如PX4CTRL_LOW_VOLTAGE 13.2→19.8这种安全相关的)就再也
+//      传播不到这台飞机了
+//   ③ 保存 ≠ 生效。按钮明确分成"只写.env"和"保存并重启生效"两个，后者在
+//      飞机端走force-recreate（docker compose restart不会重新读.env，这是
+//      本项目反复踩过的静默失效）
+function hwParamPendingCount(ns) {
+  const st = hwFleetRow(ns);
+  if (!st.paramsData) return 0;
+  const byKey = Object.fromEntries(st.paramsData.params.map((p) => [p.key, p]));
+  let n = (st.paramRemoves || []).length;
+  for (const [k, v] of Object.entries(st.paramEdits || {})) {
+    const base = byKey[k] ? (byKey[k].effective ?? "") : "";
+    if (String(v) !== String(base)) n++;
+  }
+  return n;
+}
+
+function hwParamRowVisible(ns, p) {
+  const st = hwFleetRow(ns);
+  const f = (st.paramFilter || "").trim().toLowerCase();
+  if (st.paramOnlyEnv && p.source !== "env") return false;
+  if (f && !p.key.toLowerCase().includes(f) && !(p.comment || "").toLowerCase().includes(f)) return false;
+  return true;
+}
+
+function renderHwParamsTable(ns) {
+  const st = hwFleetRow(ns);
+  const d = st.paramsData;
+  const edits = st.paramEdits || {};
+  const removes = st.paramRemoves || [];
+  const rows = d.params.map((p) => {
+    const edited = Object.prototype.hasOwnProperty.call(edits, p.key)
+      && String(edits[p.key]) !== String(p.effective ?? "");
+    const cur = Object.prototype.hasOwnProperty.call(edits, p.key) ? edits[p.key] : (p.effective ?? "");
+    const willRemove = removes.includes(p.key);
+    const editor = p.choices
+      ? `<select onchange="hwParamInput('${ns}','${p.key}',this)">${p.choices.map((c) =>
+          `<option value="${escAttr(c)}" ${String(c) === String(cur) ? "selected" : ""}>${escHtml(c)}</option>`).join("")}</select>`
+      : `<input type="text" value="${escAttr(cur)}" oninput="hwParamInput('${ns}','${p.key}',this)">`;
+    return `<tr class="paramRow ${edited ? "edited" : ""} ${willRemove ? "toRemove" : ""}" data-key="${escAttr(p.key)}"
+        style="${hwParamRowVisible(ns, p) ? "" : "display:none;"}">
+      <td class="k" title="${escAttr(p.comment || "")}">${escHtml(p.key)}
+        ${p.source === "env" ? `<span class="paramTag env">覆盖</span>` : `<span class="paramTag def">基线</span>`}
+        ${p.stale ? `<span class="paramTag stale">未重启</span>` : ""}</td>
+      <td>${editor}</td>
+      <td class="dim">${escHtml(p.default === null || p.default === undefined ? "—" : p.default)}</td>
+      <td class="dim">${escHtml(p.running === null || p.running === undefined ? "—" : p.running)}</td>
+      <td>${p.source === "env"
+        ? `<span class="toggleLink" style="margin:0;" onclick="hwParamToggleRemove('${ns}','${p.key}')">${willRemove ? "取消删除" : "恢复基线"}</span>`
+        : ""}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="paramToolbar">
+      <input type="text" id="paramFilter_${ns}" placeholder="搜参数名或说明…" value="${escAttr(st.paramFilter || "")}"
+        oninput="hwParamFilterInput('${ns}', this)">
+      <label style="white-space:nowrap;"><input type="checkbox" ${st.paramOnlyEnv ? "checked" : ""}
+        onchange="hwParamToggleOnlyEnv('${ns}', this)"> 只看本机覆盖</label>
+      <span id="paramPending_${ns}">${hwParamPendingCount(ns)} 项待保存</span>
+    </div>
+    <div class="paramTableWrap">
+      <table class="paramTable">
+        <thead><tr><th>参数</th><th style="width:26%;">值（下次生效）</th><th>基线默认</th><th>容器内实际</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="actions" style="margin-top:6px;">
+      <button ${st.busy ? "disabled" : ""} onclick="doHwFleetSaveParams('${ns}', false)">保存（只写.env）</button>
+      <button ${st.busy ? "disabled" : ""} onclick="doHwFleetSaveParams('${ns}', true)">保存并重启生效</button>
+      <button ${st.busy ? "disabled" : ""} style="width:auto;padding:4px 10px;margin:0;" onclick="hwParamDiscard('${ns}')">放弃改动</button>
+    </div>
+    <div class="row"><span class="v" style="color:#6b7684;font-size:12px;">"基线默认"是 docker-compose.hw.yml 里的 \${KEY:-默认值}，"容器内实际"是此刻容器固化的值（改了没重启时两边会不一样，那一行会标"未重启"）。保存只写 .env 里改动的那几行，行尾注释原样保留，写前自动备份、写后做 compose 语法校验，失败自动回滚。</span></div>`;
+}
+
+// 输入时只改JS状态+就地更新那一行的样式和计数，**不重建整个面板**——
+// 重建会让输入框失去焦点、光标跳到末尾（本文件里renameDraft那段踩过）。
+function hwParamInput(ns, key, el) {
+  const st = hwFleetRow(ns);
+  st.paramEdits = st.paramEdits || {};
+  st.paramEdits[key] = el.value;
+  const p = (st.paramsData.params || []).find((x) => x.key === key);
+  const tr = el.closest("tr");
+  if (tr && p) tr.classList.toggle("edited", String(el.value) !== String(p.effective ?? ""));
+  const badge = document.getElementById(`paramPending_${ns}`);
+  if (badge) badge.textContent = `${hwParamPendingCount(ns)} 项待保存`;
+}
+
+function hwParamFilterInput(ns, el) {
+  const st = hwFleetRow(ns);
+  st.paramFilter = el.value;
+  hwParamApplyFilter(ns);
+}
+
+function hwParamToggleOnlyEnv(ns, el) {
+  const st = hwFleetRow(ns);
+  st.paramOnlyEnv = !!el.checked;
+  hwParamApplyFilter(ns);
+}
+
+// 过滤同样走DOM显隐，不重建表格：83行全部重画会把正在编辑的输入框冲掉。
+function hwParamApplyFilter(ns) {
+  const st = hwFleetRow(ns);
+  if (!st.paramsData) return;
+  const byKey = Object.fromEntries(st.paramsData.params.map((p) => [p.key, p]));
+  document.querySelectorAll(`#paramFilter_${ns}`).forEach(() => {});
+  const wrap = document.getElementById(`paramFilter_${ns}`);
+  const table = wrap ? wrap.closest(".configBox") : null;
+  if (!table) return;
+  table.querySelectorAll("tr.paramRow").forEach((tr) => {
+    const p = byKey[tr.getAttribute("data-key")];
+    tr.style.display = p && hwParamRowVisible(ns, p) ? "" : "none";
+  });
+}
+
+function hwParamToggleRemove(ns, key) {
+  const st = hwFleetRow(ns);
+  st.paramRemoves = st.paramRemoves || [];
+  const i = st.paramRemoves.indexOf(key);
+  if (i >= 0) st.paramRemoves.splice(i, 1); else st.paramRemoves.push(key);
+  renderHwFleetDiscoverPanel(true);
+}
+
+function hwParamDiscard(ns) {
+  const st = hwFleetRow(ns);
+  st.paramEdits = {};
+  st.paramRemoves = [];
+  st.paramsMsg = "";
+  st.paramsMsgCls = "";
+  renderHwFleetDiscoverPanel(true);
+}
+
+function doHwFleetLoadParams(ns) {
+  const st = hwFleetRow(ns);
+  if (st.paramsLoading) return;
+  st.paramsLoading = true;
+  st.paramsMsg = "读取中…";
+  st.paramsMsgCls = "";
+  renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/params`)
+    .then(async (r) => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      st.paramsData = d;
+      if (d.compose_config_error) {
+        st.paramsMsg = `⚠️ 飞机上 docker compose config 报错：${d.compose_config_error}`;
+        st.paramsMsgCls = "err";
+      } else {
+        st.paramsMsg = "";
+        st.paramsMsgCls = "";
+      }
+    })
+    .catch((e) => { st.paramsMsg = `读取失败: ${e.message || e}`; st.paramsMsgCls = "err"; })
+    .finally(() => { st.paramsLoading = false; renderHwFleetDiscoverPanel(true); });
+}
+
+function doHwFleetSaveParams(ns, restart) {
+  const st = hwFleetRow(ns);
+  if (!st.paramsData || st.busy) return;
+  const byKey = Object.fromEntries(st.paramsData.params.map((p) => [p.key, p]));
+  const changes = {};
+  for (const [k, v] of Object.entries(st.paramEdits || {})) {
+    const base = byKey[k] ? (byKey[k].effective ?? "") : "";
+    if (String(v) !== String(base)) changes[k] = String(v);
+  }
+  const removes = (st.paramRemoves || []).filter((k) => byKey[k] && byKey[k].source === "env");
+  const n = Object.keys(changes).length + removes.length;
+  if (!n) {
+    st.paramsMsg = "没有任何改动";
+    st.paramsMsgCls = "";
+    renderHwFleetDiscoverPanel(true);
+    return;
+  }
+  const lines = Object.entries(changes)
+    .map(([k, v]) => `  ${k}:  ${byKey[k] && byKey[k].effective !== null ? byKey[k].effective : "(未设置)"}  →  ${v}`)
+    .concat(removes.map((k) => `  ${k}:  删掉 .env 里这行，回到基线默认 ${byKey[k].default ?? "(无)"}`));
+  const tail = restart
+    ? "\n\n保存后会立刻 force-recreate 重启 flight-stack 让新值生效——飞控链路会断开重连，请确认飞机在地面、螺旋桨安全。"
+    : "\n\n本次只写 .env、不碰容器：新值要等 flight-stack 下次 force-recreate 才会生效。";
+  if (!confirm(`即将修改 ${ns} 的 ${n} 项参数：\n\n${lines.join("\n")}${tail}`)) return;
+  const firstKey = Object.keys(changes)[0] || removes[0] || "edit";
+  st.busy = true;
+  st.paramsMsg = restart ? "保存并重启中，真机上这一步可能要一分多钟…" : "保存中…";
+  st.paramsMsgCls = "";
+  renderHwFleetDiscoverPanel(true);
+  backendFetch(`${BACKEND_URL}/api/hw-fleet/${encodeURIComponent(ns)}/params`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      changes, remove: removes, restart: !!restart,
+      note: `${firstKey}${n > 1 ? `-and-${n - 1}-more` : ""}`,
+    }),
+  })
+    .then(async (r) => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      st.paramEdits = {};
+      st.paramRemoves = [];
+      st.paramsMsg = d.message || "已保存";
+      st.paramsMsgCls = (d.verify_mismatch && d.verify_mismatch.length) ? "err" : "ok";
+    })
+    .catch((e) => { st.paramsMsg = `保存失败: ${e.message || e}`; st.paramsMsgCls = "err"; })
+    .finally(() => {
+      st.busy = false;
+      renderHwFleetDiscoverPanel(true);
+      doHwFleetLoadParams(ns);   // 重新拉一次，让"容器内实际/未重启"这些标记跟上
+    });
 }
 
 // 2026-08-25：原来这里是"飞行栈调参面板"整节（改.env+SSH重建flight-
