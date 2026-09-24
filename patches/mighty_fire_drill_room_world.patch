@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..b845baf
 --- /dev/null
 +++ b/worlds/fire_drill_room.world
-@@ -0,0 +1,565 @@
+@@ -0,0 +1,602 @@
 +<?xml version="1.0" ?>
 +<sdf version='1.7'>
 +  <world name='default'>
@@ -283,7 +283,7 @@ index 0000000..b845baf
 +          </material>
 +        </visual>
 +      </link>
-+      <pose>7 0 3 0 0 0</pose>
++      <pose>7 2 3 0 0 0</pose>
 +    </model>
 +
 +    <!-- 3根候选立柱，模拟高层建筑（用户编号1#/2#/3#），截面1.0x1.0米，
@@ -493,15 +493,52 @@ index 0000000..b845baf
 +         ——"仿地"场景要真的能影响飞行高度判断才有测试意义。
 +         2026-09-11用户按等比例布局图把中心位置从(3,-6,0)改成(7,-6,0)，
 +         长边(3米)也从原来平行Y轴改成平行X轴（<size>的x/y互换）。 -->
++    <!-- 仿地模块：2026-09-24用户改成梯形坡道——长4米(沿X)、下底3米、
++         ，两侧各是1米水平/1米垂直的45度坡。飞机沿
++         x=7 从南往北飞时依次是：上坡 -> 平顶 -> 下坡。
++         Gazebo classic 的 box 做不出梯形截面，这里用三块拼：中间一块平顶
++         box，两侧各一块绕X轴转45度的box，上表面正好落在坡面上、多余的部分
++         埋进地里（地面本身不建模，埋着看不见也不影响碰撞判断）。
++         模型原点在地面(z=0)，各部件用自己的<pose>摆放。 -->
 +    <model name='terrain_module'>
 +      <static>1</static>
 +      <pose>7 -6 0 0 0 0</pose>
 +      <link name='link'>
-+        <collision name='collision'>
-+          <geometry><box><size>3 1 0.5</size></box></geometry>
++        <collision name='top_col'>
++          <pose>0 0 0.25 0 0 0</pose>
++          <geometry><box><size>4 1 0.5</size></box></geometry>
 +        </collision>
-+        <visual name='visual'>
-+          <geometry><box><size>3 1 0.5</size></box></geometry>
++        <visual name='top_vis'>
++          <pose>0 0 0.25 0 0 0</pose>
++          <geometry><box><size>4 1 0.5</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Yellow</name>
++            </script>
++          </material>
++        </visual>
++        <collision name='ramp_north_col'>
++          <pose>0 0.866 -0.018 -0.463648 0 0</pose>
++          <geometry><box><size>4 1.118 0.6</size></box></geometry>
++        </collision>
++        <visual name='ramp_north_vis'>
++          <pose>0 0.866 -0.018 -0.463648 0 0</pose>
++          <geometry><box><size>4 1.118 0.6</size></box></geometry>
++          <material>
++            <script>
++              <uri>file://media/materials/scripts/gazebo.material</uri>
++              <name>Gazebo/Yellow</name>
++            </script>
++          </material>
++        </visual>
++        <collision name='ramp_south_col'>
++          <pose>0 -0.866 -0.018 0.463648 0 0</pose>
++          <geometry><box><size>4 1.118 0.6</size></box></geometry>
++        </collision>
++        <visual name='ramp_south_vis'>
++          <pose>0 -0.866 -0.018 0.463648 0 0</pose>
++          <geometry><box><size>4 1.118 0.6</size></box></geometry>
 +          <material>
 +            <script>
 +              <uri>file://media/materials/scripts/gazebo.material</uri>

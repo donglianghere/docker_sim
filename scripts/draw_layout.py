@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """把场地布置画成一张 SVG 示意图，坐标直接读布局 yaml（单一权威来源）。
 
-    ./scripts/draw_layout.py                      # 输出到 新场地布置示意.svg
+    ./scripts/draw_layout.py                      # 输出 SVG
+    ./scripts/draw_layout.py --jpeg               # 同时输出同名 .jpg
     ./scripts/draw_layout.py --out /tmp/x.svg --route "5,-9.5 5,9.5 -7,9.5 -7,-9.5"
 
 改完 src/contest_mission/config/fire_drill_room_layout.yaml 之后重跑一次就能
@@ -17,6 +18,9 @@ sim-world 容器启动日志里 scenario_reset_node 打印的那一行，或订�
 import argparse
 import math
 import os
+import shutil
+import subprocess
+import tempfile
 
 import yaml
 
@@ -87,11 +91,18 @@ def draw(layout, route, out_path):
         o.append(f'<text x="{px(x)+dx:.1f}" y="{py(y)+(20 if y<0 else -12):.1f}" font-size="13" '
                  f'fill="#2b8a3e" text-anchor="{anchor}">航点{i} ({x:g}, {y:g})</text>')
 
+    # 仿地模块：实心矩形=下底轮廓，内部虚线框=平顶（两者之间就是两侧的坡）
     o.append(f'<rect x="{px(terr["x"]-terr["size_x"]/2):.1f}" y="{py(terr["y"]+terr["size_y"]/2):.1f}" '
              f'width="{terr["size_x"]*SC:.1f}" height="{terr["size_y"]*SC:.1f}" fill="#b08968" stroke="#7f5539" stroke-width="2"/>')
+    top_w = terr.get('top_width_y', terr['size_y'])
+    o.append(f'<rect x="{px(terr["x"]-terr["size_x"]/2):.1f}" y="{py(terr["y"]+top_w/2):.1f}" '
+             f'width="{terr["size_x"]*SC:.1f}" height="{top_w*SC:.1f}" fill="#8c6d52" stroke="#5c3d22" '
+             f'stroke-width="1.5" stroke-dasharray="5 4"/>')
     o.append(f'<text x="{px(terr["x"]-terr["size_x"]/2)-10:.1f}" y="{py(terr["y"])+5:.1f}" font-size="13" '
-             f'fill="#7f5539" text-anchor="end">仿地模块 ({terr["x"]:g}, {terr["y"]:g}) '
-             f'{terr["size_x"]:g}×{terr["size_y"]:g}×{terr["size_z"]:g} m</text>')
+             f'fill="#7f5539" text-anchor="end">仿地模块 ({terr["x"]:g}, {terr["y"]:g}) 长{terr["size_x"]:g}×'
+             f'下底{terr["size_y"]:g}×高{terr["size_z"]:g} m</text>')
+    o.append(f'<text x="{px(terr["x"]+terr["size_x"]/2)+8:.1f}" y="{py(terr["y"])+5:.1f}" font-size="11.5" '
+             f'fill="#7f5539">梯形：上底{top_w:g} m，两侧45°坡</text>')
 
     r = cyl['diameter'] / 2
     o.append(f'<circle cx="{px(cyl["x"]):.1f}" cy="{py(cyl["y"]):.1f}" r="{(r+INFLATE)*SC:.1f}" fill="#fff4e6" '
@@ -149,16 +160,54 @@ def draw(layout, route, out_path):
         f.write('\n'.join(o))
 
 
+def to_jpeg(svg_path, jpeg_path, width=1400, quality=92):
+    """SVG -> JPEG。宿主机上没有 rsvg-convert/inkscape/ImageMagick，就用 Chrome
+    无头模式截图成 PNG，再用 PIL 转 JPEG（Chrome 的 --screenshot 只出 PNG）。
+    缺工具时不让整个脚本失败——SVG 本身已经写出来了，只提示一句。
+    """
+    chrome = next((c for c in ('google-chrome', 'chromium', 'chromium-browser')
+                   if shutil.which(c)), None)
+    if chrome is None:
+        print('!! 没找到 chrome/chromium，跳过 JPEG（SVG 已生成）')
+        return False
+    try:
+        from PIL import Image
+    except ImportError:
+        print('!! 没装 PIL（python3-pil），跳过 JPEG（SVG 已生成）')
+        return False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        png = os.path.join(tmp, 'layout.png')
+        cmd = [chrome, '--headless', '--disable-gpu', '--hide-scrollbars',
+               f'--screenshot={png}', f'--window-size={width},{int(width * 1.15)}',
+               '--default-background-color=ffffffff', f'file://{os.path.abspath(svg_path)}']
+        r = subprocess.run(cmd, capture_output=True, timeout=120)
+        if not os.path.exists(png):
+            print(f'!! Chrome 截图失败，跳过 JPEG：{r.stderr.decode()[-300:]}')
+            return False
+        img = Image.open(png)
+        # 去掉四周的白边，只留图本身
+        bbox = img.convert('RGB').point(lambda v: 0 if v > 250 else 255).convert('L').getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        img.convert('RGB').save(jpeg_path, 'JPEG', quality=quality)
+    print(f'已生成 {jpeg_path}')
+    return True
+
+
 def main():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ap = argparse.ArgumentParser(description='按布局 yaml 画场地示意图')
     ap.add_argument('--layout', default=os.path.join(here, 'src/contest_mission/config/fire_drill_room_layout.yaml'))
     ap.add_argument('--route', default='7,-9.5 7,9.5 -7,9.5 -7,-9.5', help='编队航线 "x,y x,y ..."')
     ap.add_argument('--out', default=os.path.join(here, '场地布置示意.svg'))
+    ap.add_argument('--jpeg', action='store_true', help='同时输出同名 .jpg')
     args = ap.parse_args()
     route = [tuple(float(v) for v in tok.split(',')) for tok in args.route.split()]
     draw(load_layout(args.layout), route, args.out)
     print(f'已生成 {args.out}')
+    if args.jpeg:
+        to_jpeg(args.out, os.path.splitext(args.out)[0] + '.jpg')
 
 
 if __name__ == '__main__':
