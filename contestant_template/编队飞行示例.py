@@ -18,7 +18,11 @@ import time
 
 from contest_sdk import DroneSDK
 
-CRUISE_AGL_M = 1.5            # 巡航离地高度
+# 巡航离地高度。2026-09-24 调过两次：仿地模块改成坡道后，1.5 米时飞机离顶面
+# 太近（小于规划器 0.6 米的障碍物膨胀半径），规划器会把坡道当障碍绕开、看不到
+# 起伏，所以先提到 2.5；后来坡道高度定为 0.5 米，2.0 米就够了（离顶面 1.5 米），
+# 低一点起伏在画面上也更明显。
+CRUISE_AGL_M = 2.0
 # 长机等僚机就位的上限。必须大于僚机最坏情况的起飞耗时（机载等定位收敛的
 # preflight_timeout_s=150秒 + 起飞动作本身60秒），否则僚机还在正常起飞、
 # 长机就先判超时终止了。
@@ -71,7 +75,9 @@ def follower(sdk, spacing_m):
     sdk.takeoff()
     # 这个方法返回的含义是"机载已接管、在自己起飞点上空保持"，不是"已入列"。
     # 必须立刻通知长机——入列要等长机走起来，长机又在等这个通知，等入列会死锁。
-    sdk.start_formation_follow(follow_distance_m=spacing_m)
+    # 高度一并下发：僚机的高度由这个节点按定高雷达保持（天然仿地），默认 1.5 米，
+    # 不显式传的话长机改了巡航高度、僚机还停在默认值，编队会一高一低。
+    sdk.start_formation_follow(follow_distance_m=spacing_m, altitude_agl_m=CRUISE_AGL_M)
     sdk.send_to_teammate(READY)
 
     inbox.wait(ROUTE_DONE, ROUTE_DONE_WAIT_S)

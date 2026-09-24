@@ -1,0 +1,106 @@
+diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
+--- a/src/planner/plan_manage/src/traj_server.cpp
++++ b/src/planner/plan_manage/src/traj_server.cpp
+@@ -111,6 +111,74 @@
+ bool have_odom_ = false;
+ rclcpp::Time odom_stamp_;
+ 
++// docker_sim 2026-09-24：定高开关（配合 uwb_imu 定位源就是仿地飞行）。
++// 跟上面 yaw_mode_ 那个旁路开关同一个套路——两个话题：traj_server/alt_mode 选
++// 模式、traj_server/alt_param 带参数，默认 0=按轨迹原样走，行为跟没这段代码一字不差。
++//
++// 为什么只需要"把 z 压成固定值"这么简单：本项目真机和仿真默认都用
++// LOCALIZATION_SOURCE=uwb_imu，这套定位方案的 z 本来就是**离地高度**
++// （uwb_imu_fusion_node 把 测距雷达range*cos(roll)*cos(pitch) 喂给飞控当高度
++// 观测，x/y 才用 UWB，见该文件头）。所以命令 z 恒定 = 离地高度恒定 = 仿地飞行，
++// 这里不需要再自己读雷达、算地面高度。
++//
++// 那为什么还需要这个开关：规划器是高频重规划的，它给出的轨迹 z 会随优化结果
++// 变化（实测同一段航线里轨迹 z 在 0.97~2.33 之间跑），地形起伏带来的高度变化
++// 淹没在这种波动里，飞机不会稳定跟着地面走。把 z 钉死在设定值，地面抬高时
++// 离地高度立刻变小、飞控自己把飞机顶上去，才是稳定的仿地行为。
++//
++// 两条安全限制：切换/接管时从飞机当前高度接上、按 ALT_RATE_MAX 限速过渡，
++// 不会出现高度指令阶跃。
++enum AltMode
++{
++  ALT_MODE_TRAJ = 0,    // 原样用轨迹算出来的高度（默认）
++  ALT_MODE_FIXED = 1,   // 钉死在 alt_fixed_z_（uwb_imu 定位源下即"恒定离地高度"）
++};
++int alt_mode_ = ALT_MODE_TRAJ;
++double alt_fixed_z_ = 1.5;
++double alt_cmd_z_ = 0.0;          // 限速之后真正发出去的高度
++bool alt_cmd_valid_ = false;
++constexpr double ALT_RATE_MAX = 0.6;   // m/s，切进来/改目标时的过渡速度
++
++void altModeCallback(std_msgs::msg::Int32::ConstSharedPtr msg)
++{
++  if (msg->data != alt_mode_)
++    alt_cmd_valid_ = false;       // 切模式时从当前高度重新接上，避免跳变
++  alt_mode_ = msg->data;
++}
++
++void altParamCallback(geometry_msgs::msg::Point::ConstSharedPtr msg)
++{
++  alt_fixed_z_ = msg->x;          // 只用 x：要钉住的高度（米）
++}
++
++// 把轨迹算出来的高度换成设定的固定高度。返回是否换过。
++// vel/acc/jerk 的 z 必须跟着改成"命令自身的变化率/0"，不能留轨迹原值，也不能
++// 写成"命令与轨迹之差"——第一版就是那么写的，等于一直给一个恒定的速度前馈，
++// 飞机被顶着走、位置环再拉回来，结果是 ±0.25 米的持续振荡，goto() 因为高度差
++// 永远判不到点（2026-09-24 实测，编队第一个航点就卡住、僚机跟着挤成一团）。
++bool applyFixedAltitude(Eigen::Vector3d &pos, Eigen::Vector3d &vel,
++                        Eigen::Vector3d &acc, Eigen::Vector3d &jerk, double dt)
++{
++  if (alt_mode_ != ALT_MODE_FIXED || !have_odom_)
++    return false;
++
++  if (!alt_cmd_valid_)
++  {
++    alt_cmd_z_ = odom_pos_(2);    // 从飞机当前高度接上，别从轨迹高度跳
++    alt_cmd_valid_ = true;
++  }
++  const double dt_clamped = std::max(1e-3, std::min(dt, 0.1));
++  const double step = ALT_RATE_MAX * dt_clamped;
++  const double before = alt_cmd_z_;
++  alt_cmd_z_ += std::max(-step, std::min(alt_fixed_z_ - alt_cmd_z_, step));
++
++  pos(2) = alt_cmd_z_;
++  vel(2) = (alt_cmd_z_ - before) / dt_clamped;
++  acc(2) = 0.0;
++  jerk(2) = 0.0;
++  return true;
++}
++
+ void odomCallback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
+ {
+   odom_pos_ << msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z;
+@@ -518,6 +586,14 @@
+   }
+   time_last = time_now;
+ 
++  // 定高开关：把轨迹高度换成设定值（默认关，见 applyFixedAltitude）
++  {
++    static rclcpp::Time alt_last = time_now;
++    const double alt_dt = (time_now - alt_last).seconds();
++    alt_last = time_now;
++    applyFixedAltitude(pos, vel, acc, jerk, alt_dt);
++  }
++
+   cmd.header.stamp = time_now;
+   cmd.header.frame_id = "world";
+   cmd.trajectory_flag = quadrotor_msgs::msg::PositionCommand::TRAJECTORY_STATUS_READY;
+@@ -578,6 +654,12 @@
+   auto odom_sub = node->create_subscription<nav_msgs::msg::Odometry>(
+       odom_topic, 10, odomCallback);
+ 
++  // docker_sim 2026-09-24：定高开关的两个话题（见 applyFixedAltitude 的说明）
++  auto alt_mode_sub = node->create_subscription<std_msgs::msg::Int32>(
++      "traj_server/alt_mode", 10, altModeCallback);
++  auto alt_param_sub = node->create_subscription<geometry_msgs::msg::Point>(
++      "traj_server/alt_param", 10, altParamCallback);
++
+   // docker_sim: 改成相对话题名，配合namespace=${NAMESPACE}按机分开，
+   // 避免双机场景下两架飞机的traj_server都发到同一个全局/position_cmd
+   // （跟px4ctrl_ros2_namespace.patch解决的是同一类问题）

@@ -36,6 +36,7 @@ Executor is already spinning`——这正是`reliability.py`文件头详细记�
 +定期打印进度"的阻塞方法共用的小循环，避免每个方法都重复写一遍
 "多久检查一次、多久打印一次进度、超时怎么判断"这套逻辑。
 """
+import contextlib
 import json
 import math
 import os
@@ -683,6 +684,7 @@ class DroneSDK:
     def _setup_transport(self) -> None:
         from geometry_msgs.msg import PointStamped, PoseStamped
         from mavros_msgs.msg import State
+        from sensor_msgs.msg import Range
         from nav_msgs.msg import Odometry, Path
         from quadrotor_msgs.msg import PositionCommand, TakeoffLand
         from std_msgs.msg import Empty, String
@@ -757,6 +759,16 @@ class DroneSDK:
 
         # ---- 自身里程计（进度打印用，非必须但让B6提示更有信息量） ----
         self._node.create_subscription(Odometry, 'dlio/odom_node/odom', self._on_odom, 10)
+
+        # ---- 对地测距（定高雷达）：仿地飞行要用它才知道"离地"多高 ----
+        # QoS 必须是 BEST_EFFORT：mavros 按 SensorDataQoS 发这条话题，默认的
+        # RELIABLE 订阅会直接 QoS 不兼容、一条都收不到（flight-stack 的
+        # formation_follower_node/uwb_imu_fusion_node 订同一条话题时也是这么写的）。
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        self._agl: Optional[float] = None
+        self._node.create_subscription(
+            Range, 'mavros/hrlv_ez4_pub', self._on_range,
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT))
         # 只用于起飞前 yaw 的交叉校验，见 YAW_SOURCE_AGREE_DEG
         self._node.create_subscription(PoseStamped, 'uwb/pose_abs', self._on_uwb_pose, 10)
 
@@ -780,6 +792,10 @@ class DroneSDK:
         from std_msgs.msg import Int32
         from geometry_msgs.msg import Point as _YawParamPoint
         self._yaw_mode_pub = self._node.create_publisher(Int32, 'traj_server/yaw_mode', 10)
+        # 2026-09-24：仿地飞行的两个话题，跟上面 yaw 那两个同一个套路
+        self._alt_mode_pub = self._node.create_publisher(Int32, 'traj_server/alt_mode', 10)
+        self._alt_param_pub = self._node.create_publisher(
+            _YawParamPoint, 'traj_server/alt_param', 10)
         self._yaw_param_pub = self._node.create_publisher(_YawParamPoint, 'traj_server/yaw_param', 10)
 
         # ---- set_camera_view() ----
@@ -873,6 +889,11 @@ class DroneSDK:
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self._current_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    def _on_range(self, msg: Any) -> None:
+        r = float(msg.range)
+        if msg.min_range <= r <= msg.max_range:     # 贴地/超量程的读数丢掉
+            self._agl = r
 
     def _on_uwb_pose(self, msg: Any) -> None:
         q = msg.pose.orientation
@@ -1219,6 +1240,89 @@ class DroneSDK:
         self._progress(f'朝向 {math.degrees(self.get_current_yaw()):.1f}°'
                        + ('' if ok else f'（{timeout:.0f}秒内没转到位）'))
         return ok
+
+    def set_fixed_altitude(self, height_m: float) -> None:
+        """把飞行高度钉死在设定值，规划器轨迹里的高度变化不再生效。
+
+        2026-09-24新增。**配合本项目默认的 LOCALIZATION_SOURCE=uwb_imu，这就是
+        仿地飞行**：那套定位方案的 z 本来就是"离地高度"（`uwb_imu_fusion_node`
+        把 测距雷达range×cos(roll)×cos(pitch) 喂给飞控当高度观测，x/y 才用
+        UWB），所以命令高度恒定 = 离地高度恒定，地面抬高时飞机自己跟着抬。
+        选手程序这边不需要读雷达、不需要知道地形在哪。
+
+        为什么还需要这个开关：规划器是高频重规划的，它给出的轨迹高度本身在
+        波动（实测同一段航线里轨迹 z 在 0.97~2.33 米之间跑），地形起伏带来的
+        那点高度变化会被这种波动淹没，飞机不会稳定跟着地面走。钉死之后才是
+        稳定的仿地行为。
+
+        ⚠️ 定位源不是 uwb_imu 时（比如 gt/dlio，z 是绝对高度），这个开关就只是
+        "定高飞行"，不具备仿地效果。
+        ⚠️ 用完记得`set_fixed_altitude_off()`：开关持续生效，返航/降落段通常
+        不想要它。
+
+        Args:
+            height_m: 要钉住的高度，**这架飞机自己局部坐标系下的 z**，跟
+                `goto()`的第三个参数同一套。世界高度要先换算：
+
+                    _, _, z = sdk.world_to_local(0.0, 0.0, 世界高度)
+                    sdk.set_fixed_altitude(z)
+
+                ⚠️ 两者必须一致，否则飞机会卡住：`goto()`按三维距离判到点
+                （阈值0.3米），定高把 z 钉在别处时高度差永远消不掉，飞机水平
+                到位了却判不到点，一直等到超时。2026-09-24 实测过——局部系 z
+                原点对应世界0.467米，直接把世界高度2.0传进来，飞机钉在局部
+                2.0、航点要的是局部1.533，差0.45米，编队第一个航点就卡死。
+        """
+        from geometry_msgs.msg import Point as _AltParamPoint
+        from std_msgs.msg import Int32
+
+        param = _AltParamPoint()
+        param.x = float(height_m)
+        self._alt_param_pub.publish(param)
+        msg = Int32()
+        msg.data = 1  # ALT_MODE_FIXED
+        self._alt_mode_pub.publish(msg)
+        self._progress(f'定高已开启（钉在 {height_m:.2f} m）')
+
+    @contextlib.contextmanager
+    def fixed_altitude(self, height_m: float):
+        """`with`块里飞的这段航线全程定高，块退出（含异常）自动关掉。
+
+        2026-09-24新增，用户要求："远距离转场这些走ego-planner的航段，飞行高度
+        钉死在比如2米"。远距离`goto()`由规划器高频重规划，轨迹 z 本身在波动
+        （实测同一段航线里 0.97~2.33 米），实际表现就是转场途中飞机会压得很低
+        ——高层火情段返航时实测到过。钉死之后整段航线高度恒定。
+
+        用法（钉住的高度必须跟这段航线 `goto()` 用的 z 一致，见 Args）：
+
+            with sdk.fixed_altitude(2.0):
+                sdk.goto(x, y, 2.0)        # 转场段，高度全程 2.0
+            sdk.goto_direct(x, y, 0.8)     # 出了with，定高已关，可以自由升降
+
+        Args:
+            height_m: 要钉住的高度，跟`goto()`第三个参数同一套局部坐标系。
+                **必须跟这段航线 goto 的 z 相等**，否则飞机水平到位了高度差
+                消不掉、永远判不到点（详见`set_fixed_altitude()`的说明）。
+
+        Note:
+            只管本机走 traj_server 的那条路（`goto()`）。`goto_direct()`/精准
+            降落/僚机编队跟随都是另一条旁路，不受这个开关影响；降落也不受影响
+            （`land()`走飞控自己的AUTO_LAND）。
+        """
+        self.set_fixed_altitude(height_m)
+        try:
+            yield
+        finally:
+            self.set_fixed_altitude_off()
+
+    def set_fixed_altitude_off(self) -> None:
+        """关掉定高，高度回到"按规划器轨迹走"（默认行为）。"""
+        from std_msgs.msg import Int32
+
+        msg = Int32()
+        msg.data = 0  # ALT_MODE_TRAJ
+        self._alt_mode_pub.publish(msg)
+        self._progress('定高已关闭（高度按轨迹走）')
 
     def set_camera_view(self, view: str) -> None:
         """把这架飞机唯一那个真实相机转到`'front'`（前视）或`'down'`
@@ -1598,7 +1702,8 @@ class DroneSDK:
     # 2.1节能力7：编队跟随开关（一次性触发调用，不做持续订阅/计算）
     # ------------------------------------------------------------------
 
-    def start_formation_follow(self, follow_distance_m: float, timeout: float = 10.0) -> None:
+    def start_formation_follow(self, follow_distance_m: float, timeout: float = 10.0,
+                               altitude_agl_m: Optional[float] = None) -> None:
         """启用`formation_follower_node`（跟随目标固定是构造`DroneSDK`时
         传入的`teammate_namespace`，选手不需要指定跟谁——方案2.1节第7条：
         "队友的namespace不是SDK自己猜的"）。
@@ -1607,9 +1712,35 @@ class DroneSDK:
         架构原则：编队跟随的实时控制回路常驻在`formation_follower_node`
         里，SDK这一层绝对不实现控制回路本身）。
 
+        Args:
+            follow_distance_m: 沿长机轨迹的跟随间距下限。
+            timeout: 等对方确认的超时秒数。
+            altitude_agl_m: 僚机保持的**离地高度**。不传就沿用
+                `formation_follower_node`自己的默认值（1.5米）。
+
+                为什么要能传：僚机的高度既不跟轨迹也不跟长机，而是这个节点
+                按机载定高雷达保持的固定离地高度（所以僚机天然就是仿地飞行）。
+                长机的巡航高度写在选手程序里、僚机的写在节点参数里，两处
+                各管各的——2026-09-24 把长机编队高度从1.5提到2.5时就撞上了：
+                长机2.5米、僚机还在1.5米，编队变成一高一低。传这个参数等于
+                让任务程序统一决定两机高度，不再靠"两个默认值碰巧相等"。
+
         Raises:
             ActionFailedError: `~/set_parameters`调用超时或被拒绝。
         """
+        if altitude_agl_m is not None:
+            # 高度参数对两条通路（action / 参数）都生效：节点每个控制周期都重新
+            # 读它（见 formation_follower_node 里 follow_altitude_agl_m 的用法）
+            ok = self._call_set_parameters_blocking(
+                self._formation_follower_params_cli,
+                {'follow_altitude_agl_m': float(altitude_agl_m)},
+                timeout_s=timeout,
+            )
+            if not ok:
+                raise ActionFailedError(
+                    action_name='start_formation_follow:altitude', timeout_s=timeout,
+                    namespace=self.namespace)
+            self._progress(f'僚机保持离地高度设为 {altitude_agl_m:.2f} m')
         # 2026-09-20：优先走机载的 FormationFollow action——它把跟随拆成
         # 入列(join)/保持(track)/出列(break)三个阶段，这个调用会阻塞到
         # "入列完成"才返回，调用方因此第一次能确切知道"队形组好了"，而
@@ -2788,6 +2919,30 @@ class DroneSDK:
             f'退回里程计瞬时值{math.degrees(fallback):.1f}°继续起飞'
         )
         return fallback
+
+    def get_agl(self, timeout: float = 5.0) -> float:
+        """离地高度（米），来自机载朝下的定高雷达，不是里程计的 z。
+
+        2026-09-24新增，给"仿地飞行"用：里程计的 z 是相对起飞点的**绝对高度**，
+        地面本身有起伏（比赛场地里有个 0.25 米高的仿地模块台面）时，保持 z 不变
+        等于离地高度在变；要贴着地形飞就得按这个读数调 z。
+
+        真机和仿真是同一条话题（`mavros/hrlv_ez4_pub`，同一颗朝下的雷达），
+        所以用它写的仿地逻辑不含仿真专有依赖。
+
+        Raises:
+            DetectionTimeoutError: 超过`timeout`秒没收到有效读数（贴地时读数会
+                低于雷达最小量程被丢掉，刚起飞那一刻可能取不到）。
+        """
+        ok = self._poll_until(
+            lambda: self._agl is not None,
+            timeout,
+            lambda: self._progress('等待定高雷达读数…'),
+        )
+        if not ok:
+            raise DetectionTimeoutError(
+                class_id='mavros/hrlv_ez4_pub', timeout_s=timeout, namespace=self.namespace)
+        return self._agl
 
     def get_current_yaw(self, timeout: float = 10.0) -> float:
         """读取自己当前的实际yaw角（弧度，局部坐标系，跟`goto()`/
