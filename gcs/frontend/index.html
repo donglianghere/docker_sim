@@ -2859,20 +2859,25 @@ function renderHwFleetRow(ns) {
       <div class="configBoxTitle">④ 配置面板 · cam0(前视)检测模式</div>
       <div class="field"><label>检测模式</label>
         <select id="hwFleetCam0Mode_${ns}">
-          <option value="yolo" ${st.cam0Mode === "yolo" ? "selected" : ""}>yolo</option>
+          <option value="yolo" ${st.cam0Mode === "yolo" ? "selected" : ""}>yolo（画面叠加检测框）</option>
+          <option value="yolo_nodraw" ${st.cam0Mode === "yolo_nodraw" ? "selected" : ""}>yolo（画面直通，不叠加检测框）</option>
           <option value="qr" ${st.cam0Mode === "qr" ? "selected" : ""}>qr</option>
           <option value="apriltag" ${st.cam0Mode === "apriltag" ? "selected" : ""}>apriltag</option>
+          <option value="raw" ${st.cam0Mode === "raw" ? "selected" : ""}>raw（纯视频直通，不做任何识别）</option>
           <option value="stop" ${st.cam0Mode === "stop" ? "selected" : ""}>stop</option>
         </select></div>
       <div class="field"><label>MJPEG端口</label><input id="hwFleetCam0MjpegPort_${ns}" value="${st.cam0MjpegPort}"></div>
+      <div class="row"><span class="v" style="color:#6b7684;font-size:12px;">2026-09-23新增两个"直通"选项：yolo（不叠加检测框）=照常跑YOLO、检测结果照常发布，只是地面拉到的画面不画框；raw=飞机上完全不做推理，只回传相机原画面。一路相机同一时刻只能选一个（Argus会话限制）。</span></div>
     </div>
     <div class="configBox">
       <div class="configBoxTitle">④ 配置面板 · cam1(下视)检测模式</div>
       <div class="field"><label>检测模式</label>
         <select id="hwFleetCam1Mode_${ns}">
-          <option value="yolo" ${st.cam1Mode === "yolo" ? "selected" : ""}>yolo</option>
+          <option value="yolo" ${st.cam1Mode === "yolo" ? "selected" : ""}>yolo（画面叠加检测框）</option>
+          <option value="yolo_nodraw" ${st.cam1Mode === "yolo_nodraw" ? "selected" : ""}>yolo（画面直通，不叠加检测框）</option>
           <option value="qr" ${st.cam1Mode === "qr" ? "selected" : ""}>qr</option>
           <option value="apriltag" ${st.cam1Mode === "apriltag" ? "selected" : ""}>apriltag</option>
+          <option value="raw" ${st.cam1Mode === "raw" ? "selected" : ""}>raw（纯视频直通，不做任何识别）</option>
           <option value="stop" ${st.cam1Mode === "stop" ? "selected" : ""}>stop</option>
         </select></div>
       <div class="field"><label>MJPEG端口</label><input id="hwFleetCam1MjpegPort_${ns}" value="${st.cam1MjpegPort}"></div>

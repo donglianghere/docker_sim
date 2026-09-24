@@ -1441,6 +1441,15 @@ def hw_fleet_stack(ns: str, req: HwFleetStackReq):
             if not mode:
                 continue
             body = {"cam": cam, "mode": mode}
+            # 2026-09-23：地面拉到的画面要"直通"(不叠加检测框)时，本地
+            # 配置里存的是合成值yolo_nodraw——飞机端接口没有这个mode，
+            # 它认的是mode=yolo + mjpeg_draw_detections=false，这里做
+            # 翻译。之所以在GCS侧合成成一个下拉选项而不是给用户多一个
+            # 复选框：选手面板宁可少一个控件，也不要出现"mode选了raw但
+            # 画框复选框还勾着"这种自相矛盾的组合。
+            if mode == "yolo_nodraw":
+                body["mode"] = "yolo"
+                body["mjpeg_draw_detections"] = False
             if cfg.get(port_key):
                 body["mjpeg_port"] = cfg[port_key]
             try:
@@ -1462,6 +1471,12 @@ def hw_fleet_stack(ns: str, req: HwFleetStackReq):
 # 目前UI没有暴露对应输入框（跟老版本UI的范围保持一致，只暴露mode+
 # mjpeg_port这两个最常用的），但模型里留着，以后要加输入框直接能用，
 # 不用再改这个模型。
+# 2026-09-23：mode新增raw（纯视频直通，飞机端不加载engine不推理，只把
+# 相机原始帧推给MJPEG）；mjpeg_draw_detections=false则是"照常跑YOLO、
+# 检测消息照发，但地面拉到的画面不叠加检测框"。两者都是飞机端
+# control_server.py POST /vision/mode 原生支持的取值，这里只是把字段
+# 放进模型让它能透传。GCS本地配置里那个合成值yolo_nodraw也在这里翻译
+# （跟hw_fleet_stack()里自动下发那段同一套规则）。
 class HwFleetVisionModeReq(BaseModel):
     cam: str
     mode: str
@@ -1471,13 +1486,18 @@ class HwFleetVisionModeReq(BaseModel):
     camera_framerate: int | None = None
     publish_rate_hz: float | None = None
     mjpeg_port: int | None = None
+    mjpeg_draw_detections: bool | None = None
 
 
 @app.post("/api/hw-fleet/{ns}/vision-mode")
 def hw_fleet_vision_mode(ns: str, req: HwFleetVisionModeReq):
     # exclude_none——没填的字段不传，让飞机端接口自己的默认值生效（接口
     # 文档3.5节表格里的默认值），不越权替用户做决定。
-    return _hw_fleet_proxy(ns, "POST", "/vision/mode", req.model_dump(exclude_none=True), timeout=20)
+    body = req.model_dump(exclude_none=True)
+    if body.get("mode") == "yolo_nodraw":
+        body["mode"] = "yolo"
+        body["mjpeg_draw_detections"] = False
+    return _hw_fleet_proxy(ns, "POST", "/vision/mode", body, timeout=20)
 
 
 class HwFleetRenameReq(BaseModel):
