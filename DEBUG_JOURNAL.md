@@ -35461,6 +35461,131 @@ flight-stack 12.9G、docker_sim-gcs 4.2G、gcs-backend 0.7G、contestant-sdk 1.4
 对照实验只剩宿主机一个变量，也不依赖目标机外网重build），代码rsync排除runtime_logs*；
 目标机需先装docker+compose插件+NVIDIA驱动+nvidia-container-toolkit；建议走有线网。
 
+## 2026-09-19（续）迁移到192.168.2.103：代码+镜像已传完，等目标机装Docker
+
+- 目标机：Ubuntu 22.04.5、**内核6.8.0-138（HWE，跟本机同代，对照实验验证不了"旧内核"变量，要验证需切5.15 GA内核）**、
+  32核、15G内存、RTX 5060 Laptop（驱动595.91已装）、磁盘剩863G；Docker未装。用户robots，免密SSH已配。
+- 本机`docker save|zstd -3`打包到`/home/robots/migrate_103/`：sim-world 6.8G、flight-stack 3.5G、gcs 887M、
+  gcs-backend 197M、contestant-sdk 323M，共12G，带SHA256SUMS。
+- rsync（--partial可续传，无线约8.8MB/s）：代码11:46→12:04（排除runtime_logs*，到`/home/robots/ai_uav/`，
+  含~/ai_uav下启动脚本，路径与本机一致无需改）；镜像12:04→12:24到`/home/robots/migrate_103/`，
+  目标机`sha256sum -c`五个全部通过。
+- 待办：用户装docker.io+docker-compose-v2+nvidia-container-toolkit并重新登录，然后验证GPU进容器、
+  `zstd -dc *.tar.zst | docker load`、起仿真跑冻结对照测试。
+
+## 2026-09-19（续）.103环境安装完成、镜像已加载；用户问"6.8内核指本机容器还是本机"
+
+- 用户要求我来装。.103上`sudo -n`免密可用。`docker-compose-v2`在jammy源里没有候选，改走Docker官方源
+  装`docker-ce/cli/containerd.io/buildx/compose-plugin`（Docker 29.8.1、Compose v5.5.1）；
+  nvidia-container-toolkit 1.20.1走NVIDIA官方源，`nvidia-ctk runtime configure`+重启docker。
+  **.103的WiFi访问外网频繁"连接被对方重置"，curl/apt都要加重试；Docker Hub(registry-1.docker.io)直接超时拉不到**
+  ——无所谓，项目镜像全部靠save/load本地搬，`docker compose config --images`确认sim/gcs两套compose
+  引用的镜像（sim-world、flight-stack、docker_sim-gcs、gcs-backend）都已在本地，不会触发拉取。
+- 5个镜像`zstd -dc|docker load`14:24–14:26完成，大小与本机一致；`docker run --gpus all --entrypoint nvidia-smi
+  sim-world:latest -L`看到RTX 5060，GPU直通OK。
+- 答用户：6.8指**宿主机内核**（本机6.8.0-124、.103为6.8.0-138 HWE）；容器没有自己的内核，共享宿主机内核，
+  所以两台都是6.8，对照实验分不出"内核版本"这个变量；要验证需.103装并启动22.04 GA内核5.15（linux-generic）。
+
+## 2026-09-19（续）.103上Clash Verge切全局报"Connection failed, I/O error: 权限不够 (os error 13)"
+
+根因：.103另有用户`hdl-02`(uid/gid 1000，机器原主人)，`/tmp/verge`（Verge放mihomo控制socket
+`verge-mihomo.sock`的目录）属主是`root:hdl-02`、权限2770，空目录，是之前遗留（hdl-02当前无进程）。
+现在以robots(uid 1001，不在hdl-02组)运行Clash Verge 2.5.1，`verge-mihomo -ext-ctl-unix
+/tmp/verge/verge-mihomo.sock`建不了socket（`ss -x`里确实没有这个socket，只有127.0.0.1:7897），
+GUI连不上内核，所有模式切换都失败；`latest.log`从14:15起持续报os error 13。
+修复：删除或改名`/tmp/verge`后重启Clash Verge让它以robots身份重建。我尝试`sudo rm`/`sudo mv`均被
+Claude Code权限分类器拦截，交给用户手动执行。/tmp重启后自动清空，但若hdl-02的Verge系统服务再次运行
+可能又建出同样的目录，届时需在Verge设置里重装服务模式或卸载hdl-02遗留的服务。
+
+## 2026-09-19（续）.103补齐build所需基础镜像；核实mighty-*镜像是否被引用
+
+- 查Dockerfile的FROM：`sim-world`/`flight-stack`都`FROM mighty-base:humble`（build_sim.sh找不到会直接退出），
+  `Dockerfile.base`/`contestant-sdk`/`gcs/Dockerfile`是`FROM ros:humble-ros-base-jammy`，`gcs/backend`是
+  `FROM python:3.11-slim`。`mighty-perception:humble`全项目无引用，不用传。
+- 已传到.103并核对镜像ID与本机一致：`ros:humble-ros-base-jammy`(1813d3c8)、`python:3.11-slim`(45a610eb，
+  本机原来没有，直连Docker Hub超时，改`docker pull docker.m.daocloud.io/library/python:3.11-slim`再tag)、
+  `mighty-base:humble`(bb44fb68，压缩1.3G，15:22–15:25)。.103现有8个镜像，运行+重新build的基础镜像全齐。
+- 踩坑：排队脚本`while pgrep -f "docker save ros:..."`会匹配到**自己的命令行**，永远等不完，白等18分钟。
+  以后等前一个后台任务用PID或文件标志，不要用`pgrep -f`匹配自己命令行里也有的字符串。
+- build仍需在线apt（约20处）/pip/1处git clone，取决于.103外网（WiFi到外网常被重置）；本机docker用
+  registry-mirrors（1panel.live、daocloud），.103的daemon.json目前只有nvidia runtime配置，未加加速器。
+
+## 2026-09-19（续）用户问：镜像加速器是什么？.103还跟本机有关吗？build要连本机吗？（纯问答）
+
+答：镜像加速器=daemon.json里的`registry-mirrors`，国内第三方服务器（1panel.live、daocloud）代理Docker Hub，
+跟本机无关。.103已完全独立：镜像、代码都是副本，build不连本机。build时FROM的基础镜像都已在.103本地，
+不会去拉Docker Hub，所以加速器对当前build不是必需（纠正上一条"建议配加速器"的必要性），只为以后换/新增
+基础镜像；build真正依赖的是apt/pip/git外网。唯一的"联系"：两边代码是各自一份，本机改动不会自动同步到.103。
+
+## 2026-09-19（续）.103配置Docker镜像加速器；发现.103系统DNS为空
+
+- `/etc/docker/daemon.json`备份为`daemon.json.bak-20260919`，保留nvidia runtime，加
+  `registry-mirrors: [docker.1panel.live, docker.m.daocloud.io]`，重启docker，`docker info`确认生效。
+  .103上GCS两个容器(restart策略no)被重启波及，按用户要求保持关闭。
+- 测`docker pull hello-world`失败：`lookup docker.1panel.live on 127.0.0.53:53: server misbehaving`。
+  排查：**.103系统DNS完全没配**——WiFi连接`uav`是`ipv4.method manual`且`ipv4.dns`为空，`resolvectl dns`
+  各网卡都是空的，连www.baidu.com都解析不了；外网IP能通，`nslookup`直接指定192.168.2.1/223.5.5.5/
+  119.29.29.29都能解析。.103在14:45重启过，之前apt能用可能是靠Clash接管DNS，重启后Clash内核控制通道
+  又因/tmp/verge权限坏了。修复方案：给`uav`连接配`ipv4.dns`（待用户确认，因为.103只有这条WiFi、改网络
+  配置有断SSH风险）。
+- 用户确认后执行（nohup在.103本地跑，防SSH闪断中途中断）：`nmcli con mod uav ipv4.dns "192.168.2.1 223.5.5.5
+  119.29.29.29" && nmcli dev reapply wlp18s0`，SSH未断。验证：`resolvectl dns wlp18s0`三个服务器都在，baidu、
+  daocloud能解析；`docker pull hello-world`经加速器成功并能运行（测试后已删掉该镜像）。配置写在连接里，重启后保留。
+
+## 2026-09-19（续）用户问：之前所有相机测试是不是直接测的Gazebo仿真相机输出？（纯问答，重要反思）
+
+**不是，绝大多数测的是经过ROS桥之后的下游。** 相机数据链路分三层：①Gazebo传感器渲染→Gazebo原生transport
+话题`/gazebo/default/.../image`；②gzserver进程内`libgazebo_ros_camera.so`转成ROS2 `.../image_raw`；
+③`qr_apriltag_detect_node`订阅后打`[临时调试]`日志。历史测试：
+- 冻结复现率统计（09-18四轮、3轮×10分钟、09-19）、09-16 front/down帧数对比（156:47、反转后73:195）、
+  down纯色/自遮挡的像素统计——**全部是第②/③层**（检测节点日志计数、rclpy抓帧）。
+- 第①层只在09-18冻结排查和09-19各做过一次`gz topic -z`**频率**抽查（~6.6Hz，冻结时也正常），
+  从未看过原生层的画面内容，也从未在双相机阶段测过原生层各相机的实际频率。
+- MJPEG调试流已证实不可靠。
+**推论**：09-16"Gazebo FIFO抢渲染"的结论依据是ROS侧回调计数，没有在原生层验证过——"down被饿死"
+可能部分甚至全部是ROS发布端同一个冻结/丢帧问题的表现，而不是渲染层抢占。联网查到的引擎顺序渲染限制
+是真实存在的，但它在本项目里到底贡献多少没实测。
+**建议下一步**：在原生层直接测（双相机配置下分别`gz topic -z`每路相机频率）；若原生层一直健康，可写一个
+gzserver进程外的独立桥接节点（订阅Gazebo transport图像话题→发ROS2 image_raw），绕开`libgazebo_ros_camera.so`，
+这同时可能解决冻结和"抢渲染"两个问题。
+
+## 2026-09-19（续）原生层补测：每机前视+下视两个独立camera传感器，双机4相机，30分钟——零冻结、无抢渲染
+
+**配置**：本机，不改主compose，用scratchpad里`camtest/docker-compose.camtest.yml` override设
+`CAMERA_TYPE_NX0x=camera`、`CAMERAS_NX0x=down,front`、flight-stack `CAMERAS=down,front`；完整stop+rm+up（16:30:06）。
+sim-world为apt官方gazebo_ros_pkgs版（09-19 10:23 build）。
+**探针**：①原生层`gz_cam_probe`（C++，Gazebo transport直接订阅4个`/gazebo/default/NX0x/NX0x_{down,front}_camera_link/
+.../image`，每10秒报墙钟Hz、按消息时间戳算的仿真Hz、抽帧像素mean/std）；②ROS层`ros_cam_probe.py`（rclpy，QoS与
+检测节点一致，订阅4个image_raw）。两者每0.5秒查"距上一帧>5秒"或"60秒无首帧"即自动停测（用户要求"中断过大即停"）。
+**踩坑**：flight-stack里没有`/tmp/ros2_env_setup.sh`，ROS探针第一次没设`ROS_DOMAIN_ID=21`/CycloneDDS配置，
+4路全0帧是假象（检测节点当时在正常收帧）；手动以正确环境重启，ROS层比原生层晚约50秒起算。
+另外编排脚本初版残留`grep /proc/1/fd/1`会永久阻塞，第一次启动（16:23）作废。
+
+**结果（178个10秒窗口，16:30→17:00）**：
+- 原生层：4路相机**全部窗口仿真时间10.00Hz**（=update_rate），墙钟6.3~6.7Hz（RTF≈0.66）；
+  **零中断**。唯一偏离：NX02_front有若干窗口**高于**10Hz（最高14.9Hz，集中在前12分钟，累计多约310帧后稳定），
+  没有任何相机低于10Hz——**前视/下视之间、两机之间都没有任何"抢渲染/饿死"迹象**。
+- ROS层：4路全程收帧，最低窗口6.3Hz，**零中断**，帧数与原生层一一对应（差值≈晚起的50秒）。
+- 下视画面mean=178 std=0（背景灰）：飞机停地面，机身原点z=0.054，下视相机再低0.0217→离地约3.2cm，
+  小于近裁剪面`<clip><near>0.05`→地板被裁掉。是测试条件问题，不是故障；本轮只能证明下视帧率，不能证明内容。
+  前视mean≈163~169 std≈66~68，有真实内容。
+**对比**：同一台机器、同一份sim-world镜像，今天上午switchable单相机配置第1轮就冻结（NX01 0帧、NX02 379s冻）；
+09-16"FIFO抢渲染"（156:47）本轮也完全没复现。
+**混杂因素（未排除）**：①相机结构不同（fixed joint独立camera vs revolute关节+`libgazebo_ros_joint_pose_trajectory.so`）；
+②本轮从开机起就有原生层外部订阅者（gz_cam_probe），可能改变传感器/插件行为（观察者效应）；③只测了1轮。
+下一步建议2×2对照：camera配置不挂原生探针 / switchable配置挂原生探针。容器保留未删。
+
+## 2026-09-19（续）A组对照：同样4个独立camera传感器，**不挂原生层探针**，只测ROS层，30分钟——零冻结
+
+配置同上一轮（camtest override，CAMERA_TYPE=camera，down,front），完整stop+rm+up（17:04:27），`NO_GZ_PROBE=1`，
+ROS探针DDS环境直接写死`ROS_DOMAIN_ID=21`+CycloneDDS（这次开局就对）。17:04:45→17:34:39，178个10秒窗口：
+4路全程收帧、**零中断**；NX01两路最低6.4/最高7.7/平均6.81Hz，NX02两路最低6.5/最高7.9/平均6.75Hz；
+同一架飞机的前视/下视每个窗口帧数完全一致（每机两路累计都是12113 / 12017）。末尾Traceback是pkill探针时
+rclpy的ExternalShutdownException，正常。日志存`camtest/runA_camera_noprobe/`。
+**结论**：排除"原生层探针（观察者效应）让相机不冻"这个混杂因素——独立camera传感器配置本身在本机双机4相机下
+稳定30分钟。冻结现在只在switchable（单相机+revolute关节+joint_pose_trajectory插件）配置下观察到过（今天上午）。
+下一步B组：switchable配置+原生层探针，确认冻结是否跟可动关节方案绑定。容器保留未删。
+
 ## 2026-09-19 相机冻结专项仿真测试：仿真相机本身一直正常出图，"冻结"实际发生在`qr_apriltag_detect_node`的DDS接收端——前三天的排查方向基本搞错了
 
 **背景**：09-18起一直把"`qr_apriltag_detect_node`的`[临时调试]`日志停止刷新"当成"相机冻结"的判据，并据此推定问题在`libgazebo_ros_camera.so`发布端。今天的测试把"相机本身有没有在发布"和"检测节点有没有在收"拆开分别测。所有测试均未改仓库代码（临时配置全部用scratchpad里的compose override挂载注入）。
@@ -35498,6 +35623,17 @@ flight-stack 12.9G、docker_sim-gcs 4.2G、gcs-backend 0.7G、contestant-sdk 1.4
 `docker_sim/tests/20260919_相机冻结专项测试/`（见该目录`README.md`）。测试1、测试2的原始日志和证据文件
 （gzserver与检测节点线程栈、socket丢包快照、两轮频率记录）存放在会话临时目录，归档时已被系统清理、无法
 找回，上文引用的数据来自当时的分析输出。
+
+## 2026-09-20 .103改主机名(KH-hdl02→kanghe)后google-chrome起不来：陈旧的Chrome单实例锁
+
+`journalctl -b | grep chrome`直接给出根因（不是X授权、不是DNS）：
+`process_singleton_posix.cc:365 其他计算机(KH-hdl02)的另一个Google Chrome进程(4778)好像正在使用此个人资料`。
+Chrome的`~/.config/google-chrome/SingletonLock`是个符号链接，内容是"主机名-PID"（这里`KH-hdl02-4778`），
+改主机名后Chrome认为资料被"另一台电脑"占用而拒绝启动。`pgrep chrome`确认无进程，纯残留锁。
+**修复**：删掉`SingletonLock`/`SingletonCookie`/`SingletonSocket`三个符号链接（只是链接，不含用户数据，
+书签/密码/登录态不受影响，Chrome下次启动自建）。
+**顺带修**：`/etc/hosts`的`127.0.1.1`还写着`KH-hdl02`（改名时没同步），已备份`/etc/hosts.bak-20260920`后改成`kanghe`；
+否则本机解析不到自己，会引起sudo变慢等一类问题。
 
 ## 2026-09-20 相机/检测节点续测：双相机恢复验证、真实目标上空检测验证、冻结复现失败（6轮未复现）
 
@@ -35831,6 +35967,200 @@ D5/D6 搜索阶段，长机回到起飞点立刻又飞出去找目标。改成�
 
 ---
 
+## 2026-09-23 任务机(NX02/192.168.2.102)地面拉流改"直通视频"：新增raw模式 + yolo不画框开关
+
+**问题**：任务机视频栈已起，但地面站拉到的8080/8081两路MJPEG都是**YOLO画完检测框之后**的画面
+（`yolo_detector_node._update_preview()`每帧`frame.copy()`+`cv2.rectangle/putText`后再喂
+`MjpegServer.update_frame()`），用户要的是相机原始画面直通。
+
+**先分清两种需求**（一路相机同一时刻只能有一个Argus会话，所以不是"再起一个直通节点"就能了事，
+同一sensor_id上YOLO/QR/AprilTag/直通彼此互斥）：
+- 还要检测结果、只是画面不要叠加 → `yolo_detector_node`新增参数`mjpeg_draw_detections`（默认true，
+  不传行为完全不变）。false时MJPEG推原始帧，`Detection2DArray`照常15Hz发布，顺带省掉每帧一次
+  `frame.copy()`+画框画字。
+- 压根不需要推理、只要一路干净视频 → 新增`video_stream_node.py`（取流→MJPEG，不加载engine、
+  不发任何话题），对应`POST /vision/mode`新增`mode:"raw"`。
+
+**改了哪些文件**（真机102上`~/ai_uav/docker_sim/`，同名`.bak-20260923-passthrough`备份已留）：
+- `src/vision_stack/vision_stack/video_stream_node.py`（新增）、`setup.py`（加entry point）
+- `src/vision_stack/vision_stack/yolo_detector_node.py`（`mjpeg_draw_detections`参数）
+- `scripts/control_server.py`：`_VISION_NODE_PATTERN`加`video_stream_node`（否则切模式时杀不掉旧的
+  直通进程，相机会被占住）、`mode`白名单加`raw`、yolo分支透传`mjpeg_draw_detections`、/api与文件头
+  接口说明同步
+- `scripts/vision_stack_up.sh`：`CAMx_FUNCTION=raw`、`CAMx_DRAW_DETECTIONS=false`
+- `~/ai_uav/docs/单机接口描述文件.md` 3.5节（接口契约，本机`docker_real/docs/`快照同步更新）
+- 地面站：`gcs/frontend/index.html`两路相机下拉各加"yolo（画面直通，不叠加检测框）"和
+  "raw（纯视频直通，不做任何识别）"；`gcs/backend/app.py`把本地配置里的合成值`yolo_nodraw`翻译成
+  飞机端认的`mode=yolo`+`mjpeg_draw_detections=false`（选手面板宁可少一个控件，也不要出现
+  "mode选了raw但画框复选框还勾着"这种自相矛盾组合）
+
+**部署/验证（2026-09-23现场）**：容器内`colcon build --symlink-install`（vision-stack容器不重建，
+只重编）→ `sudo systemctl restart uav-control-server` → 两种模式都实测：
+- cam0 `mode:"raw"`：地面`curl http://192.168.2.102:8080/stream.mjpg`8秒收到121帧≈15.1fps，
+  抽帧确认画面里的椅子**没有检测框**（YOLO本来必检出chair）
+- cam1 `mode:"yolo"`+`mjpeg_draw_detections:false`：`ros2 topic hz /NX02/vision/down/detections`
+  稳定15.03Hz，节点日志`MJPEG预览已启动(直通原始画面，不叠加检测框)`
+- 经GCS后端`POST /api/hw-fleet/NX02/vision-mode`下发`yolo_nodraw`/`raw`两条链路同样通
+
+**遗留/注意**：
+1. GCS后端`app.py`没有卷挂载（前端`./frontend`才有），这次是`docker cp`进`gcs-backend-1`+`docker restart`
+   让它生效——**下次`docker compose up --force-recreate`或重建镜像会回退**，需要用户择机
+   `docker compose build backend`固化。前端是挂载的，刷新浏览器即生效。
+2. **用户最终选定两路都`raw`纯直通**（验证阶段一度是cam0=raw/cam1=yolo_nodraw，那只是为了把两条路
+   各测一遍）。飞机当前实际状态=两路video_stream_node，8080/8081各≈15fps；GCS本地配置
+   (`hw_fleet_tokens.json`的NX02)也已同步存成`cam0_mode=raw`/`cam1_mode=raw`——这一步不能漏，
+   否则下次从GCS重启vision会按旧配置(yolo)自动下发，画面又回到带框。两路都raw之后飞机上不再有任何
+   视觉检测话题（`vision/*/detections`没有发布者），后续任务要用YOLO结果时记得切回来。
+3. 项目根目录那份`单机接口描述文件.md`还停在2026-08-24版本（连08-25的cam字段breaking change都没有），
+   本次没动它，要用以`docs/`下那份为准。
+4. 104(NX01)没改，只改了102(NX02)——用户明确选择暂不同步。要一致时把上面5个文件同样scp过去+
+   容器内colcon build+重启control_server即可。
+5. 本机`docker_real/`快照的定位是"104的只读镜像"，但这次把5个代码文件+`docs/单机接口描述文件.md`
+   的新版也一并放了进去（防止`video_stream_node.py`这种全新文件只存在于飞机上、丢了没处找），
+   所以现在快照里这几个文件**比104实际状态超前**；`read_hw.md`没动（那是104的现场记录，102的
+   现场记录写在102自己的`docker_sim/read_hw.md`里）。等104也同步改完，按SYNC_NOTES重跑一次
+   `rsync --delete`刷新快照即可恢复"快照==104"的语义。
+
+## 2026-09-23（续）地面站三方合并：103的09-21前端更新 ← → 本机的直通视频改动
+
+**背景**：103(kanghe，仿真/比赛开发主力机)上09-21给地面站前端做了一波更新，本机(真机侧)同一天做了
+直通视频改动，两边都动了`gcs/`，需要合并。
+
+**先摸清分叉点**（没有git，只能靠md5+时间戳+注释日期）：
+- `gcs/backend/app.py`：103那份跟本机**改动前**的版本逐字节相同 → 103没碰后端，本机改动直接推过去即可
+- `gcs/frontend/index.html`：103版292374字节(09-21)，本机改前版269KB(09-08)。diff是484行(351增58改)，
+  且本机旧版里的注释日期最新到09-08、103版含09-08并多出09-21一批 → **103是本机的线性超集，本机没有
+  独有改动会被覆盖**，可以安全地以103版为基线
+- 其余`gcs/`文件(docker-compose.yml/Dockerfile/entrypoint.sh/roslib.min.js/rviz/…)两边md5完全一致
+- `cyclonedds_gcs.xml`/`gcs_network_state.json`/`hw_fleet_tokens.json`内容不同但**故意不同步**——
+  这三个是每台机器自己的站点配置(网卡IP/对端IP/本机登记的飞机)，同步过去等于把对方的网络配置搞坏
+
+**103那波09-21更新做了什么**（合并前先看清楚，免得盲merge）：机队"一机一tab"标签条(`fleetTabBar`)
+从`#hwFleetDiscoverPanel`内部挪到常驻header、GCS网络设置独立成`#settingsPanel`、仿真/真机模式切换
+按钮挪到左栏底部+选中态配色加强、占据栅格点云订阅加了`compression:"cbor"`+`throttle_rate:500`+
+`queue_length:1`（这是整个前端唯一的大带宽话题，之前三个选项一个没设，是"真机现场面板数据时有时无"
+的原因之一）。**都没碰cam0/cam1检测模式那两个下拉**，所以本次的补丁锚点在103版里原样存在。
+
+**合并做法**：以103版index.html为基线，重放本次的16行补丁（两个select各加`yolo_nodraw`/`raw`选项+
+cam0配置框下一行说明）。校验：合并版 vs 103版=16行(只有我的补丁)，合并版 vs 本机当前版=484行
+(只有103的更新)，两个方向都干净，没有第三方漂移。
+
+**结果**：本机和103的`gcs/frontend/index.html`+`gcs/backend/app.py`现在md5完全一致
+(20d1f1b3.../6466d2fd...)，本机GCS容器里跑的那份也校验过一致。两边备份都留了：
+本机`frontend/index.html.bak-20260923-before-merge103`，103
+`frontend/index.html.bak-20260923-before-passthrough`+`backend/app.py.bak-20260923-before-passthrough`。
+103上没有跑gcs容器(它跑的是仿真:flight-stack-nx01/nx02+sim-world+contestant-sound-light)，
+所以那边只落盘、不用重启任何东西；等103要起地面站时，后端同样需要`docker compose build backend`
+（app.py是COPY进镜像的，没挂载）。
+
+**顺带摸到的两机分叉情况**（本次**没有**同步，只记录）：两台机器的`docker_sim/`已经明显分家——
+103独有80个文件(`src/contest_mission/`的几个任务节点、`src/contest_sdk/sound_light_server.py`、
+`contestant_template/`的示例任务、`tests/20260919_相机冻结专项测试/`整套记录、根目录
+`start/stop_sound_light_server.sh`、09-21更新过的`start_contestant_shell.sh`/`start_contestant_task.sh`)，
+本机独有34个(论文/文档类+`docker-compose.hw.yml`真机侧)。**103是仿真/比赛主力机，本机是真机侧+论文**，
+全量同步风险大(103那批脚本依赖的compose服务定义/SDK在本机不存在)，要同步得单独作为一件事来做。
+**用户当场明确：本次只同步地面站，其余不同步**，两机docker_sim继续分家。
+
+## 2026-09-24 地面站参数编辑器：网页里改飞机 .env 的任意参数（四层取值对照 + 只写改动）
+
+**需求**：从地面站方便地改真机 `.env` / `docker-compose.hw.yml` 里的任意参数，要图形界面、不容易犯错。
+用户最终拍板：**界面全显示、文件只写改动、放 GCS 网页**。
+
+**先摸清参数面**（104实况）：`.env` 209行 = 34个参数 + **163行注释**；`docker-compose.hw.yml` 里
+83个 `${KEY:-默认值}` 变量。也就是说**49个参数在吃compose基线默认值、.env里根本没出现**。三条结论
+决定了整个设计：
+1. 工具最该解决的不是"能编辑文件"，而是**让人看清某个参数此刻到底是多少、值从哪来**；
+2. 注释是参数的5倍且全是取值推导（V_MAX那段带三处订正演算），写回必须**行级替换**，不能解析成dict重写；
+3. 改参数只该改 `.env`；改compose默认值而 `.env` 里有覆盖 = 典型的"改了没反应"。
+
+**为什么不把compose的81个参数全量写进.env**（用户提过这个想法，评估后否掉）：compose里的默认值是
+**基线**、`.env` 是**本机覆盖**。全量固化 = 每台飞机把当时的基线冻死，以后基线更新再也传不过去。
+这不是假设——102/104的compose基线已经在分头演进：`PX4CTRL_LOW_VOLTAGE` 13.2→19.8（4S阈值改6S，
+漏改一台就是没有低压保护）、`PX4CTRL_GAIN_KP` 1.5→0.9、`KV` 1.5→1.9。改成"界面全显示、文件只写
+改动"，两头都占。
+
+**实现（三层）**：
+- 飞机端 `control_server.py` 新增 `GET /params`（83个参数 × 四层取值：default基线 / env本机覆盖 /
+  effective下次up生效 / running容器内固化，外加 stale=改了没重启）和 `POST /params`
+  （changes/remove/note/restart）。写入流程：校验 → 备份`.env.bak-时间-note` → **行级写入(保留行尾
+  注释且把注释列顶回原位)** → `docker compose config -q`语法校验(不过自动回滚) → 可选
+  force-recreate → 回读验证(重启了比对容器固化值，没重启比对compose解析值)。
+- GCS后端 `app.py`：两个透传接口，POST给130秒超时(force-recreate在真机要一分多钟)。校验全部留在
+  飞机端做，地面站不复制一份规则，避免两边漂移。
+- GCS前端 `index.html`：④配置面板新增"参数编辑器"，表格四列对照 + 搜索 + "只看本机覆盖" + 枚举项
+  自动变下拉(复用STACK_CHOICES) + "恢复基线"(走remove) + 改动高亮 + 保存前diff二次确认 +
+  **两个分开的按钮**"保存（只写.env）"和"保存并重启生效"。输入/过滤都走DOM就地更新，不重建表格
+  ——重建会冲掉正在编辑的输入框(renameDraft那段踩过的坑)。
+
+**踩到并修掉的坑**：
+1. 旧的 `update_env_file()`（POST /stack/mode在用）是 `out.append(f"{key}={value}")` **整行重写，
+   行尾注释会被冲掉**。那4个模式项恰好没有行尾注释所以一直没暴露。参数编辑器另写了保留注释的
+   `write_env_params()`，旧函数原样不动。
+2. 第一版 `_split_value_comment()` 忘了rstrip，`VEHICLE_MASS_KG=2.7          # 整机AUW...` 解析出的
+   值是 `"2.7         "`（带对齐空格），界面难看且回读比对必然对不上。改成值rstrip、垫的空格单独存
+   进gap，写回时用 `max(2, len(旧值)+len(gap)-len(新值))` 把注释顶回原来那一列。
+3. 前端模板字符串里 `"；flight-stack 未运行，"容器内实际"是..."` 用半角双引号嵌套，直接是语法错误。
+   本地没有node，用 `python3 -m venv` 装 esprima 解析整份内联JS验证——esprima不认ES2020的 `??`/`?.`
+   （原有代码已经在用5处/2处），把这两个运算符临时替换成语法位置等价的 `||`/`.` 再解析，4275行通过。
+
+**实测（104/NX01）**：
+- `GET /params` 返回83项、34项本机覆盖；`VEHICLE_MASS_KG` 显示 基线2.5 / .env 2.7 / 生效2.7 / 容器内2.7
+- 三个校验分支都正确拒绝：值里带`空格+#`、未在compose声明的key、`SLAM_BACKEND=fast_lio2`
+- 写入 2.7→2.71→2.7 两个来回（飞机端直连 + 经GCS后端各一次），`.env` 的md5最后与改动前**逐字节相同**
+  (b33e4fea...)，连注释对齐都还原；测试产生的备份已清理
+- UI用真实83参数数据渲染截图确认：四列对照、`CONTROLLER`自动变下拉、待删除行打删除线、徽标区分
+  "覆盖/基线"都正常
+
+**边界（有意不做）**：不改 `docker-compose.hw.yml` 本身。compose里非`${}`的硬编码项、挂载/privileged/
+网络模式这类结构性配置改错会让容器直接起不来，不适合远程点两下提交，仍走SSH。
+
+**遗留**：
+1. **102(NX02)当时掉线**(`No route to host`)，参数接口只部署到了104。补丁器已做成幂等脚本(要点见
+   本条"实现"段)，102恢复后按同样方式打一遍即可——注意**不能整份覆盖**，102的control_server.py带着
+   09-23那波raw直通改动，104没有(用户明确要求暂不同步)。
+2. GCS后端 `app.py` 又是 `docker cp` 进容器临时生效的(backend没有卷挂载)，需要择机
+   `cd docker_sim/gcs && docker compose build backend` 固化，否则下次force-recreate会回退。
+3. 地面站改动已同步到103(前端+后端md5一致，103没跑gcs容器，只落盘)。
+4. `docker_real/` 快照已按104实况整体刷新(.env/compose/control_server.py/docs四份md5与104一致)，
+   "快照==104"的语义恢复了。但 `src/vision_stack/` 下还留着102独有的 `video_stream_node.py` 等文件
+   （09-23那波），是**有意保留的备份**——那些文件只存在于102上，删了就没了。
+
+## 2026-09-24（续）把103的仿真系统同步回本机：单向覆盖，但保住真机侧和本机独有内容
+
+**背景**：两台机的 `docker_sim/` 已经分家很久——103(kanghe)是仿真/比赛主力机，本机是真机侧+论文。
+用户确认"本机仿真已经落后了，就是要覆盖掉"。mtime也印证：本机这批文件停在09-15~09-18，103是
+09-21~09-24（`capabilities.py`甚至是当天17:07）。
+
+**同步范围**：`rsync -av` 从 `103:~/ai_uav/docker_sim/` 到本机同名目录，**不带 `--delete`**——
+带了会把本机独有的34个文件(真机侧`docker-compose.hw.yml`、论文、真机报告、地面站手册)全删掉，
+用户要的是"同步仿真系统"，不是"镜像整个目录"。结果：**新增78个文件、覆盖35个**，共2MB。
+新增的主要是 `tests/20260919_相机冻结专项测试/`(43个)、`contestant_template/`(11个，选手示例任务)、
+`src/`(10个，含`contest_sdk/sound_light_server.py`等)、`scripts/`(6个)、`patches/`(4个)。
+覆盖的35个是仿真核心：`docker-compose.yml`、`Dockerfile.flight-stack`/`sim-world`、三个entrypoint、
+`mission_program/`、`src/contest_mission/`、`src/contest_sdk/`、两个bridge的launch。
+
+**有意排除的**：
+- `gcs/` —— 地面站当天刚做过三方合并，两边代码已一致；而103的`cyclonedds_gcs.xml`/
+  `gcs_network_state.json`/`hw_fleet_tokens.json`是它自己的站点配置(网卡IP/对端IP/登记的飞机)，
+  同步过来会把本机网络配置搞坏
+- `DEBUG_JOURNAL.md` —— 见下面"双向分叉"
+- `.env` —— 比过了，两边**逐字节相同**，不用动
+- `vendor/`/`staging/`/`live_src/`/`build`/`install`/`log`/`runtime_logs`/`models`/`backups` —— 编译产物、
+  巨型vendor目录、运行时日志
+
+**保护措施**：覆盖前把那35个文件打包进 `backups/pre-sync-from-103-20260924.tar.gz`(302K)；根目录
+那4个脚本(`start_contestant_shell.sh`/`start_contestant_task.sh`更新 + `start/stop_sound_light_server.sh`
+新增，属于仿真运行入口，配套的`sound_light_server.py`已随docker_sim过来)也同步了，原文件另存
+`backups/*.bak-20260924`。
+
+**验证**：抽查5个关键文件(compose/entrypoint/capabilities.py/mission.py/precision_servo_node.py)
+md5与103完全一致；本机独有的`docker-compose.hw.yml`/论文/手册/`TODO.md`全部还在；`gcs/`md5未变；
+同步后再跑一次dry-run，剩余差异只有上面有意排除的那几项。
+
+**⚠️ DEBUG_JOURNAL.md 是双向分叉的，不能单向覆盖**：本机726条、103有721条，**共有713条**，
+本机独有13条(真机侧：直通视频raw模式、地面站三方合并、参数编辑器……)，103独有8条(仿真侧：编队飞行
+全流程打通、声光反馈常驻程序、NX02双舵机SDK、起飞点原点锁在里程计瞬态……)。覆盖任何一方都会丢记录，
+这次两边都原样保留，合并另作一件事做。
 ## 编队第一个航点卡死 -> 根因是起飞点原点锁在了里程计瞬态上；顺带给"远距离转场"加定高（2026-09-24）
 
 **现象**：用户报"飞机卡住不动了"。编队航线第一个航点，飞机水平到位、悬停不动，
@@ -35885,3 +36215,68 @@ D5/D6 搜索阶段，长机回到起飞点立刻又飞出去找目标。改成�
 3. **侦察机每段任务结束就降落**（改 2026-09-23 定的规则）：原来是回起飞点悬停等
    任务机降落、全程只起飞一次，改成落地等、下一段再起飞。三个全流程程序里的
    `return_home_hover()` 改名 `return_home_and_land()`。
+
+## 2026-09-24（续）DEBUG_JOURNAL 三方合并：把103独有的8条并进本机这份
+
+两边同源但双向分叉：共有713条，本机独有13条(真机侧)、103独有8条(仿真侧)。这次把103那8条并进来，
+**纯加法，两边内容一条不丢**。
+
+**合并策略踩的一个坑**：第一版按"103里该条前面最近的共有条目"当锚点插入（保持原始上下文的标准
+三方合并思路），结果8条**全部挂在同一个分叉点之后**——因为两边正是从`## 2026-09-19 用户提问：
+如何把整个项目迁移到192.168.2.103`那条之后开始分家的，这8条在103里全排在它后面。插进来之后本机
+文件会变成 09-19(共有) → [103的09-19~09-24八条] → 本机的09-19(续)/09-20/09-23/09-24，时间线整个乱掉。
+改成**按日期归并**：从标题里抓 `20\d\d-\d\d-\d\d`（有一条日期写在标题末尾的括号里，
+`## 编队第一个航点卡死 -> …（2026-09-24）`，所以不能只认行首日期），插到"最后一个日期 ≤ 它的本机
+条目"之后，同日期时排在本机同日条目后面。
+
+**校验**（合并前后都做了）：本机原有727条 + 103原有721条，在合并文件里**一条都不缺**；本机条目的
+相对顺序完全保持；条目总数 727+8=735 对得上。合并前的原文件备份在
+`backups/DEBUG_JOURNAL.md.bak-20260924-before-merge103`。
+
+**同日已推回103**：推之前先核对103那份自17:16后没被改过(md5跟18:02拉取时一致)，103上另存了
+`DEBUG_JOURNAL.md.bak-20260924-before-merge-from-104side` 再覆盖。现在两台机器这份文件
+**md5完全相同(082829d5…)、都是736条**。
+
+**今后怎么维持一份**：两边还会各写各的(仿真侧在103、真机侧在本机)，下次再分叉时按同样办法合——
+关键两点：①**按日期归并**，别按"前一个共有条目"当锚点(分叉点之后的条目会全挤在一起)；②合并前后
+都要做"两边原有条目一条不缺 + 本机相对顺序不变"的校验，别凭文件大小判断(字符数≠字节数，这次差点
+误判成丢了一半内容)。
+
+## 2026-09-24（续）DEBUG_JOURNAL 加主题索引（不删原文）+ 选手容器同步核查
+
+**"日志太长要不要精炼"——结论是不精炼原文，只加一层索引。** 先看数据：736条 / 36,243行 / 158万字符，
+8月421条、9月315条≈**13条/天**；条目长度中位1,819字符、均值2,148，**最长的10条只占6%**。最后这个数字
+是关键：不存在"少数超长条目拖累全文"，长度是均匀的，问题是**条目数量本身**，平铺成时间线之后只能靠grep找。
+不删原文的三个理由：①CLAUDE.md要求所有提问经验都记在这里；②价值恰恰在细节（`_split_value_comment`
+忘了rstrip、udpsink往不可达地址阻塞连累同管线的appsink、compose restart不重读.env），删成一句话结论，
+下次遇到就复现不了推理过程；③里面有多条是**订正前一条**的（「纠错：192.168.2.103就是本机」推翻09-19那条、
+`update_env_file`注释订正），删掉任一半另一半就变误导。
+
+**做法**：`scripts/gen_journal_index.py` 解析出每条的日期/标题/行号，按关键词打主题标签（一条最多3个），
+输出 `DEBUG_JOURNAL_INDEX.md`（1534行）。每行末尾带 `L1234` 原文行号，`sed -n '1234,+60p'` 直接看全文。
+日志增长后重跑一次即可，幂等覆盖。
+
+**标签调参两轮，都是真问题**：
+1. 第一版把 `docker`/`容器`/`build` 放进"容器与镜像"关键词，结果736条里**338条(46%)**被打上这个标签——
+   这个项目几乎每条记录都会提一嘴docker，**通用词没有区分度，等于没分类**。改成只留专属词
+   (`dockerfile`/`镜像`/`entrypoint`/`force-recreate`/`colcon`)，并把打分改成"标题命中×10、正文命中封顶5"、
+   阈值10（≈必须标题出现过或正文反复出现），降到49条。
+2. 第一版有98条落进"其它"。翻出来一看全是**有明确主题、只是关键词没覆盖**的：RViz显示调整、tmux监控窗格、
+   QoS不匹配/rclcpp陷阱、偏航/升力、目标点/占据栅格。补了"可视化与调试工具""ROS2机制"两个主题 + 给
+   规划器/控制器/定位三类补关键词后降到62条(8.4%)。
+最终15个主题：定位与SLAM 231 / 规划器 204 / 真机与硬件 175 / 飞控与PX4 143 / 控制器 116 / 地面站GCS 102 /
+仿真世界 74 / ROS2机制 70 / 其它 62 / 可视化与调试 61 / 视觉与相机 53 / 流程与同步 49 / 容器与镜像 49 /
+选手SDK与任务 46 / 网络与DDS 25。
+
+**选手容器同步核查**：用户要求"把103的选手容器和相关内容也同步回来"——核查下来**上一轮同步已经全带过来了**，
+8个相关文件(`start/stop_contestant_*.sh`、`contestant_template/contestant_network.sh`、
+`Dockerfile.contestant-sdk`、`contestant-sdk-entrypoint.sh`、`contest_sdk_cyclonedds.xml`、选手定位方案.md)
+md5与103全同，外加 `src/contest_sdk/`(904K) 和 `src/contest_mission/`(940K)。
+
+**但顺带挖出一件要紧的事：`docker-compose.yml` 没有挂载任何源码目录**，所有源码都是`COPY`进镜像的
+（`Dockerfile.contestant-sdk:153 COPY src/contest_sdk`、`Dockerfile.flight-stack` COPY `staging/`+`patches/`+
+`vendor/px4ctrl_ros2`+`src/gt_odom_bridge`）。也就是说**同步了代码 ≠ 生效，必须rebuild镜像**。本机现有镜像
+`contestant-sdk`是6天前、`flight-stack`是同步之前build的，跑起来还是旧代码。
+顺着这条线查`staging`/`vendor`/`patches`（上一轮因为体积大排除掉了）：`staging`(58,843个文件)和`patches`
+**两边完全一致**，`vendor`差4个文件——补同步后发现正是 `quadrotor_msgs` 的两个新action定义
+(`FormationFollow.action`/`Takeoff.action`)，**编队飞行要用的消息接口，漏了build出来就缺**。
