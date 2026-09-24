@@ -81,6 +81,22 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Range
 from quadrotor_msgs.action import FormationFollow
 from quadrotor_msgs.msg import PositionCommand
+
+
+def _seg_progress(a, b, px: float, py: float) -> float:
+    """点(px,py)在线段 a->b 上的归一化投影（0=在 a，1=在 b，>1=已越过 b）。"""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    den = dx * dx + dy * dy
+    if den < 1e-9:
+        return 1.0
+    return ((px - a[0]) * dx + (py - a[1]) * dy) / den
+
+
+def _ang_diff(a: float, b: float) -> float:
+    """两个角度之间的最小夹角（弧度，恒为非负）。"""
+    if a is None or b is None:
+        return 0.0
+    return abs((a - b + math.pi) % (2 * math.pi) - math.pi)
 from rcl_interfaces.msg import Parameter as ParameterMsg
 from rcl_interfaces.msg import ParameterType, ParameterValue, SetParametersResult
 from rcl_interfaces.srv import SetParameters
@@ -603,6 +619,27 @@ class FormationFollowerNode(Node):
         self.declare_parameter('follow_altitude_agl_m', 1.5)
         self.declare_parameter('range_topic', 'mavros/hrlv_ez4_pub')
 
+        # ---- 分段航向（2026-09-24 用户要求，长机僚机同一套动作）----
+        # 用户原话："从起飞点开始，将 yaw 角转动一次方向，大小为当前航点指向下一个
+        # 航点的那个航向角，飞行途中锁定这个角，而后到下一个航点时以此类推。航向
+        # 转动时悬停，航向角到位后再前飞。长机、从机都一样的要求。"
+        # 僚机没有"航点"这个概念——它沿长机走过的折线飞，所以这里的等价物是
+        # **轨迹在参考点处的切线方向**：长机现在每段都锁死航向直飞，切线在一段之内
+        # 就是常值，拐角处才会跳变，跳变量超过 yaw_leg_change_deg 就认为"到了下一个
+        # 航点"，于是：锁新航向 -> 原地悬停（参考点不再前进、速度给 0）-> 转到
+        # yaw_leg_tol_deg 以内 -> 继续前飞。
+        # 默认关（False）= 保持 2026-09-20 起的行为（入列时锁定自身朝向、全程不变），
+        # 由选手程序按需打开，不改默认行为。
+        self.declare_parameter('yaw_follow_leg', False)
+        self.declare_parameter('yaw_leg_tol_deg', 5.0)
+        # 航线（世界坐标，[x0,y0,x1,y1,...]，第一个点是长机起飞点）。航向**只能**
+        # 来自这条航线：每段一个精确值，全程只在起飞点和各航点变一次，中途恒定。
+        # 2026-09-24 先试过"从长机走过的轨迹算切线"，无论短基线还是长基线弦向都
+        # 不行——长机轨迹是里程计采样点连成的折线，本身带噪声，直线段上算出来的
+        # 方向就在 ±12° 之间跳，僚机一路走走停停摇头（用户实测指出"从机中途航向
+        # 角一直在变化"）。航线是已知量，没有任何理由去估计它。
+        self.declare_parameter('leg_route_xy', [0.0])
+
         # ---- 跨机对齐（2026-09-21订正）----
         # 原来用 TF（<长机ns>/odom -> 自己的 odom）做跨机变换，实测不可靠：
         # 每架飞机的 odom 原点是开机时用 UWB 测量值各自锁定的，两次锁定误差
@@ -661,6 +698,8 @@ class FormationFollowerNode(Node):
         # 甩动，既无必要也增加失稳风险。改成入列时锁定自身当前朝向，全程
         # 保持不变。
         self._yaw_ref: Optional[float] = None
+        self._yaw_turning: bool = False      # 分段航向：正在原地转向（此时不前进）
+        self._leg_idx: int = 0               # 参考点当前走在第几段（只前进不后退）
         self._leader_last_rx: float = 0.0
         self._last_target_xy: Optional[Tuple[float, float]] = None
         self._action_busy = threading.Lock()
@@ -941,6 +980,7 @@ class FormationFollowerNode(Node):
             cruise = float(self.get_parameter('cruise_speed_mps').value)
             s_limit_gap = max(0.0, self._leader_path.total_length() - follow_distance_m)
             s_limit_lead = s_proj + float(self.get_parameter('lookahead_m').value)
+            s_hold = self._s_cmd          # 转向期间要钉回来的弧长（分段航向用）
             self._s_cmd = min(self._s_cmd + cruise * dt, s_limit_gap, s_limit_lead)
             # 只前进不后退：长机轨迹是单向增长的，参考点回退没有物理意义
             self._s_cmd = max(self._s_cmd, s_proj)
@@ -1009,10 +1049,44 @@ class FormationFollowerNode(Node):
             else:
                 tdir = self._yaw_ref if self._yaw_ref is not None else 0.0
             moving = self._s_cmd < s_limit_gap - 1e-3    # 顶到间距下限就停下等
+
+            # 分段航向：走到下一段就地停下转到该段航向，转到位再走（见参数声明处）
+            if bool(self.get_parameter('yaw_follow_leg').value):
+                tol = math.radians(float(self.get_parameter('yaw_leg_tol_deg').value))
+                own_yaw = self._own_yaw if self._own_yaw is not None else self._yaw_ref
+                flat = list(self.get_parameter('leg_route_xy').value or [])
+                pts = [(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)]
+                if len(pts) >= 2 and not self._yaw_turning:
+                    # 参考点 target 就在共享（UWB/世界）系里，直接拿它定位在第几段。
+                    # 只前进不后退：投影超过本段末端就进下一段。
+                    while self._leg_idx < len(pts) - 2 and \
+                            _seg_progress(pts[self._leg_idx], pts[self._leg_idx + 1],
+                                          target[0], target[1]) >= 1.0:
+                        self._leg_idx += 1
+                    a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
+                    leg_dir = math.atan2(b[1] - a[1], b[0] - a[0])
+                    if _ang_diff(leg_dir, self._yaw_ref) > tol:
+                        self._yaw_ref = leg_dir        # 这一段的航向，中途不再变
+                        self._yaw_turning = True
+                        self.get_logger().info(
+                            f'第{self._leg_idx + 1}段：先转到 {math.degrees(leg_dir):.0f}° 再前飞'
+                            f'（当前 {math.degrees(own_yaw):.0f}°）')
+                if self._yaw_turning:
+                    if _ang_diff(own_yaw, self._yaw_ref) <= tol:
+                        self._yaw_turning = False
+                        self.get_logger().info(
+                            f'航向已到位（{math.degrees(own_yaw):.0f}°），继续前飞')
+                    else:
+                        # 转向期间悬停：参考点不前进，位置指令钉在转向前那一点
+                        self._s_cmd = s_hold
+                        moving = False
+                        if self._last_target_xy is not None:
+                            sx, sy = self._last_target_xy
+
+            cmd.position.x, cmd.position.y = float(sx), float(sy)
             cmd.velocity.x = float(cruise * math.cos(tdir)) if moving else 0.0
             cmd.velocity.y = float(cruise * math.sin(tdir)) if moving else 0.0
             cmd.velocity.z = 0.0
-            # 不考虑偏航：保持入列时锁定的朝向，不跟航迹切线转向
             cmd.yaw = float(self._yaw_ref if self._yaw_ref is not None else 0.0)
             cmd.trajectory_id = 1
             self.cmd_pub.publish(cmd)
@@ -1098,6 +1172,8 @@ class FormationFollowerNode(Node):
         self._yaw_ref = None
         self._s_cmd = None
         self._s_cmd_t = None
+        self._yaw_turning = False
+        self._leg_idx = 0
         # 接管控制权：跟随者的设定点由本节点直接喂给 pt4ctrl，绕开 ego_planner
         self._set_relay_mode('formation')
         self.get_logger().info(

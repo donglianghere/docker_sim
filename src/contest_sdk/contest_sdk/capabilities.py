@@ -439,6 +439,13 @@ def _make_parameter(name: str, value: Any) -> Parameter:
         param.value = ParameterValue(type=ParameterType.PARAMETER_DOUBLE, double_value=value)
     elif isinstance(value, str):
         param.value = ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=value)
+    elif isinstance(value, (list, tuple)) and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        # 2026-09-24新增：double数组。编队节点的`leg_route_xy`（航线，一串
+        # x,y）是第一个用到数组参数的地方——节点那边也必须按 double 数组声明，
+        # ROS2 参数系统按类型严格匹配，声明成 int 数组会被直接拒绝。
+        param.value = ParameterValue(type=ParameterType.PARAMETER_DOUBLE_ARRAY,
+                                     double_array_value=[float(v) for v in value])
     else:
         raise TypeError(
             f"_make_parameter不支持的参数值类型: {type(value)!r}（name={name!r}，"
@@ -1241,6 +1248,55 @@ class DroneSDK:
                        + ('' if ok else f'（{timeout:.0f}秒内没转到位）'))
         return ok
 
+    def face_yaw(self, yaw_rad: float, timeout: float = 15.0,
+                 tolerance_deg: float = 5.0) -> bool:
+        """悬停着把机头转到**指定航向角**，转到位（或超时）才返回，返回是否转到位。
+
+        2026-09-24新增。跟`face_point()`是同一套机制、同一个坑，区别只是这里给的是
+        角度不是要对准的点：`face_point()`盯着一个点，飞机一动、朝向跟着变；这里
+        锁死一个角度，整条航段不再变——编队"转到航向角再前飞"要的就是后者。
+
+        实现要点跟`face_point()`完全一致，原因见那个方法的说明：
+        · 停着的时候机头锁在进入悬停那一刻的角度（pt4ctrl的AUTO_HOVER用
+          `hover_pose(3)`），必须靠飞行栈`ego_planner_traj_server_yaw_hold.patch`
+          那条"空闲时收到新朝向就地转"的通路，`traj_server`才会只转yaw不动位置；
+        · **每秒重发一次**：`goto()`一到点就返回，而ego_planner到点后还会再重规划
+          一小会儿，每来一条新轨迹都会把"等着开始转"的那次请求作废，只发一次的话
+          紧跟在`goto()`后面的转向十有八九落空。重发不会让机头抖（补丁里
+          `beginYawHold()`对"已经在转时又收到同一目标"不做重置）。
+
+        Args:
+            yaw_rad: 目标航向角（弧度），跟`get_current_yaw()`同一套约定。
+            timeout: 最多等多久。转 180° 实测要十几秒，默认给 15 秒。
+            tolerance_deg: 差多少度以内算到位。
+
+        Returns:
+            True=转到位；False=超时没转到（调用方自己决定是照飞还是放弃这一段）。
+        """
+        tol = math.radians(tolerance_deg)
+
+        def _aimed() -> bool:
+            err = (self.get_current_yaw() - yaw_rad + math.pi) % (2 * math.pi) - math.pi
+            return abs(err) <= tol
+
+        deadline = time.monotonic() + timeout
+        ok = False
+        while not ok:
+            self.set_yaw_mode_constant(yaw_rad)     # 每轮重发一次，见上面说明
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            ok = self._poll_until(
+                _aimed, min(1.0, left),
+                lambda: self._progress(
+                    f'转向 {math.degrees(yaw_rad):.0f}° 中…当前 '
+                    f'{math.degrees(self.get_current_yaw()):.0f}°'),
+                poll_interval_s=0.2,
+            )
+        self._progress(f'朝向 {math.degrees(self.get_current_yaw()):.1f}°'
+                       + ('' if ok else f'（{timeout:.0f}秒内没转到 {math.degrees(yaw_rad):.0f}°）'))
+        return ok
+
     def set_fixed_altitude(self, height_m: float) -> None:
         """把飞行高度钉死在设定值，规划器轨迹里的高度变化不再生效。
 
@@ -1703,7 +1759,9 @@ class DroneSDK:
     # ------------------------------------------------------------------
 
     def start_formation_follow(self, follow_distance_m: float, timeout: float = 10.0,
-                               altitude_agl_m: Optional[float] = None) -> None:
+                               altitude_agl_m: Optional[float] = None,
+                               turn_in_place: Optional[bool] = None,
+                               leg_route: Optional[List[Tuple[float, float]]] = None) -> None:
         """启用`formation_follower_node`（跟随目标固定是构造`DroneSDK`时
         传入的`teammate_namespace`，选手不需要指定跟谁——方案2.1节第7条：
         "队友的namespace不是SDK自己猜的"）。
@@ -1728,6 +1786,31 @@ class DroneSDK:
         Raises:
             ActionFailedError: `~/set_parameters`调用超时或被拒绝。
         """
+        if leg_route is not None:
+            flat: List[float] = []
+            for px, py in leg_route:
+                flat += [float(px), float(py)]
+            ok = self._call_set_parameters_blocking(
+                self._formation_follower_params_cli, {'leg_route_xy': flat}, timeout_s=timeout)
+            if not ok:
+                raise ActionFailedError(
+                    action_name='start_formation_follow:leg_route', timeout_s=timeout,
+                    namespace=self.namespace)
+            self._progress(f'僚机航线已下发（{len(leg_route)} 个点，用来定每段航向）')
+        if turn_in_place is not None:
+            # 分段航向：僚机跟长机一样"拐点先停下转到位、再前飞"（2026-09-24用户
+            # 要求"长机、从机都一样"）。僚机没有航点，等价物是长机轨迹的切线跳变，
+            # 判据和阈值都在 formation_follower_node 那边，见该文件参数声明处说明。
+            ok = self._call_set_parameters_blocking(
+                self._formation_follower_params_cli,
+                {'yaw_follow_leg': bool(turn_in_place)},
+                timeout_s=timeout,
+            )
+            if not ok:
+                raise ActionFailedError(
+                    action_name='start_formation_follow:turn_in_place', timeout_s=timeout,
+                    namespace=self.namespace)
+            self._progress(f'僚机分段航向（拐点先转向再前飞）{"开" if turn_in_place else "关"}')
         if altitude_agl_m is not None:
             # 高度参数对两条通路（action / 参数）都生效：节点每个控制周期都重新
             # 读它（见 formation_follower_node 里 follow_altitude_agl_m 的用法）
@@ -1764,7 +1847,8 @@ class DroneSDK:
             )
         self._progress(f'编队跟随已启用（跟随{self.teammate_namespace}，距离{follow_distance_m}米）')
 
-    def _try_formation_via_action(self, follow_distance_m: float, timeout: float) -> bool:
+    def _try_formation_via_action(self, follow_distance_m: float, timeout: float,
+                                  retried: bool = False) -> bool:
         """尝试走机载 FormationFollow action，阻塞到**僚机已接管并进入待命**。
 
         2026-09-21改（原来是阻塞到入列完成，即 feedback 报 `track`）：
@@ -1815,6 +1899,17 @@ class DroneSDK:
                 action_name='start_formation_follow(goal无响应)', timeout_s=timeout,
                 namespace=self.namespace)
         goal_handle = send_future.result()
+        if not goal_handle.accepted and not retried:
+            # 2026-09-24：goal 被拒绝几乎只有一个原因——机载还有一个上一轮
+            # **没收尾的** goal 在跑（上一次任务程序崩了/被 docker rm 掉，容器
+            # 没了但机载这一侧的跟随还活着，要等它自己超时 180 秒才释放）。
+            # 实测就是这么卡住的：第一次跑崩掉，第二次跑僚机 goal 被拒、直接
+            # 异常退出，长机在那边等"僚机就位"等到 300 秒超时。
+            # 处置：发一次 cancel 把旧 goal 清掉，再重投一次。清不掉才算真失败。
+            self._progress('编队 goal 被拒绝（机载可能还有上一轮没收尾的跟随），'
+                           '先出列再重投一次')
+            self._cancel_stale_formation_goal(timeout)
+            return self._try_formation_via_action(follow_distance_m, timeout, retried=True)
         if not goal_handle.accepted:
             raise ActionFailedError(
                 action_name='start_formation_follow(goal被拒绝)', timeout_s=timeout,
@@ -1844,6 +1939,48 @@ class DroneSDK:
         raise ActionFailedError(
             action_name=f'start_formation_follow(等就位待命超过{FORMATION_STANDBY_WAIT_S:.0f}秒)',
             timeout_s=timeout, namespace=self.namespace)
+
+    def _cancel_stale_formation_goal(self, timeout: float) -> None:
+        """清掉机载上一轮遗留的编队 goal（本进程没有句柄，只能按目标全量取消）。
+
+        `cancel_goal_async()` 要有句柄才能发，而"上一轮"的句柄跟着上一个容器一起
+        没了。ROS2 的 action client 提供了按 client 全量取消的接口
+        （`_cancel_goal_async` 走的是同一个 CancelGoal 服务，goal_id 全 0 = 取消
+        该 server 上所有 goal），这里就用它；不可用时退回参数通路把 enabled 关掉，
+        节点那一侧同样会收尾。
+        """
+        try:
+            from action_msgs.srv import CancelGoal
+
+            req = CancelGoal.Request()   # goal_id 全 0 + stamp 0 = 取消全部
+            future = self._formation_action_cli._cancel_client.call_async(req)
+            self._wait_future(future, timeout)
+        except Exception as exc:        # 接口不可用/版本差异都不该让任务挂掉
+            self._progress(f'按 action 取消遗留 goal 没成功（{exc!r}），改用参数方式出列')
+            self._call_set_parameters_blocking(
+                self._formation_follower_params_cli, {'enabled': False}, timeout_s=timeout)
+        time.sleep(1.0)                 # 给节点一点时间真正收尾再重投
+
+    def set_formation_leg_route(self, leg_route: List[Tuple[float, float]],
+                                timeout: float = 10.0) -> None:
+        """把航线（世界坐标，第一个点是长机起飞点）下发给僚机的编队节点，用来定
+        每一段的航向。
+
+        2026-09-24新增。为什么航线要单独发一次而不是只在`start_formation_follow()`
+        里传：僚机是**先接管、再通知长机"我就位了"**（不这样会死锁，见那个方法的
+        说明），而航线只有长机知道——长机要等到"僚机就位"才会把航线发过来，那时
+        编队跟随早就启动了。节点每个控制周期都重新读这个参数，晚一点下发没关系：
+        长机自己还要先转向、再飞出一个跟随距离，僚机才会真的开始走。
+        """
+        flat: List[float] = []
+        for px, py in leg_route:
+            flat += [float(px), float(py)]
+        ok = self._call_set_parameters_blocking(
+            self._formation_follower_params_cli, {'leg_route_xy': flat}, timeout_s=timeout)
+        if not ok:
+            raise ActionFailedError(
+                action_name='set_formation_leg_route', timeout_s=timeout, namespace=self.namespace)
+        self._progress(f'僚机航线已下发（{len(leg_route)} 个点，用来定每段航向）')
 
     def stop_formation_follow(self, timeout: float = 10.0) -> None:
         """停用编队跟随：出列并停止发布目标点。

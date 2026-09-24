@@ -9,11 +9,17 @@
 航点是世界坐标 (x, y)，至少两个，按顺序飞。僚机不需要知道航线，它沿长机
 实际飞过的轨迹走，沿轨迹间距不小于 --spacing（这是下限，不是要死守的值）。
 
+长机每一段都是"**先悬停转向、转到位再前飞**"：在当前点（第一段是起飞点）把机头
+转到"当前点指向下一个航点"的航向角，转到位之后整条航段锁死这个角度，到了下一个
+航点再转下一段的航向。僚机不走这套——它的机头取自己航迹的切线方向（一字纵队跟随
+的天然朝向，见 formation_follower_node），不需要也不应该跟长机的分段航向同步。
+
 声光反馈：起飞/降落由 SDK 自动播（长机="侦察机"、僚机="任务机"），这里只在
 落地后各补一条。需要地面站上的声光常驻程序在运行（start_sound_light_server.sh），
 没运行也不影响飞行，只会打一行警告。
 """
 import argparse
+import math
 import time
 
 from contest_sdk import DroneSDK
@@ -28,8 +34,14 @@ CRUISE_AGL_M = 2.0
 # 长机就先判超时终止了。
 STANDBY_WAIT_S = 300.0
 ROUTE_DONE_WAIT_S = 600.0     # 僚机等航线飞完的上限
+TURN_TIMEOUT_S = 15.0         # 每个航点转到航向角的上限（转 180° 实测十几秒）
+TURN_TOL_DEG = 5.0            # 差这么多度以内算转到位
 READY = 'formation_standby'   # 僚机 -> 长机
 ROUTE_DONE = 'route_done'     # 长机 -> 僚机
+ROUTE_PLAN = 'route_plan'     # 长机 -> 僚机：整条航线（含长机起飞点），僚机用来定每段航向
+# 不传 --route 时用的默认航线（世界坐标），跟《双机全流程示例.py》里的 ROUTE 一致。
+# 加默认值是因为 运行仿真.sh 不往任务程序传额外参数，单独跑这个示例时没法给航线。
+DEFAULT_ROUTE = '7,-9.5 7,9.5 -7,9.5 -7,-9.5'
 
 
 def listen_standby(sdk):
@@ -52,9 +64,33 @@ def leader_route(sdk, route_xy, inbox=None):
     waypoints = list(route_xy)
     if tuple(waypoints[-1]) != pad:
         waypoints.append(pad)           # 起飞点当最后一个航点
-    for i, (wx, wy) in enumerate(waypoints, start=1):
-        print(f'[长机] 航点 {i}/{len(waypoints)}: ({wx}, {wy})', flush=True)
-        sdk.goto(*sdk.world_to_local(wx, wy, CRUISE_AGL_M))
+    # 从起飞点出发，每一段都是"上一个点 -> 这个点"
+    legs = list(zip([pad] + waypoints[:-1], waypoints))
+
+    # 把整条航线（含长机起飞点）发给僚机：它的每段航向要用这条航线算，不能靠
+    # 从长机轨迹估切线——轨迹是里程计采样点连成的，带噪声，估出来的方向在直线段
+    # 上就一直在抖（2026-09-24 实测，用户指出"从机中途航向角一直在变化"）。
+    try:
+        sdk.send_to_teammate(ROUTE_PLAN, route=[list(p) for p in ([pad] + waypoints)])
+    except Exception as exc:                # 送不到不影响自己飞，僚机退化成锁定初始朝向
+        print(f'[长机] 航线没送到僚机（{exc}），僚机将保持入列时的朝向', flush=True)
+
+    for i, (frm, to) in enumerate(legs, start=1):
+        # 用户 2026-09-24 要求：**先悬停把机头转到这一段的航向角，转到位再前飞**，
+        # 整条航段锁死这个角度。用局部坐标算航向：两点之差在纯平移的局部系里跟
+        # 世界系完全一致，而 set_yaw_mode_constant()/get_current_yaw() 本来就是
+        # 局部系的角度，全程一套坐标不用来回换算。
+        fx, fy, _ = sdk.world_to_local(frm[0], frm[1], CRUISE_AGL_M)
+        tx, ty, tz = sdk.world_to_local(to[0], to[1], CRUISE_AGL_M)
+        heading = math.atan2(ty - fy, tx - fx)
+        print(f'[长机] 航点 {i}/{len(legs)}: ({to[0]}, {to[1]})，'
+              f'航向 {math.degrees(heading):.0f}°，先转向再前飞', flush=True)
+        if not sdk.face_yaw(heading, timeout=TURN_TIMEOUT_S, tolerance_deg=TURN_TOL_DEG):
+            # 没转到位也照飞：机头方向不影响这一段能不能到点（编队跟随看的是轨迹），
+            # 但要打出来——连续几段都转不到位就是飞行栈那条 yaw 通路出了问题
+            print(f'[长机] 航向没转到位（目标 {math.degrees(heading):.0f}°），仍继续前飞',
+                  flush=True)
+        sdk.goto(tx, ty, tz)            # 航向锁在 heading 上，整段不再变
 
     sdk.send_to_teammate(ROUTE_DONE)    # 只有长机知道哪个是最后一个航点
 
@@ -72,13 +108,27 @@ def follower(sdk, spacing_m):
     """僚机：起飞 -> 跟队 -> 回起飞点降落。任务机每个任务都要落地，所以这一段
     本来就自带起降，可以直接被《双机全流程示例.py》复用。"""
     inbox = _Inbox(sdk, ROUTE_DONE)
+    plan = _Inbox(sdk, ROUTE_PLAN)          # 必须在长机可能发之前就注册
     sdk.takeoff()
     # 这个方法返回的含义是"机载已接管、在自己起飞点上空保持"，不是"已入列"。
     # 必须立刻通知长机——入列要等长机走起来，长机又在等这个通知，等入列会死锁。
     # 高度一并下发：僚机的高度由这个节点按定高雷达保持（天然仿地），默认 1.5 米，
     # 不显式传的话长机改了巡航高度、僚机还停在默认值，编队会一高一低。
-    sdk.start_formation_follow(follow_distance_m=spacing_m, altitude_agl_m=CRUISE_AGL_M)
+    # turn_in_place：僚机跟长机同一套动作——拐点先停下把机头转到下一段的航向，
+    # 转到位再前飞（用户 2026-09-24 要求「长机、从机都一样」）
+    sdk.start_formation_follow(follow_distance_m=spacing_m,
+                               altitude_agl_m=CRUISE_AGL_M,
+                               turn_in_place=True)
     sdk.send_to_teammate(READY)
+    # 航线必须在**发完 READY 之后**再等：长机要收到 READY 才发航线，反过来写就是
+    # 互等（2026-09-24 实测：僚机先等航线、30 秒超时才继续，整段退化成老行为）。
+    # 等不到也继续，那种情况下僚机保持入列时锁定的朝向，不影响跟队。
+    # 这里等得起：长机收到 READY 后还要先在起飞点转向、再飞出 3.5 米，僚机才会动。
+    try:
+        plan.wait(ROUTE_PLAN, 30.0)
+        sdk.set_formation_leg_route([tuple(p) for p in plan.data.get('route', [])])
+    except TimeoutError:
+        print('[僚机] 没收到长机航线，本段保持入列时的朝向', flush=True)
 
     inbox.wait(ROUTE_DONE, ROUTE_DONE_WAIT_S)
     sdk.stop_formation_follow()
@@ -106,8 +156,13 @@ class _Inbox:
 
     def __init__(self, sdk, *events):
         self._seen = set()
+        self.data = {}          # 最近一次收到的随事件数据（比如长机发来的航线）
         for name in events:
-            sdk.on_teammate_event(name, lambda _n=name, **kw: self._seen.add(_n))
+            sdk.on_teammate_event(name, lambda _n=name, **kw: self._on(_n, kw))
+
+    def _on(self, name, kwargs):
+        self._seen.add(name)
+        self.data = kwargs
 
     def wait(self, event, timeout_s):
         deadline = time.monotonic() + timeout_s
@@ -130,7 +185,8 @@ def main():
     ap.add_argument('--namespace', required=True)
     ap.add_argument('--role', required=True, choices=('leader', 'follower'))
     ap.add_argument('--teammate', required=True)
-    ap.add_argument('--route', default=None, help='"x1,y1 x2,y2 ..."，只有长机需要')
+    ap.add_argument('--route', default=DEFAULT_ROUTE,
+                    help='"x1,y1 x2,y2 ..."，只有长机需要，默认走大赛那条环场航线')
     ap.add_argument('--spacing', type=float, default=3.5, help='沿轨迹间距下限（米）')
     args = ap.parse_args()
 
