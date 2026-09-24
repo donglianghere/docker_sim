@@ -86,7 +86,15 @@ def scopes(tree):
 
 
 def check(path):
-    tree = ast.parse(open(path, encoding='utf-8').read())
+    src = open(path, encoding='utf-8').read()
+    # ast.parse 查不出全部语法错：compile() 才做符号表检查，"global 声明在使用
+    # 之后"这类错误只有它报（2026-09-24 实测漏过一次：ast.parse 通过、真跑起来
+    # SyntaxError）。所以先 compile 一遍。
+    try:
+        compile(src, path, 'exec')
+    except SyntaxError as exc:
+        return [f'语法错误：第{exc.lineno}行 {exc.msg}']
+    tree = ast.parse(src)
     problems = []
     seen = set()
     for node, visible in scopes(tree):
