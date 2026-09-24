@@ -639,6 +639,12 @@ class FormationFollowerNode(Node):
         # 方向就在 ±12° 之间跳，僚机一路走走停停摇头（用户实测指出"从机中途航向
         # 角一直在变化"）。航线是已知量，没有任何理由去估计它。
         self.declare_parameter('leg_route_xy', [0.0])
+        # 距拐点还有这么远就算走完本段、换下一段的航向。不能用"投影 >= 1.0"这种
+        # 严格判据：长机的到点阈值是 0.3 米，它在离航点 0.2~0.3 米处就判到点、直接
+        # 转弯走下一段了，参考点沿它走过的轨迹永远到不了那个角点，投影卡在 0.99
+        # ——2026-09-24 实测就是这么卡住的，僚机转完前两段之后一路保持 90°，第 3、
+        # 4 段该朝西朝南时机头还指着北（用户指出"任务机航向又搞错了"）。
+        self.declare_parameter('leg_corner_slack_m', 0.8)
 
         # ---- 跨机对齐（2026-09-21订正）----
         # 原来用 TF（<长机ns>/odom -> 自己的 odom）做跨机变换，实测不可靠：
@@ -1059,9 +1065,13 @@ class FormationFollowerNode(Node):
                 if len(pts) >= 2 and not self._yaw_turning:
                     # 参考点 target 就在共享（UWB/世界）系里，直接拿它定位在第几段。
                     # 只前进不后退：投影超过本段末端就进下一段。
-                    while self._leg_idx < len(pts) - 2 and \
-                            _seg_progress(pts[self._leg_idx], pts[self._leg_idx + 1],
-                                          target[0], target[1]) >= 1.0:
+                    slack = float(self.get_parameter('leg_corner_slack_m').value)
+                    while self._leg_idx < len(pts) - 2:
+                        a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
+                        leg_len = math.hypot(b[0] - a[0], b[1] - a[1])
+                        done_at = 1.0 if leg_len < 1e-6 else max(0.5, 1.0 - slack / leg_len)
+                        if _seg_progress(a, b, target[0], target[1]) < done_at:
+                            break
                         self._leg_idx += 1
                     a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
                     leg_dir = math.atan2(b[1] - a[1], b[0] - a[0])
