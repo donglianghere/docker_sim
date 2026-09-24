@@ -400,7 +400,7 @@ index 0000000..b845baf
 +         `<link name='link'>`内部，跟下面`<visual>`同级。 -->
 +    <model name='fire_apriltag_marker'>
 +      <static>0</static>
-+      <pose>-3.99 7 3 0 0 -1.5707963</pose>
++      <pose>-3.99 7 2.5 0 0 -1.5707963</pose>
 +      <link name='link'>
 +        <kinematic>1</kinematic>
 +        <visual name='visual_apriltag'>

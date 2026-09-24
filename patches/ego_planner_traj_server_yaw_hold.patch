@@ -1,7 +1,7 @@
 diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_manage/src/traj_server.cpp
 --- a/src/planner/plan_manage/src/traj_server.cpp
 +++ b/src/planner/plan_manage/src/traj_server.cpp
-@@ -74,9 +74,69 @@
+@@ -74,9 +74,91 @@
  double yaw_target_x_ = 0.0;   // yaw_mode_==POINT时使用，跟pos同一个局部坐标系
  double yaw_target_y_ = 0.0;
  
@@ -31,6 +31,7 @@ diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_mana
 +constexpr double ODOM_STALE_SEC = 0.5;
 +
 +bool yaw_hold_active_ = false;
++bool yaw_hold_pending_ = false;   // 收到朝向目标时轨迹还没跑完，等空闲了再开始转
 +rclcpp::Time yaw_hold_start_;
 +rclcpp::Time yaw_hold_reached_;
 +bool yaw_hold_reached_valid_ = false;
@@ -50,18 +51,39 @@ diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_mana
 +  have_odom_ = true;
 +}
 +
-+// 收到新的朝向指令：没有轨迹在跑就启动一次原地转向
-+void startYawHoldIfIdle()
++void beginYawHold()
 +{
-+  if (receive_traj_ || !have_odom_)
-+    return;
 +  rclcpp::Clock clock(RCL_ROS_TIME);
++  if (!yaw_hold_active_)
++  {
++    // 只有"从静止开始转"这一次才初始化。已经在转的时候又收到同一个目标
++    // （调用方重发）**不能重置**：last_yaw_是指令朝向，重置成实测朝向等于把
++    // 控制器的提前量清零，机头从45°/s掉到约4°/s爬行，看着像在"摇头"——
++    // 2026-09-23实测过，调用方每秒重发一次，10秒都没转到位。
++    yaw_hold_start_ = clock.now();
++    yaw_hold_pos_ = odom_pos_;    // 锁存位置，见上面说明
++    last_yaw_ = odom_yaw_;        // 从实际朝向接着转，避免跳变
++    last_yaw_dot_ = 0.0;
++  }
 +  yaw_hold_active_ = true;
 +  yaw_hold_reached_valid_ = false;
-+  yaw_hold_start_ = clock.now();
-+  yaw_hold_pos_ = odom_pos_;      // 锁存位置，见上面说明
-+  last_yaw_ = odom_yaw_;          // 从实际朝向接着转，避免跳变
-+  last_yaw_dot_ = 0.0;
++  yaw_hold_pending_ = false;
++}
++
++// 收到新的朝向指令：空闲就立刻开始转；还在跑轨迹就先记下来，等空闲再转。
++// 记这一笔是必要的——`goto()`一到点就返回，本文件还要再发
++// HOVER_AFTER_FINISH_SEC(1秒)指令，调用方紧接着发的朝向目标正好落在这个窗口，
++// 不记下来就永远不会开始转（调用方只能反复重发，于是有了上面那个"摇头"的坑）。
++void startYawHoldIfIdle()
++{
++  if (!have_odom_)
++    return;
++  if (receive_traj_)
++  {
++    yaw_hold_pending_ = true;
++    return;
++  }
++  beginYawHold();
 +}
 +
  void yawModeCallback(std_msgs::msg::Int32::ConstSharedPtr msg)
@@ -71,7 +93,7 @@ diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_mana
  }
  
  void yawParamCallback(geometry_msgs::msg::Point::ConstSharedPtr msg)
-@@ -89,6 +149,7 @@
+@@ -89,6 +171,7 @@
    yaw_constant_ = msg->x;
    yaw_target_x_ = msg->x;
    yaw_target_y_ = msg->y;
@@ -79,7 +101,7 @@ diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_mana
  }
  
  void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
-@@ -284,11 +345,95 @@
+@@ -284,11 +367,98 @@
    return std::pair<double, double>(yaw, yawdot);
  }
  
@@ -167,15 +189,18 @@ diff --git a/src/planner/plan_manage/src/traj_server.cpp b/src/planner/plan_mana
    if (!receive_traj_)
 +  {
 +    // 没有轨迹时唯一会发指令的情况：原地转向（见上面 startYawHoldIfIdle）
++    if (yaw_hold_pending_)
++      beginYawHold();             // 轨迹刚跑完，把等着的那次转向接上
 +    if (yaw_hold_active_)
 +      publishYawHold();
      return;
 +  }
 +  yaw_hold_active_ = false;       // 有轨迹就交给正常的轨迹跟踪
++  yaw_hold_pending_ = false;      // 新轨迹接管了，之前等着的转向请求作废
  
    // 统一时间源
    rclcpp::Clock clock(RCL_ROS_TIME);  
-@@ -400,6 +545,14 @@
+@@ -400,6 +570,14 @@
        10,
        yawParamCallback);
  

@@ -983,6 +983,28 @@ class DroneSDK:
             raise DetectionTimeoutError(class_id=class_id, timeout_s=timeout, namespace=self.namespace)
         return holder['det']
 
+    def clear_detections(self, camera: Optional[str] = None) -> None:
+        """丢掉已经缓存的检测结果，让下一次`wait_for_detection()`只认**之后**
+        新收到的帧。
+
+        2026-09-23新增。`wait_for_detection()`查的是"每路相机最新一条检测
+        消息"的缓存，而检测节点是每帧都发（约7Hz），所以缓存里那条可能是
+        0.1秒前、飞机还在动/机头还在转的时候拍的——"停稳对准之后再测一次"
+        这种要求光靠调用顺序保证不了，实测就出现过"机头转动过程中检出目标"。
+        在开始测之前调一次这个方法，缓存清空，拿到的第一条一定是清空之后
+        新拍的帧。
+
+        Args:
+            camera: 只清某一路（`'down'`/`'front'`），默认全清。
+        """
+        if camera is None:
+            self._latest_detections_by_frame.clear()
+            self._latest_detections = None
+            return
+        tag = f'_camera_{camera}_'
+        for fid in [k for k in self._latest_detections_by_frame if tag in k]:
+            del self._latest_detections_by_frame[fid]
+
     def locate_target(self, class_id: str, timeout: float = 5.0, samples: int = 5) -> TargetPosition:
         """目标在地面上的**实际坐标**（飞机自己的局部系）。
 
@@ -1149,25 +1171,31 @@ class DroneSDK:
     # ------------------------------------------------------------------
 
     def face_point(self, x: float, y: float, timeout: float = 10.0,
-                   tolerance_deg: float = 5.0) -> float:
-        """悬停着把机头转到对准某个点，转到位（或超时）才返回，返回最终朝向。
+                   tolerance_deg: float = 5.0) -> bool:
+        """悬停着把机头转到对准某个点，**返回是否真的转到位了**（超时返回False）。
 
         2026-09-23新增。`set_yaw_mode_point()`只是把朝向目标发给`traj_server`，
         飞机**在飞**的时候才会跟着转；停着的时候机头锁在进入悬停那一刻的角度
         （pt4ctrl的AUTO_HOVER用的是`hover_pose(3)`，见`PX4CtrlFSM.cpp`）。
         飞行栈的`traj_server`打了`ego_planner_traj_server_yaw_hold.patch`之后，
-        空闲时收到新的朝向目标会以当前位置为目标持续发`position_cmd`、只转
-        yaw，这个方法就是"发目标 + 等它转到位"。
+        空闲时收到新的朝向目标会以当前位置为目标持续发`position_cmd`、只转 yaw。
 
-        没打那个补丁的旧飞行栈上不会报错，只是转不动、超时后返回当前朝向——
-        调用方拿返回值跟期望角度比一下就知道。
+        这里**每秒重发一次**目标，直到转到位或超时。原因是`goto()`一到点就返回，
+        而`ego_planner`到点后还会继续重规划一小会儿，每来一条新轨迹都会把
+        `traj_server`里"等着开始转"的那次请求作废——只发一次的话，紧跟在
+        `goto()`后面的这次转向十有八九会落空（2026-09-23实测：每个观察点位的
+        第一个朝向都转不过去、干等10秒超时）。重发本身不会让机头抖：补丁里
+        `beginYawHold()`对"已经在转时又收到同一目标"是不做重置的（重置会把
+        控制器的提前量清零，那才是之前看着像摇头的原因）。
+
+        返回值一定要用：没转到位就说明相机没指向预期方向，这时候拿到的画面
+        不代表那个方向的情况，不该接着做检测/判断。
 
         Args:
             x/y: 要对准的点，这架飞机自己的局部坐标系（跟`goto()`同一套）。
             timeout: 最多等多久。
             tolerance_deg: 朝向差多少度以内算对准。
         """
-        self.set_yaw_mode_point(x, y)
         tol = math.radians(tolerance_deg)
 
         def _aimed() -> bool:
@@ -1176,14 +1204,21 @@ class DroneSDK:
             err = (self.get_current_yaw() - want + math.pi) % (2 * math.pi) - math.pi
             return abs(err) <= tol
 
-        self._poll_until(
-            _aimed, timeout,
-            lambda: self._progress(f'转向对准({x:.2f}, {y:.2f})中…'),
-            poll_interval_s=0.2,
-        )
-        yaw = self.get_current_yaw()
-        self._progress(f'朝向 {math.degrees(yaw):.1f}°')
-        return yaw
+        deadline = time.monotonic() + timeout
+        ok = False
+        while not ok:
+            self.set_yaw_mode_point(x, y)       # 每轮重发一次，见上面说明
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            ok = self._poll_until(
+                _aimed, min(1.0, left),
+                lambda: self._progress(f'转向对准({x:.2f}, {y:.2f})中…'),
+                poll_interval_s=0.2,
+            )
+        self._progress(f'朝向 {math.degrees(self.get_current_yaw()):.1f}°'
+                       + ('' if ok else f'（{timeout:.0f}秒内没转到位）'))
+        return ok
 
     def set_camera_view(self, view: str) -> None:
         """把这架飞机唯一那个真实相机转到`'front'`（前视）或`'down'`

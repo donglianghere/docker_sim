@@ -34,7 +34,7 @@ import argparse
 
 import 地面火情搜索示例 as 地面
 import 编队飞行示例 as 编队
-import 高楼火情示例 as 高楼
+import 高楼火情绕飞版示例 as 高楼
 from contest_sdk import DroneSDK
 from contest_sdk.exceptions import GotoUnreachableError, TeammateUnreachableError
 
