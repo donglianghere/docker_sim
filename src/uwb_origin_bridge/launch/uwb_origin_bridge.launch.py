@@ -59,15 +59,24 @@ def generate_launch_description():
         'localization_source',
         default_value=EnvironmentVariable('LOCALIZATION_SOURCE', default_value='gt'),
         description=(
-            '只用来决定origin_setter_node要不要打开SE(2)旋转估计——'
+            '决定origin_setter_node的两个开关：SE(2)旋转估计——'
             'uwb_slam/single_uwb_slam打开，其余(gt/uwb_imu/single_uwb_imu等)'
-            '强制θ*=0，见文件头2026-09-14说明'),
+            '强制θ*=0，见文件头2026-09-14说明；以及锁定前的高度一致性检查——'
+            'uwb_imu/single_uwb_imu打开，见2026-09-24说明'),
     )
     # PythonExpression对多个候选值做or判断，字符串拼接比链式布尔substitution
     # 可读——跟同目录其它launch文件(pt4ctrl_docker_sim.launch.py等)用
     # PythonExpression判断planner=='ego_planner'是同一个established模式。
     rotation_estimation_enabled = PythonExpression([
         "'", localization_source, "' in ('uwb_slam', 'single_uwb_slam')"])
+
+    # 2026-09-24新增：锁定原点前要不要检查"odom的z跟测距雷达对得上"（见
+    # origin_setter_node.py同日期说明）。只有uwb_imu系的定位源下odom的z才
+    # 来自测距雷达，也只有这种情况下雷达还没上线时飞控高度会自由漂移、
+    # 把漂移量锁进TF的z偏移里；gt/uwb_slam的z不是这么来的，开了反而会拿
+    # 两个不同含义的高度互相比、永远对不上而锁不上原点。
+    height_check_enabled = PythonExpression([
+        "'", localization_source, "' in ('uwb_imu', 'single_uwb_imu')"])
 
     # 2026-09-03：θ*的Huber抗差开关（论文2.7节，见origin_setter_node.py文件头
     # 说明）从环境变量ROTATION_ROBUST读，默认false=行为跟以前完全一致。做
@@ -82,6 +91,8 @@ def generate_launch_description():
         parameters=[{
             'rotation_estimation_enabled': ParameterValue(
                 rotation_estimation_enabled, value_type=bool),
+            'height_check_enabled': ParameterValue(
+                height_check_enabled, value_type=bool),
             'rotation_robust_enabled': ParameterValue(
                 EnvironmentVariable('ROTATION_ROBUST', default_value='false'),
                 value_type=bool),

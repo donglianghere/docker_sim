@@ -96,6 +96,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Float64, Int32
 from std_srvs.srv import Trigger
 from tf2_ros import StaticTransformBroadcaster
@@ -172,6 +173,38 @@ class OriginSetterNode(Node):
         self.declare_parameter('rotation_huber_iters', 3)
         self.declare_parameter('rotation_huber_k_scale', 3.0)
 
+        # 2026-09-24新增：锁定前检查"里程计高度跟测距雷达对得上"。
+        # 实测踩的坑：LOCALIZATION_SOURCE=uwb_imu时odom的z就是离地高度
+        # （uwb_imu_fusion_node把range*cos(roll)*cos(pitch)喂给飞控当高度
+        # 观测），但容器刚起来那几秒`mavros/hrlv_ez4_pub`还没发出第一帧
+        # （实测头一帧range是nan），飞控高度估计这段时间没有任何观测拉着，
+        # 自由漂移——NX01就是在这个窗口里锁的原点：真值z=0.052m、odom z却
+        # 已经漂到-0.415m，于是`world -> {ns}/odom`这条静态TF的z偏移被记成
+        # 0.467m（正常应该≈起降点离地面的0.05m）。雷达一上线odom z立刻被
+        # 拉回真实离地高度，偏移却永久留在TF里，结果`world_to_local()`换算
+        # 出来的每一个高度都系统性偏低0.47米：飞机按局部z=1.53飞（实际离地
+        # 1.53米），选手以为是2.0米；再叠上traj_server定高开关钉在另一个值
+        # 时，goto()的三维到点判据(0.3米)永远满足不了，飞机水平到位却判不到
+        # 点，一直卡到超时（2026-09-24编队第一个航点卡死就是这么来的）。
+        # 判据不靠"多等几秒应该够了"：直接比对两个高度源，对不上就返回失败，
+        # entrypoint那个每3秒重试一次的循环会自然等到它们一致（雷达上线、
+        # 飞控高度收敛）才锁。只在"odom的z来自测距雷达"的定位源下开，由
+        # launch按LOCALIZATION_SOURCE决定。
+        self.declare_parameter('height_check_enabled', False)
+        self.declare_parameter('range_topic', 'mavros/hrlv_ez4_pub')
+        self.declare_parameter('max_height_mismatch_m', 0.15)
+        # 2026-09-24同一批：锁定前还要求"里程计自己是静止的"。上面那个高度
+        # 检查只管z，x/y有一模一样的坑：飞控/DLIO刚起来那十几秒位置估计还在
+        # 收敛，实测NX02在锁定那一刻odom读到(0.414, -0.673)，而它一直停在
+        # 起降点没动过，十几秒后同一个话题读到的是(0.078, -0.003)——锁定拿的
+        # 是瞬态值，于是world->{ns}/odom的平移被永久记偏0.67米（锁定日志里
+        # 的偏移是(-2.418, -8.828)，真实起降点是(-2.0, -9.5)）。后果是这架飞机
+        # 所有`world_to_local()`换算出来的位置都系统性偏0.67米：goto()看着
+        # "到点了"，实际停在偏0.67米的地方。
+        # 判据是"窗口内里程计的峰峰值"——瞬态期间它在动，静止收敛后只有几
+        # 厘米的抖动。真机上这个阈值可能需要按实测放宽（参数化，不写死）。
+        self.declare_parameter('max_odom_p2p_m', 0.15)
+
         self.sample_window_sec = self.get_parameter('sample_window_sec').value
         self.min_samples = self.get_parameter('min_samples').value
         self.max_std_dev_m = self.get_parameter('max_std_dev_m').value
@@ -187,10 +220,16 @@ class OriginSetterNode(Node):
         self.rotation_huber_iters = int(self.get_parameter('rotation_huber_iters').value)
         self.rotation_huber_k_scale = float(
             self.get_parameter('rotation_huber_k_scale').value)
+        self.height_check_enabled = bool(self.get_parameter('height_check_enabled').value)
+        self.max_height_mismatch_m = float(self.get_parameter('max_height_mismatch_m').value)
+        self.max_odom_p2p_m = float(self.get_parameter('max_odom_p2p_m').value)
 
         self._uwb_samples = deque()  # (monotonic_recv_time, x, y, z)
         self._odom_pos = None
         self._odom_recv_time = None
+        self._odom_samples = deque()  # (recv_time, x, y, z)，只留sample_window_sec窗口，用来判静止
+        self._range_m = None          # 最近一帧测距雷达高度（米），nan/inf不记
+        self._range_recv_time = None
         self._origin_locked = False
         # 静止锁定那一刻的局部/全局位置均值——SE(2)变换的固定锚点，θ*更新时
         # 复用这一对，不是每次都重新取当前位置当锚点。
@@ -225,6 +264,12 @@ class OriginSetterNode(Node):
         self.create_subscription(
             Odometry, self.get_parameter('odom_topic').value, self._odom_cb, 10)
 
+        if self.height_check_enabled:
+            from rclpy.qos import qos_profile_sensor_data
+            self.create_subscription(
+                Range, self.get_parameter('range_topic').value, self._range_cb,
+                qos_profile_sensor_data)   # 传感器话题是BEST_EFFORT，用默认可靠QoS订不上
+
         self.create_service(Trigger, 'set_origin_from_uwb', self._handle_set_origin)
 
         # 起飞点状态属于"需要长期能看到"的信息，不是一次性事件，用低频timer
@@ -238,7 +283,8 @@ class OriginSetterNode(Node):
             f"origin_setter就绪：uwb_pose_topic={self.get_parameter('uwb_pose_topic').value}, "
             f"odom_topic={self.get_parameter('odom_topic').value}, "
             f"world_frame={self.world_frame}, map_frame={self.map_frame}, "
-            f"rotation_estimation_enabled={self.rotation_estimation_enabled}"
+            f"rotation_estimation_enabled={self.rotation_estimation_enabled}, "
+            f"height_check_enabled={self.height_check_enabled}"
             f"{'（θ*强制为0，纯平移）' if not self.rotation_estimation_enabled else ''}")
 
     def _uwb_cb(self, msg: PoseStamped):
@@ -252,7 +298,18 @@ class OriginSetterNode(Node):
     def _odom_cb(self, msg: Odometry):
         self._odom_pos = (msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z)
         self._odom_recv_time = time.monotonic()
+        self._odom_samples.append((self._odom_recv_time,) + self._odom_pos)
+        cutoff = self._odom_recv_time - self.sample_window_sec
+        while self._odom_samples and self._odom_samples[0][0] < cutoff:
+            self._odom_samples.popleft()
         self._maybe_record_segment((msg.pose.pose.position.x, msg.pose.pose.position.y))
+
+    def _range_cb(self, msg: Range):
+        r = float(msg.range)
+        if not math.isfinite(r):
+            return                      # 刚上线那几帧实测是nan，当成"还没数据"
+        self._range_m = r
+        self._range_recv_time = time.monotonic()
 
     def _maybe_record_segment(self, local_xy):
         """情景二在线旋转估计——飞机每累积rotation_seg_min_disp_m米位移，
@@ -410,6 +467,45 @@ class OriginSetterNode(Node):
             self.get_logger().error(response.message)
             return response
 
+        odom_win = [q for q in self._odom_samples if q[0] >= cutoff]
+        if len(odom_win) < 2:
+            response.success = False
+            response.message = (
+                f"里程计样本不足（{len(odom_win)}条，窗口{self.sample_window_sec}秒内）——"
+                "判不了飞机是不是静止，不锁定原点")
+            self.get_logger().warn(response.message)
+            return response
+        p2p = tuple(max(q[i] for q in odom_win) - min(q[i] for q in odom_win) for i in (1, 2, 3))
+        if max(p2p) > self.max_odom_p2p_m:
+            response.success = False
+            response.message = (
+                f"里程计还在动（{self.sample_window_sec}秒内峰峰值"
+                f"{tuple(round(v, 3) for v in p2p)}m > {self.max_odom_p2p_m}m）——"
+                "位置估计还在收敛或飞机没停稳，这时锁定会把瞬态值永久记进"
+                "world->odom这条TF里，不锁，等重试")
+            self.get_logger().warn(response.message)
+            return response
+
+        if self.height_check_enabled:
+            if self._range_m is None or (now - self._range_recv_time) > self.odom_timeout_sec:
+                response.success = False
+                response.message = (
+                    f"还没收到测距雷达高度（{self.get_parameter('range_topic').value}）——"
+                    "这个定位源下odom的z就是雷达高度，雷达没上线时飞控高度估计在自由漂移，"
+                    "现在锁定会把漂移量永久记进world->odom这条TF的z偏移里，不锁，等重试")
+                self.get_logger().warn(response.message)
+                return response
+            # 锁定时飞机静止在起降点上，roll/pitch≈0，cos修正项可以忽略（<1%）
+            mismatch = abs(self._odom_pos[2] - self._range_m)
+            if mismatch > self.max_height_mismatch_m:
+                response.success = False
+                response.message = (
+                    f"里程计高度({self._odom_pos[2]:.3f}m)跟测距雷达高度({self._range_m:.3f}m)"
+                    f"差{mismatch:.3f}m > {self.max_height_mismatch_m}m——飞控高度估计还没被雷达"
+                    "观测拉回来（雷达刚上线/还在收敛），不锁，等重试")
+                self.get_logger().warn(response.message)
+                return response
+
         xs = [s[1] for s in samples]
         ys = [s[2] for s in samples]
         zs = [s[3] for s in samples]
@@ -441,6 +537,7 @@ class OriginSetterNode(Node):
             f"起飞点已锁定：{self.map_frame} 在 {self.world_frame} 系下的偏移 = "
             f"({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f})m"
             f"（θ*={math.degrees(self._theta):.1f}°，{len(self._segments)}段位移样本），"
+            f"里程计峰峰值{tuple(round(v, 3) for v in p2p)}m，"
             f"UWB样本std_xyz={tuple(round(v, 3) for v in std_xyz)}m（{len(samples)}个样本）")
         self.get_logger().info(response.message)
         return response
