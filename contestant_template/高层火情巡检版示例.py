@@ -372,9 +372,16 @@ def run_recon(sdk):
         sdk.play_sound_light('侦察机任务完成')
 
 
-def run_supply(sdk, teammate):
-    """任务机：等通报 -> 起飞到待命点报到 -> 等侦察机破窗 -> 去灭火 -> 返航降落。"""
-    通报 = 高楼.listen_for_report(sdk)
+def run_supply(sdk, teammate, 通报=None):
+    """任务机：等通报 -> 起飞到待命点报到 -> 等侦察机破窗 -> 去灭火 -> 返航降落。
+
+    `通报` 可以传一个提前注册好的接收器（`高楼.listen_for_report()`）：串着做多个
+    任务时，侦察机的高层通报可能在本机还在做上一个任务时就到了，而可靠事件通道是
+    先回 ACK 再查处理函数，没注册的会被确认后丢弃。不传就在这里注册（单独跑本
+    示例时用）。
+    """
+    if 通报 is None:
+        通报 = 高楼.listen_for_report(sdk)
     已破窗 = 高楼.Notice()
     sdk.on_teammate_event(BREACH_EVENT, 已破窗.on_event)
 

@@ -49,7 +49,11 @@ SUPPLY_TAG = 'apriltag:0'
 GRAB_PWM = 800               # 抓紧——2026-09-21 NX02 真机实测确认
 DROP_PWM = 2000              # 松开
 SERVO_TRAVEL_S = 2.0         # 等舵机转到位（舵机没有位置反馈，只能等）
-PRECISION_LAND_S = 30.0      # 精降时限：30 秒内必须落下来，超时就改用普通降落
+PRECISION_LAND_S = 30.0      # 边瞄准边降落这一段的总时限，到点就交给普通降落
+DESCENT_STEP_M = 0.4         # 每一步下降多少：降一点就重新解算一次目标位置
+HANDOFF_AGL_M = 0.7          # 降到离地这么高就交给普通降落（再低下视相机看不全标志）
+HANDOFF_TOL_M = 0.15         # 到交接高度附近就算到了：悬停本身有零点几十厘米的起伏，
+                             # 死等"严格低于交接高度"会一直卡在上面空耗（实测卡满30秒）
 DROP_HOLD_S = 3.0            # 投放后在火点上方多停一会，确认弹已脱手
 
 # 题目给的 3 根立柱（坐标已知，可以写进程序）。r 是方立柱的半对角线（截面
@@ -249,22 +253,47 @@ def aim_at(sdk, tag, what):
     return wx, wy
 
 
+def descend_onto(sdk, tag, what):
+    """边瞄准边降落：每降一小段就把目标位置重新解算一次，直接命令"目标正上方、
+    低一点"那个位置——水平修正和下降在同一条指令里完成；降到交接高度后交给
+    普通降落收尾。
+
+    为什么不用 precision_land_and_confirm()：那是"对准一点、下降一点、再对准"
+    的分级下降，从 2.5 米下来要 40 秒以上，30 秒的时限内根本走不完，每次都会
+    走超时兜底（2026-09-23 实测），等于精度只做了一半。这里换成连续修正，同一
+    时间既在对准也在下降，30 秒够用；最后 0.7 米交给 land()，那一段本来就只能
+    垂直下降，再修也无意义。
+    """
+    deadline = time.monotonic() + PRECISION_LAND_S
+    while time.monotonic() < deadline:
+        _, _, z = sdk.get_local_position()
+        try:
+            t = sdk.locate_target(tag, timeout=2.0, samples=3)
+        except DetectionTimeoutError:
+            print(f'[{sdk.namespace}] 下降中看不到{what}了，就地转普通降落', flush=True)
+            break
+        agl = z - t.z                       # t.z 是解算出的地面高度
+        if agl <= HANDOFF_AGL_M + HANDOFF_TOL_M:
+            print(f'[{sdk.namespace}] 已降到离地 {agl:.2f} m，交给普通降落', flush=True)
+            break
+        next_agl = max(HANDOFF_AGL_M, agl - DESCENT_STEP_M)
+        print(f'[{sdk.namespace}] 对准{what} ({t.x:.2f}, {t.y:.2f}) 并降到离地 '
+              f'{next_agl:.2f} m（当前 {agl:.2f} m，{t.samples}帧离散 {t.spread_m:.2f}m）',
+              flush=True)
+        sdk.goto_direct(t.x, t.y, t.z + next_agl)
+    else:
+        print(f'[{sdk.namespace}] 边瞄准边降落用满 {PRECISION_LAND_S:.0f} 秒，转普通降落',
+              flush=True)
+    sdk.land()                              # 最后一段普通降落
+
+
 def pick_up_supply(sdk):
     """飞到物资点，对准灭火弹，精准降落并抓取，再起飞。"""
     fly_above(sdk, SUPPLY_POINT[0], SUPPLY_POINT[1], '物资点')
     if aim_at(sdk, SUPPLY_TAG, '灭火弹') is not None:
         sdk.play_sound_light('任务机发现灭火弹')
 
-    # 精准降落：对准一点、下降一点、再对准，最后一段交给飞控 AUTO_LAND。
-    # 限时 30 秒——看不清标志时精降会一直悬着不下来，任务不能耗在这儿；
-    # 到点就放弃精度、直接落。
-    try:
-        sdk.precision_land_and_confirm(SUPPLY_TAG, timeout=PRECISION_LAND_S)
-    except ActionFailedError:
-        print(f'[{sdk.namespace}] 精降 {PRECISION_LAND_S:.0f} 秒没完成，改用普通降落', flush=True)
-        # 必须先让精降节点交出控制：它超时了也还在发指令，不停掉会和 land() 抢
-        sdk.stop_precision_servo()
-        sdk.land()
+    descend_onto(sdk, SUPPLY_TAG, '灭火弹')
     print(f'[{sdk.namespace}] 已降落在物资点，开始抓取', flush=True)
 
     sdk.play_sound_light('任务机抓取灭火弹')
@@ -289,9 +318,18 @@ def drop_on_fire(sdk, fire_world_xy):
 
 
 def supply_return_and_land(sdk):
-    """返回自己的起飞点降落（起飞点就是局部系原点）。"""
+    """返回自己的起飞点降落（起飞点就是局部系原点）。
+
+    回程这一段的不可达要吃掉：规划器经常把飞机停在离起飞点半米左右就不再推进
+    （超过 goto() 的 0.3 米到点阈值，于是被判不可达），但那时其实已经到家门口了，
+    后面的 goto_direct 足够收准。2026-09-24 实测过一次没吃这个异常，整段任务在
+    最后一步抛异常退出、飞机留在空中。
+    """
     pad_x, pad_y, _ = sdk.local_to_world(0.0, 0.0, 0.0)
-    fly_above(sdk, pad_x, pad_y, '起飞点')
+    try:
+        fly_above(sdk, pad_x, pad_y, '起飞点')
+    except GotoUnreachableError as exc:
+        print(f'[{sdk.namespace}] 回程判不可达（{exc}），用直飞收尾', flush=True)
     sdk.goto_direct(0.0, 0.0, CRUISE_AGL_M)     # 最后一段收准再落
     sdk.land()                                  # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
