@@ -98,11 +98,16 @@ def draw(layout, route, out_path):
     o.append(f'<rect x="{px(terr["x"]-terr["size_x"]/2):.1f}" y="{py(terr["y"]+top_w/2):.1f}" '
              f'width="{terr["size_x"]*SC:.1f}" height="{top_w*SC:.1f}" fill="#8c6d52" stroke="#5c3d22" '
              f'stroke-width="1.5" stroke-dasharray="5 4"/>')
-    o.append(f'<text x="{px(terr["x"]-terr["size_x"]/2)-10:.1f}" y="{py(terr["y"])+5:.1f}" font-size="13" '
-             f'fill="#7f5539" text-anchor="end">仿地模块 ({terr["x"]:g}, {terr["y"]:g}) 长{terr["size_x"]:g}×'
-             f'下底{terr["size_y"]:g}×高{terr["size_z"]:g} m</text>')
-    o.append(f'<text x="{px(terr["x"]+terr["size_x"]/2)+8:.1f}" y="{py(terr["y"])+5:.1f}" font-size="11.5" '
-             f'fill="#7f5539">梯形：上底{top_w:g} m，两侧45°坡</text>')
+    # 坡角按 yaml 现算，别写死：下底 3/上底 1/高 0.5 时单侧水平 1 m、抬高 0.5 m
+    # -> 26.6°（早先模块高 1 m 时才是 45°，改成 0.5 m 后图上那个 45° 就错了）
+    run = (terr['size_y'] - top_w) / 2.0
+    slope_deg = math.degrees(math.atan2(terr['size_z'], run)) if run > 1e-9 else 90.0
+    # 标注挪到模块正下方：写在左边会跟同一条 y 上的"物资点 (-4,-6)"叠在一起
+    o.append(f'<text x="{px(terr["x"]):.1f}" y="{py(terr["y"]-terr["size_y"]/2)+18:.1f}" font-size="13" '
+             f'fill="#7f5539" text-anchor="middle">仿地模块 ({terr["x"]:g}, {terr["y"]:g}) '
+             f'长{terr["size_x"]:g}×下底{terr["size_y"]:g}×高{terr["size_z"]:g} m</text>')
+    o.append(f'<text x="{px(terr["x"]):.1f}" y="{py(terr["y"]-terr["size_y"]/2)+34:.1f}" font-size="11.5" '
+             f'fill="#7f5539" text-anchor="middle">梯形：上底{top_w:g} m，两侧{slope_deg:.0f}°坡</text>')
 
     r = cyl['diameter'] / 2
     o.append(f'<circle cx="{px(cyl["x"]):.1f}" cy="{py(cyl["y"]):.1f}" r="{(r+INFLATE)*SC:.1f}" fill="#fff4e6" '
