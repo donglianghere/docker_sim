@@ -427,8 +427,8 @@ services:
       - EGO_MAX_RAY_LENGTH=${EGO_MAX_RAY_LENGTH:-15.0}  # [m] 单帧点云raycasting
                                   # 有效标记距离，原来4.5米同样是深度相机遗留
                                   # 默认值，远小于mid-360实际探测距离，理由同上
-      - EGO_DIST0=${EGO_DIST0:-1.5}  # [m] 障碍物安全距离阈值。calcDistanceCost
-      - EGO_VIRTUAL_CEIL_HEIGHT=${EGO_VIRTUAL_CEIL_HEIGHT:-4.5}  # [m] 规划器虚拟天花板，必须满足 巡航高度 < 它-0.1-EGO_DIST0，见launch注释
+      - EGO_DIST0=${EGO_DIST0:-1.0}  # [m] 障碍物安全距离阈值。calcDistanceCost
+      - EGO_VIRTUAL_CEIL_HEIGHT=${EGO_VIRTUAL_CEIL_HEIGHT:-6.0}  # [m] 规划器虚拟天花板，必须满足 巡航高度 < 它-0.1-EGO_DIST0，见launch注释
                                   # Rebound的代价是"够远就归零"的硬截断（不是
                                   # 越远越好的连续势场），原来0.5米配合0.6米的
                                   # obstacles_inflation実測仍然"贴着膨胀边缘飞"，
@@ -557,8 +557,8 @@ services:
       - EGO_YAW_DOT_MAX=${EGO_YAW_DOT_MAX:-0.8}
       - EGO_LOCAL_UPDATE_RANGE_XY=${EGO_LOCAL_UPDATE_RANGE_XY:-15.0}
       - EGO_MAX_RAY_LENGTH=${EGO_MAX_RAY_LENGTH:-15.0}
-      - EGO_DIST0=${EGO_DIST0:-1.5}
-      - EGO_VIRTUAL_CEIL_HEIGHT=${EGO_VIRTUAL_CEIL_HEIGHT:-4.5}  # [m] 规划器虚拟天花板，必须满足 巡航高度 < 它-0.1-EGO_DIST0，见launch注释
+      - EGO_DIST0=${EGO_DIST0:-1.0}
+      - EGO_VIRTUAL_CEIL_HEIGHT=${EGO_VIRTUAL_CEIL_HEIGHT:-6.0}  # [m] 规划器虚拟天花板，必须满足 巡航高度 < 它-0.1-EGO_DIST0，见launch注释
       - EGO_SWARM_CLEARANCE=${EGO_SWARM_CLEARANCE:-1.0}
       - EGO_NO_REPLAN_THRESH=${EGO_NO_REPLAN_THRESH:-1.0}  # 同上，两架飞机必须保持一致，
                                   # 见flight-stack-nx01那边的完整注释
