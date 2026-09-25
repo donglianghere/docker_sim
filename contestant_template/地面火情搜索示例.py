@@ -236,7 +236,9 @@ def drive_servos(sdk, pwm, label):
 def fly_above(sdk, world_x, world_y, what):
     """飞到某个世界坐标的上方（走规划器，有避障）。"""
     print(f'[{sdk.namespace}] 飞往{what} ({world_x:.2f}, {world_y:.2f})', flush=True)
-    sdk.goto(*sdk.world_to_local(world_x, world_y, CRUISE_AGL_M))
+    leg = sdk.world_to_local(world_x, world_y, CRUISE_AGL_M)
+    with sdk.fixed_altitude(leg[2]):    # 转场段定高。2026-09-25 漏了这一处，实测被
+        sdk.goto(*leg)                  # 规划器一路压到 1.02 米，整段取弹任务因此丢掉
 
 
 def aim_at(sdk, tag, what):

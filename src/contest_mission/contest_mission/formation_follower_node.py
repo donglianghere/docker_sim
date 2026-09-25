@@ -970,6 +970,35 @@ class FormationFollowerNode(Node):
             # 点，"落后3.5米"会落在缓冲区起点，僚机会被拉着往长机起飞点飘
             # （实测现象：长机还没动，僚机先飞了）。等轨迹长度够了再入列。
             if self._leader_path.total_length() < follow_distance_m:
+                # 起步前的朝向对准放在**等待期间**做。原来放在下面的跟随分支里，
+                # 于是顺序变成"长机先飞出 4 米 -> 僚机才开始转向 -> 再稳 3 秒 ->
+                # 才起步"，白白慢 5 秒，之后只能靠加速去追（用户 2026-09-25 指出
+                # "起步反应慢、后边使劲追"）。挪到这里之后，长机飞够 4 米时僚机
+                # 已经对好方向、稳定完毕，可以立刻跟上，追赶幅度自然小。
+                if bool(self.get_parameter('yaw_follow_leg').value) and not self._first_align_done:
+                    tol0 = math.radians(float(self.get_parameter('yaw_leg_tol_deg').value))
+                    settle0 = float(self.get_parameter('pre_follow_settle_s').value)
+                    flat0 = list(self.get_parameter('leg_route_xy').value or [])
+                    pts0 = [(flat0[i], flat0[i + 1]) for i in range(0, len(flat0) - 1, 2)]
+                    if len(pts0) >= 2:
+                        leg0 = math.atan2(pts0[1][1] - pts0[0][1], pts0[1][0] - pts0[0][0])
+                        own0 = self._own_yaw if self._own_yaw is not None else leg0
+                        if self._yaw_ref is None or _ang_diff(leg0, self._yaw_ref) > tol0:
+                            self._yaw_ref = leg0
+                            self._yaw_reached_t = None
+                            self.get_logger().info(
+                                f'等长机起步期间先把机头转到第1段航向 '
+                                f'{math.degrees(leg0):.0f}°（当前 {math.degrees(own0):.0f}°）')
+                        elif _ang_diff(own0, leg0) <= tol0:
+                            now0 = time.monotonic()
+                            if self._yaw_reached_t is None:
+                                self._yaw_reached_t = now0
+                            elif now0 - self._yaw_reached_t >= settle0:
+                                self._first_align_done = True
+                                self.get_logger().info(
+                                    f'航向已到位并稳定 {settle0:.0f} 秒，长机一走就能跟上')
+                        else:
+                            self._yaw_reached_t = None
                 self._publish_hold(own_z_hold=True)
                 self.get_logger().info(
                     f'长机轨迹长度{self._leader_path.total_length():.1f}m < 跟随距离'
