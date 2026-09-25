@@ -3,8 +3,8 @@
 """双机一字纵队编队飞行。两机跑同一份代码，靠 --role 区分。
 
     python3 编队飞行示例.py --namespace NX01 --role leader  --teammate NX02 \
-        --route "7,-9.5 7,9.5 -7,9.5 -7,-9.5" --spacing 4.0
-    python3 编队飞行示例.py --namespace NX02 --role follower --teammate NX01 --spacing 4.0
+        --route "7,-9.5 7,9.5 -7,9.5 -7,-9.5" --spacing 3.5
+    python3 编队飞行示例.py --namespace NX02 --role follower --teammate NX01 --spacing 3.5
 
 航点是世界坐标 (x, y)，至少两个，按顺序飞。僚机不需要知道航线，它沿长机
 实际飞过的轨迹走，沿轨迹间距不小于 --spacing（这是下限，不是要死守的值）。
@@ -187,7 +187,7 @@ def main():
     ap.add_argument('--teammate', required=True)
     ap.add_argument('--route', default=DEFAULT_ROUTE,
                     help='"x1,y1 x2,y2 ..."，只有长机需要，默认走大赛那条环场航线')
-    ap.add_argument('--spacing', type=float, default=4.0, help='沿轨迹间距下限（米）')
+    ap.add_argument('--spacing', type=float, default=3.5, help='沿轨迹间距下限（米）')
     args = ap.parse_args()
 
     # SDK 的 role 只认 recon/supply，这里映射成更直白的 leader/follower
