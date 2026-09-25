@@ -1,0 +1,28 @@
+diff --git a/src/planner/plan_manage/src/ego_replan_fsm.cpp b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+index 2d67ea2..84efed1 100755
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -326,7 +326,22 @@ namespace ego_planner
+ 
+     init_pt_ = odom_pos_;
+ 
+-    Eigen::Vector3d end_wp(msg->pose.position.x, msg->pose.position.y, 1.0);
++    // docker_sim 2026-09-25：**目标高度必须用消息里的 z**，不能写死。
++    // upstream demo 这里硬编码 1.0，是因为 RViz 的"2D Nav Goal"点不出高度；但本
++    // 项目的目标点来自 rviz_goal_bridge_node（选手 sdk.goto(x,y,z) 一路传下来的
++    // 真实高度），写死会把选手指定的高度整个丢掉，飞机一律飞 1.0 米。
++    // 实测取证（纯爬升实验，空旷处、同一 x/y、无水平运动）：命令从 1.58 米爬到
++    // 2.59 米，position_cmd 的 z 却直接变成 1.00，飞机反而降到 0.99。由此连锁：
++    //   · 任务机飞物资点（目标2.43）飞到 1.02，水平只差 6cm 却因高度差 1.41m 被
++    //     goto 的三维到点判据（0.3m）判"不可达"，整段取弹任务丢失；
++    //   · 高层巡检"保持朝向、只换高度到 2.5m"永远到不了，12 次检测只做了 4 次；
++    //   · 各段返航同样降到 1.0 米。
++    // 之前"开了定高就正常"不是巧合：traj_server 的定高开关（alt_mode，见
++    // ego_planner_traj_server_fixed_altitude.patch）在发 position_cmd 前把 z 覆盖
++    // 掉，等于把这个 bug 遮住了；没开定高的航段就暴露出来。
++    // 兼容性：z<-0.1 的消息在函数开头已经被挡掉（上游原有判断），所以这里拿到的
++    // z 一定是调用方有意给的值。
++    Eigen::Vector3d end_wp(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
+ 
+     // docker_sim: upstream demo只在PRESET_TARGET模式的readGivenWps()里调用
+     // displayGoalPoint()，MANUAL_TARGET模式（这套集成fsm/flight_type=1用的
