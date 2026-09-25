@@ -41,7 +41,7 @@ from contest_sdk.exceptions import GotoUnreachableError, TeammateUnreachableErro
 # 仿地模块 (7, -6)（长边 3 米，占 x∈[5.5, 8.5]），长机到那儿会被规划器带着
 # 绕一下，僚机跟轨迹也会跟着扭——不是故障。
 ROUTE = [(7.0, -9.5), (7.0, 9.5), (-7.0, 9.5), (-7.0, -9.5)]
-SPACING_M = 3.5                      # 僚机沿轨迹的跟随间距下限
+SPACING_M = 4.0                      # 僚机沿轨迹的跟随间距下限（2026-09-25 由 3.5 调大）
 RETURN_AGL_M = 地面.CRUISE_AGL_M     # 侦察机回起飞点等待的高度
 SUPPLY_LANDED_EVENT = '任务机本阶段已降落'
 WAIT_SUPPLY_S = 900.0                # 侦察机等任务机降落最多等多久

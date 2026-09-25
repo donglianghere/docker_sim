@@ -544,7 +544,7 @@ class FormationFollowerNode(Node):
         # distance_m=3.5)`用的值，这里同步一个一致的默认值，避免"没
         # 显式传这个参数就跟随距离为0/未定义"这种容易被忽略的边界情况；
         # SDK仍然会显式传这个值，这个默认值主要是防呆。
-        self.declare_parameter('follow_distance_m', 3.5)
+        self.declare_parameter('follow_distance_m', 4.0)
         # leader_namespace默认空字符串——刻意不给一个"看起来合理"的
         # 默认命名空间（比如不能默认填'NX01'），那样等于变相硬编码了
         # 角色分配，违反1.5节"角色运行时决定，不能焊死在机身编号上"的
@@ -645,6 +645,22 @@ class FormationFollowerNode(Node):
         # ——2026-09-24 实测就是这么卡住的，僚机转完前两段之后一路保持 90°，第 3、
         # 4 段该朝西朝南时机头还指着北（用户指出"任务机航向又搞错了"）。
         self.declare_parameter('leg_corner_slack_m', 0.8)
+        # 起步前先对准第一段航向、到位后再等这么久才开始跟随（用户 2026-09-25
+        # 要求"变化到位等3秒再跟随，别一边偏航一边飞"）。只作用于**入列前那一次**
+        # 对准；拐角处的转向本来就已经是"停下转、转到位再走"。
+        self.declare_parameter('pre_follow_settle_s', 3.0)
+        # 航点吸附：参考点走到航线上某个航点这么近时，位置指令直接给那个航点的
+        # 精确坐标，保证僚机**真的过点**而不是"过附近"。2026-09-25 实测未吸附时
+        # 僚机离四个航点最近 0.17~0.43 米——能过，但那是控制精度碰出来的，不是
+        # 保证。只吸附中间的航点，不吸附首尾两个（那是长机的起降点，僚机要回
+        # 自己的起降点）。给 0 关闭。
+        # 到点判据：走完一段之后，先飞到该航点的**精确坐标**、确认进到这个半径
+        # 以内，再转向、再走下一段——跟长机的 goto() 到点判据是一个套路。
+        # 2026-09-25 实测：只做"参考点经过时把指令吸到航点上"不够，参考点在
+        # 吸附半径内只待约 1.6 秒，飞机还没收敛指令就走了，最近距离只从 0.43 米
+        # 改善到 0.22 米。给 0 关闭（退回"只跟轨迹、不保证过点"）。
+        self.declare_parameter('waypoint_reach_m', 0.15)
+        self.declare_parameter('waypoint_reach_timeout_s', 15.0)
 
         # ---- 跨机对齐（2026-09-21订正）----
         # 原来用 TF（<长机ns>/odom -> 自己的 odom）做跨机变换，实测不可靠：
@@ -706,6 +722,10 @@ class FormationFollowerNode(Node):
         self._yaw_ref: Optional[float] = None
         self._yaw_turning: bool = False      # 分段航向：正在原地转向（此时不前进）
         self._leg_idx: int = 0               # 参考点当前走在第几段（只前进不后退）
+        self._first_align_done: bool = False  # 入列前那次对准是否已完成（含等待）
+        self._wp_hold: Optional[Tuple[float, float]] = None   # 正在飞向并确认到点的航点（世界系）
+        self._wp_hold_t0: Optional[float] = None
+        self._yaw_reached_t: Optional[float] = None
         self._leader_last_rx: float = 0.0
         self._last_target_xy: Optional[Tuple[float, float]] = None
         self._action_busy = threading.Lock()
@@ -1062,10 +1082,11 @@ class FormationFollowerNode(Node):
                 own_yaw = self._own_yaw if self._own_yaw is not None else self._yaw_ref
                 flat = list(self.get_parameter('leg_route_xy').value or [])
                 pts = [(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)]
-                if len(pts) >= 2 and not self._yaw_turning:
+                if len(pts) >= 2 and not self._yaw_turning and self._wp_hold is None:
                     # 参考点 target 就在共享（UWB/世界）系里，直接拿它定位在第几段。
                     # 只前进不后退：投影超过本段末端就进下一段。
                     slack = float(self.get_parameter('leg_corner_slack_m').value)
+                    prev_idx = self._leg_idx
                     while self._leg_idx < len(pts) - 2:
                         a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
                         leg_len = math.hypot(b[0] - a[0], b[1] - a[1])
@@ -1073,25 +1094,77 @@ class FormationFollowerNode(Node):
                         if _seg_progress(a, b, target[0], target[1]) < done_at:
                             break
                         self._leg_idx += 1
-                    a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
-                    leg_dir = math.atan2(b[1] - a[1], b[0] - a[0])
-                    if _ang_diff(leg_dir, self._yaw_ref) > tol:
-                        self._yaw_ref = leg_dir        # 这一段的航向，中途不再变
-                        self._yaw_turning = True
+                    if self._leg_idx != prev_idx and 0 < self._leg_idx < len(pts) - 1 \
+                            and float(self.get_parameter('waypoint_reach_m').value) > 0.0:
+                        # 刚走完一段：先飞到这个航点的精确坐标并确认到点，再转向
+                        self._wp_hold = pts[self._leg_idx]
+                        self._wp_hold_t0 = now
                         self.get_logger().info(
-                            f'第{self._leg_idx + 1}段：先转到 {math.degrees(leg_dir):.0f}° 再前飞'
-                            f'（当前 {math.degrees(own_yaw):.0f}°）')
-                if self._yaw_turning:
-                    if _ang_diff(own_yaw, self._yaw_ref) <= tol:
-                        self._yaw_turning = False
-                        self.get_logger().info(
-                            f'航向已到位（{math.degrees(own_yaw):.0f}°），继续前飞')
+                            f'到第{self._leg_idx}段末端，先飞到航点 '
+                            f'({self._wp_hold[0]:.1f}, {self._wp_hold[1]:.1f}) 确认到点')
                     else:
-                        # 转向期间悬停：参考点不前进，位置指令钉在转向前那一点
+                        a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
+                        leg_dir = math.atan2(b[1] - a[1], b[0] - a[0])
+                        if _ang_diff(leg_dir, self._yaw_ref) > tol:
+                            self._yaw_ref = leg_dir        # 这一段的航向，中途不再变
+                            self._yaw_turning = True
+                            self.get_logger().info(
+                                f'第{self._leg_idx + 1}段：先转到 {math.degrees(leg_dir):.0f}° 再前飞'
+                                f'（当前 {math.degrees(own_yaw):.0f}°）')
+
+                hold_motion = False
+                if self._wp_hold is not None:
+                    # 正在"飞到航点并确认到点"：位置指令给航点精确坐标、不再前进
+                    reach = float(self.get_parameter('waypoint_reach_m').value)
+                    t_out = float(self.get_parameter('waypoint_reach_timeout_s').value)
+                    d_wp = math.hypot(own_uwb_x - self._wp_hold[0], own_uwb_y - self._wp_hold[1])
+                    if d_wp <= reach or (now - self._wp_hold_t0) > t_out:
+                        self.get_logger().info(
+                            f'航点已到（差 {d_wp:.2f} m'
+                            + ('' if d_wp <= reach else f'，等了 {t_out:.0f} 秒超时') + '）')
+                        self._wp_hold = None
+                        a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
+                        leg_dir = math.atan2(b[1] - a[1], b[0] - a[0])
+                        if _ang_diff(leg_dir, self._yaw_ref) > tol:
+                            self._yaw_ref = leg_dir
+                            self._yaw_turning = True
+                            self.get_logger().info(
+                                f'第{self._leg_idx + 1}段：先转到 {math.degrees(leg_dir):.0f}° 再前飞'
+                                f'（当前 {math.degrees(own_yaw):.0f}°）')
+                    else:
+                        hold_motion = True
                         self._s_cmd = s_hold
                         moving = False
-                        if self._last_target_xy is not None:
-                            sx, sy = self._last_target_xy
+                        sx = self._wp_hold[0] + offset[0]
+                        sy = self._wp_hold[1] + offset[1]
+                if self._wp_hold is None and self._yaw_turning:
+                    if _ang_diff(own_yaw, self._yaw_ref) <= tol:
+                        self._yaw_turning = False
+                        self._yaw_reached_t = now
+                        self.get_logger().info(
+                            f'航向已到位（{math.degrees(own_yaw):.0f}°）')
+                    else:
+                        hold_motion = True
+                if not self._yaw_turning and not self._first_align_done:
+                    # 入列前那次对准：到位之后还要原地稳 pre_follow_settle_s 秒才起步，
+                    # 不允许"一边偏航一边飞"（用户 2026-09-25 要求）
+                    settle = float(self.get_parameter('pre_follow_settle_s').value)
+                    if self._yaw_reached_t is None:
+                        self._yaw_reached_t = now       # 本来就对着，从现在开始算
+                    if now - self._yaw_reached_t < settle:
+                        hold_motion = True
+                    else:
+                        self._first_align_done = True
+                        self.get_logger().info(
+                            f'航向已稳定 {settle:.0f} 秒，开始跟随长机')
+                if hold_motion and self._wp_hold is None:
+                    # 悬停：参考点不前进、速度给 0、位置钉住不动
+                    self._s_cmd = s_hold
+                    moving = False
+                    if not self._first_align_done:
+                        sx, sy = self._own_xy    # 入列前还没贴上航迹，钉自己当前位置
+                    elif self._last_target_xy is not None:
+                        sx, sy = self._last_target_xy
 
             cmd.position.x, cmd.position.y = float(sx), float(sy)
             cmd.velocity.x = float(cruise * math.cos(tdir)) if moving else 0.0
@@ -1184,6 +1257,10 @@ class FormationFollowerNode(Node):
         self._s_cmd_t = None
         self._yaw_turning = False
         self._leg_idx = 0
+        self._first_align_done = False
+        self._yaw_reached_t = None
+        self._wp_hold = None
+        self._wp_hold_t0 = None
         # 接管控制权：跟随者的设定点由本节点直接喂给 pt4ctrl，绕开 ego_planner
         self._set_relay_mode('formation')
         self.get_logger().info(
