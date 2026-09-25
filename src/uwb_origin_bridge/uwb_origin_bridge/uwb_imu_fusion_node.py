@@ -155,7 +155,17 @@ class UwbImuFusionNode(Node):
         # 测距雷达最小可信量程，参考原agl_hold设计给的0.19-0.2米实测最小
         # 量程，这里留一点余量取0.25米——低于这个值的读数视为"贴地/超出
         # 量程"，不能拿来当AGL观测修正z，只保留IMU纯积分传播。
-        self.declare_parameter('range_min_valid_m', 0.25)
+        # 2026-09-25 用户决定：改成 0.0，**雷达读数是多少就是多少**，不再因为
+        # "低于量程下限"把读数丢掉。原来默认 0.25，本意是挡贴地/起降瞬间跌破量程
+        # 的乱码，副作用是：飞机一触地雷达读 0.000，被判"不可信"后 z 这一路失去
+        # 外部观测、只剩纯 IMU 积分，静止在地面上却一路飘到 0.30 米并停住；喂给
+        # PX4 的视觉高度就成了 0.3 米，PX4 认为飞机还在空中，永远不报
+        # LANDED_STATE_ON_GROUND，pt4ctrl 因此不发解锁（PX4CtrlFSM.cpp:319），
+        # land() 等 30 秒超时，下一次起飞还会被 "Reject AUTO_TAKEOFF. land detector
+        # says that the drone is not landed now!" 拒掉。2026-09-25 实测取证：触地
+        # 后真值 z 恒为 0.05，里程计 z 却 0.06->0.24->0.32->0.30。
+        # 0 恰恰是"我就在地上"的最强证据，不该被当成噪声丢掉。
+        self.declare_parameter('range_min_valid_m', 0.0)
         # 互补滤波时间常数（秒）——越大越平滑但修正IMU零偏/积分漂移越慢，
         # 越小越贴近UWB原始值/差分速度、噪声也越大。2026-08-13第二次修订时
         # position用了比velocity短很多的0.15秒，实测"还是太抖"；这次两个都
@@ -336,6 +346,7 @@ class UwbImuFusionNode(Node):
                 range_age = (t - self._last_range_time) if self._last_range_time is not None else None
                 range_fresh = range_age is not None and 0.0 <= range_age < 0.5
                 if (self._last_range_m is not None and range_fresh
+                        and math.isfinite(self._last_range_m)
                         and self._last_range_m >= self.range_min_valid_m):
                     # 水平倾斜补偿：测距雷达测的是沿机体轴向下的斜距，飞机
                     # 有倾角时斜距会比真实垂直离地高度更长，不修正会系统性
