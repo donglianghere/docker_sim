@@ -67,6 +67,7 @@ from contest_sdk._sound_light_port import build_request as _build_sound_light_re
 from contest_sdk._sound_light_port import encode_command as _encode_sound_light_command
 from contest_sdk.exceptions import (
     ActionFailedError,
+    ContestSdkError,
     DetectionTimeoutError,
     GotoTimeoutError,
     GotoUnreachableError,
@@ -184,6 +185,24 @@ def servo_pwm_to_normalized(spec: ServoSpec, pwm: int) -> float:
 #: py`那份默认值是`send_and_wait_ack()`自己的默认参数，两者语义上是同一个
 #:数字，物理上各自独立声明，改一边不会悄悄影响另一边的默认行为。
 DEFAULT_SEND_TO_TEAMMATE_TIMEOUT_S = 45.0
+
+#: 脱困用的轨迹缓存：每飞这么远记一个点，最多记这么多个（见`_record_trail()`）
+TRAIL_STEP_M = 0.25
+TRAIL_MAX_PTS = 200
+#: 卡住之后沿原路回退多远（米）。2026-09-25用户定：1米不够、而且直线退可能撞上
+#: 别的东西，改成**沿原路**退2米——那条路是刚飞过来的，确定是空的。
+ESCAPE_BACK_M = 2.0
+#: 退完之后等规划器自己宣布"不再陷住"最多等多久（秒）。飞行栈那边要连续规划
+#: 成功若干次才解除，期间不下发轨迹，飞机悬停等着——这正是"等彻底规划成功再飞"。
+ESCAPE_WAIT_CLEAR_S = 20.0
+#: 回退时每段多长（米）/ 每段等到点确认最多等多久（秒）
+ESCAPE_STEP_M = 0.8
+ESCAPE_STEP_TIMEOUT_S = 12.0
+#: 回退每段判到位的容差（米）；以及整个脱困至少要挪出去多远才算成功
+ESCAPE_REACH_M = 0.35
+ESCAPE_MIN_MOVED_M = 1.0
+#: 回退时只认高度不低于「目标高度 - 这个值」的历史点，避开卡住后下沉的那一段
+ESCAPE_Z_TOL_M = 0.5
 
 #: 所有阻塞方法的"进度打印"节流间隔——方案2.2.2节建议"每2-3秒打印一行"，
 #: 取中间值2.5秒。
@@ -694,7 +713,7 @@ class DroneSDK:
         from sensor_msgs.msg import Range
         from nav_msgs.msg import Odometry, Path
         from quadrotor_msgs.msg import PositionCommand, TakeoffLand
-        from std_msgs.msg import Empty, String
+        from std_msgs.msg import Bool, Empty, String
         from vision_msgs.msg import Detection2DArray, Detection3DArray
 
         self._TakeoffLand = TakeoffLand
@@ -783,6 +802,15 @@ class DroneSDK:
         self._waypoint_queue_pub = self._node.create_publisher(Path, 'waypoint_queue', 10)
         self._waypoint_cancel_pub = self._node.create_publisher(Empty, 'waypoint_cancel', 10)
         self._node.create_subscription(String, 'waypoint_state', self._on_waypoint_state, 10)
+        # 规划器"陷住"信号（飞行栈 ego_replan_fsm 的 planner_stuck_report 补丁发的）。
+        # QoS 要跟发布端一致（TRANSIENT_LOCAL），否则收不到；收不到也不影响，
+        # goto() 里还有原来那套"飞机不动了"的启发式兜底，只是慢几秒。
+        from rclpy.qos import QoSProfile, DurabilityPolicy
+        self._planner_stuck = False
+        self._trail: List[Tuple[float, float, float]] = []
+        self._node.create_subscription(
+            Bool, 'planner_stuck', self._on_planner_stuck,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # ---- set_mission_state/get_mission_state ----
         self._mission_state_pub = self._node.create_publisher(String, 'mission_state', 10)
@@ -892,6 +920,7 @@ class DroneSDK:
     def _on_odom(self, msg: Any) -> None:
         p = msg.pose.pose.position
         self._odom_xyz = (p.x, p.y, p.z)
+        self._record_trail(self._odom_xyz)
         q = msg.pose.pose.orientation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -906,6 +935,25 @@ class DroneSDK:
         q = msg.pose.orientation
         self._uwb_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                                    1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _record_trail(self, xyz: Tuple[float, float, float]) -> None:
+        """按位移抽样记一条最近飞过的轨迹，脱困时原路退回去要用（2026-09-25）。
+
+        每移动 `TRAIL_STEP_M` 记一个点，最多留 `TRAIL_MAX_PTS` 个——够退十几米，
+        内存和 CPU 都可以忽略。**不按时间抽样**：悬停时不该把缓存刷掉，卡住之前
+        那段路正是脱困要用的。
+        """
+        if self._trail and math.dist(self._trail[-1], xyz) < TRAIL_STEP_M:
+            return
+        self._trail.append(tuple(xyz))
+        if len(self._trail) > TRAIL_MAX_PTS:
+            self._trail.pop(0)
+
+    def _on_planner_stuck(self, msg) -> None:
+        """规划器自报陷住/恢复。见`goto()`里的脱困处理。"""
+        if bool(msg.data) != self._planner_stuck:
+            self._progress('规划器报告：' + ('已陷住（起点可能落进障碍物膨胀区）' if msg.data else '已恢复'))
+        self._planner_stuck = bool(msg.data)
 
     def _on_waypoint_state(self, msg: Any) -> None:
         self._waypoint_state = msg.data
@@ -2342,7 +2390,8 @@ class DroneSDK:
             raise LandTimeoutError(timeout_s=timeout, namespace=self.namespace)
         self._progress('降落完成，armed=False')
 
-    def goto(self, x: float, y: float, z: float, timeout: float = 60.0) -> None:
+    def goto(self, x: float, y: float, z: float, timeout: float = 60.0,
+             escape_tries: int = 1) -> None:
         """飞往一个点，阻塞直到到达确认或超时。
 
         底层用现成的`waypoint_queue`（`nav_msgs/Path`）接口——发一个只含
@@ -2410,12 +2459,17 @@ class DroneSDK:
         # 才开始记位置。还没 executing 就不动，说明目标点根本没送达/没被
         # 接收，那是另一类问题，走下面原有的超时，不能报成"不可达"。
         history: List[Tuple[float, float, float, float]] = []
-        stalled = {'hit': False}
+        stalled = {'hit': False, 'why': '飞机停住不动'}
 
         def _check() -> bool:
             # 'cancelled'见下面的说明：这里判断"已经不需要继续等待"，
             # 不是判断"已经到达"——goto()对cancelled的处理见下方。
             if self._waypoint_state in ('completed', 'cancelled'):
+                return True
+            if self._planner_stuck:
+                # 规划器自报陷住：比"飞机不动了"的启发式快几秒，而且是确定事实
+                stalled['hit'] = True
+                stalled['why'] = '规划器自报陷住'
                 return True
             if self._waypoint_state == 'executing' and self._odom_xyz is not None:
                 now = time.monotonic()
@@ -2428,17 +2482,31 @@ class DroneSDK:
                     return True
             return False
 
+        # 目标已经发出去了。如果规划器这会儿还处在"陷住"状态（比如刚脱困回来），
+        # 先等它自己解除再开始判定——飞行栈那边要连续规划成功若干次才解除，期间
+        # 不把轨迹交给控制器，所以这段等待里飞机是悬停的，不会带着一条勉强的轨迹
+        # 冲回障碍里（用户 2026-09-25 要求"等彻底规划成功再飞行"）。
+        if self._planner_stuck:
+            self._progress('规划器仍报陷住，先等它连续规划成功若干次再开始飞…')
+            if not self._poll_until(
+                    lambda: not self._planner_stuck, ESCAPE_WAIT_CLEAR_S,
+                    lambda: self._progress('等规划器解除陷住…')):
+                self._progress(f'等了 {ESCAPE_WAIT_CLEAR_S:.0f} 秒规划器仍报陷住')
+
         ok = self._poll_until(_check, timeout, _progress)
         if stalled['hit']:
             cur = self._odom_xyz
             dist = math.sqrt(sum((cur[i] - (x, y, z)[i]) ** 2 for i in range(3)))
-            # 先撤掉这个目标再抛：不然规划器还在反复尝试一个到不了的点，
+            # 先撤掉这个目标：不然规划器还在反复尝试一个到不了的点，
             # 调用方如果没有立刻发下一个 goto，飞机就一直在那儿折腾。
             self.cancel_goto()
             self._progress(
-                f'目标点({x:.2f}, {y:.2f}, {z:.2f})不可达：已停在'
-                f'({cur[0]:.2f}, {cur[1]:.2f}, {cur[2]:.2f})，离目标{dist:.2f}米，放弃这个点'
+                f'目标点({x:.2f}, {y:.2f}, {z:.2f})飞不过去（{stalled["why"]}）：停在'
+                f'({cur[0]:.2f}, {cur[1]:.2f}, {cur[2]:.2f})，离目标{dist:.2f}米'
             )
+            if escape_tries > 0 and self._escape_from_stuck(history, ref_z=z):
+                self._progress('已脱困，重新发一次这个目标')
+                return self.goto(x, y, z, timeout=timeout, escape_tries=escape_tries - 1)
             raise GotoUnreachableError(
                 target_xyz=(x, y, z), stopped_xyz=tuple(round(v, 2) for v in cur),
                 distance_m=dist, namespace=self.namespace)
@@ -2456,6 +2524,117 @@ class DroneSDK:
             self._progress('目标点已被取消，goto()提前返回（未到达目标点）')
             return
         self._progress(f'已到达({x:.2f}, {y:.2f}, {z:.2f})')
+
+    def _direct_move_watch_odom(self, x: float, y: float, z: float,
+                                tol_m: float, timeout: float) -> bool:
+        """发一个直飞指令，然后**用自己的里程计判到位**，不等 precision_servo 的
+        `'arrived'` 动作确认。返回是否进到了 `tol_m` 以内。
+
+        2026-09-25新增，专门给脱困用。为什么不直接用 `goto_direct()`：那个方法要
+        等节点回 `servo_status=='arrived'`，而脱困时飞机正贴着障碍、指令距离又有
+        一两米，实测 8 秒等不到确认就被判失败，脱困因此整个放弃（连试两次都栽在
+        这儿）。**脱困只关心"飞机确实挪出去了"这一件事**，这个用里程计自己判最
+        直接，也不会被确认链路的任何问题拖死。
+        """
+        ok = self._call_set_parameters_blocking(
+            self._precision_servo_params_cli,
+            {'servo_mode': 'coordinate_goto',
+             'target_x': float(x), 'target_y': float(y), 'target_z': float(z)},
+            timeout_s=5.0,
+        )
+        if not ok:
+            self._progress('脱困：直飞参数没设成功')
+            return False
+
+        def _near() -> bool:
+            cur = self._odom_xyz
+            return cur is not None and math.dist(cur, (x, y, z)) <= tol_m
+
+        return self._poll_until(
+            _near, timeout,
+            lambda: self._progress(
+                f'脱困回退中…目标({x:.2f}, {y:.2f}, {z:.2f})，当前'
+                + (f'({self._odom_xyz[0]:.2f}, {self._odom_xyz[1]:.2f}, {self._odom_xyz[2]:.2f})'
+                   if self._odom_xyz else '未知')))
+
+    def _escape_from_stuck(self, history: List[Tuple[float, float, float, float]],
+                           ref_z: Optional[float] = None) -> bool:
+        """卡住之后**沿原路**退回 `ESCAPE_BACK_M` 米，再等规划器宣布恢复。返回是否脱困成功。
+
+        2026-09-25新增（分层兜底第2层）。为什么必须在外面做：卡死的根因是飞机自身
+        落进了规划器的膨胀区，而 ego-planner 的 `rebound_optimize()` 对"起点在障碍里"
+        直接 `return false`、FSM 失败后又跳回自己无限重试，**没有任何脱困行为**
+        （详见 DEBUG_JOURNAL.md 2026-09-25）。指望规划器自己爬出来是循环依赖。
+
+        三个要点：
+        · **沿原路退**，不是朝反方向直线退——直线退可能撞上别的东西（用户 2026-09-25
+          指出）。原路是刚飞过来的，确定是空的，用 `_record_trail()` 记下的点倒着走。
+        · 走 `goto_direct()`（precision_servo 直飞通路），**不经过规划器**。
+        · 退完之后**等规划器自己宣布不再陷住**再返回。飞行栈那边要连续规划成功若干
+          次才解除、期间不下发轨迹，所以这段等待里飞机是悬停的，不会带着一条勉强的
+          轨迹再冲回去。
+
+        ⚠️ 脱困只是把飞机挪出膨胀区，**不保证下一次 goto 能过去**：几何没变。所以
+        调用方只重试一次，之后必须往上抛，由任务层换航点/跳过这一段（第3层）。
+        """
+        cur = self._odom_xyz
+        if cur is None or len(self._trail) < 2:
+            self._progress('脱困：没有可回退的轨迹记录，放弃')
+            return False
+        # 只回退到"高度还正常"的那段轨迹上。卡住之后飞机会在原地下沉（规划器把
+        # 轨迹压下去，见 DEBUG_JOURNAL.md 2026-09-25），这段下沉本身就有一两米
+        # 弧长，不滤掉的话"沿原路退2米"退的全是下沉那段，终点甚至落到地面以下、
+        # 飞机根本到不了（2026-09-25 验收第2轮实测：回退目标 z=-0.17，只挪了
+        # 0.15 米就失败）。滤完之后第一跳往往是爬回巡航高度——这正是要的。
+        trail = self._trail
+        if ref_z is not None:
+            good = [p for p in trail if p[2] >= ref_z - ESCAPE_Z_TOL_M]
+            if len(good) >= 2:
+                trail = good
+            else:
+                self._progress(f'脱困：轨迹里没有高度接近 {ref_z:.2f} 米的点，只能按原始轨迹退')
+        # 从最近点往回走，凑够 ESCAPE_BACK_M 的弧长
+        back_pts: List[Tuple[float, float, float]] = []
+        acc = 0.0
+        prev = cur
+        for pt in reversed(trail):
+            acc += math.dist(prev, pt)
+            back_pts.append(pt)
+            prev = pt
+            if acc >= ESCAPE_BACK_M:
+                break
+        if acc < 0.5:
+            self._progress(f'脱困：可回退的轨迹只有 {acc:.2f} 米，太短，放弃')
+            return False
+        # 抽稀成大约每 ESCAPE_STEP_M 一个点：逐个 0.25 米地等"到点确认"既慢又脆
+        # （2026-09-25 实测：9 个点里有一段等确认超时，整个脱困就失败了）。
+        # 保留最后一个点（真正的回退终点），中间点只是为了"沿原路"而不是抄直线。
+        sparse: List[Tuple[float, float, float]] = []
+        last = cur
+        for pt in back_pts:
+            if math.dist(last, pt) >= ESCAPE_STEP_M or pt is back_pts[-1]:
+                sparse.append(pt)
+                last = pt
+        self._progress(f'脱困：沿原路回退 {acc:.2f} 米（历史点 {len(back_pts)} 个，'
+                       f'实际飞 {len(sparse)} 段）')
+        for i, pt in enumerate(sparse, start=1):
+            reached = self._direct_move_watch_odom(
+                pt[0], pt[1], pt[2], tol_m=ESCAPE_REACH_M, timeout=ESCAPE_STEP_TIMEOUT_S)
+            if not reached:
+                # 没走到不立刻判死：只要总位移够了就算脱困成功（脱困的目的是"挪出
+                # 膨胀区"，不是"精确到点"）。下面统一按实际位移判。
+                self._progress(f'脱困回退第 {i}/{len(sparse)} 段没走到位，按实际位移判')
+                break
+        moved = math.dist(self._odom_xyz, cur) if self._odom_xyz is not None else 0.0
+        if moved < ESCAPE_MIN_MOVED_M:
+            self._progress(f'脱困失败：只挪了 {moved:.2f} 米（要求 ≥{ESCAPE_MIN_MOVED_M} 米）')
+            return False
+        self._progress(f'脱困回退完成，实际挪了 {moved:.2f} 米')
+        # 注意：**不在这里等规划器恢复**。这会儿目标已经被 cancel_goto() 撤掉了，
+        # 规划器没有目标就根本不规划，也就永远不会"连续成功"，等下去必然超时
+        # （2026-09-25 实测踩过）。等待放在重试的那次 goto() 里、把目标重新发出去
+        # **之后**，见 goto() 里那段。
+        return True
 
     def cancel_goto(self) -> None:
         """打断当前正在进行的`goto()`（发布`Empty`到`waypoint_cancel`）。
