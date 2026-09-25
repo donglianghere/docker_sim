@@ -70,7 +70,7 @@ def main():
 
     sdk = DroneSDK(namespace=args.namespace, role='recon', teammate_namespace=args.teammate)
     try:
-        sdk.takeoff()                               # 自动播"侦察机起飞"
+        sdk.takeoff(height_m=args.agl)              # 直接起到要保持的离地高度
 
         if args.no_follow:
             print(f'[{sdk.namespace}] 对比模式：不开仿地，按绝对高度 {args.agl:.2f} m 飞',

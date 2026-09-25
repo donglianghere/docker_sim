@@ -19,6 +19,8 @@
 高楼位置写在 BUILDINGS 里，几栋都行——仿真里是 3 根立柱，换场地只改这个列表。
 """
 import argparse
+
+import 任务工具 as 工具
 import math
 import threading
 import time
@@ -288,7 +290,7 @@ def recon_return_and_land(sdk):
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准
-    sdk.land()                      # 自动播"侦察机降落"
+    工具.land_or_confirm(sdk)       # 自动播"侦察机降落"
 
 
 def recon_orbit_and_fire(sdk):
@@ -364,7 +366,7 @@ def recon_orbit_and_fire(sdk):
 
 def run_recon(sdk):
     """侦察机：起飞 -> 绕飞侦察破窗 -> 返航降落（单独跑这个示例时的完整流程）。"""
-    sdk.takeoff()                   # 自动播"侦察机起飞"
+    sdk.takeoff(height_m=ORBIT_AGL_M)   # 直接起到绕飞高度
     found = recon_orbit_and_fire(sdk)
     recon_return_and_land(sdk)
     if found:
@@ -417,7 +419,7 @@ def run_supply(sdk, teammate, notice=None):
     print(f'[{sdk.namespace}] 收到高层火情通报：瞄准位置 ({aim[0]:.2f}, {aim[1]:.2f}, {aim[2]:.2f})，'
           f'着火点 ({fire[0]:.2f}, {fire[1]:.2f})', flush=True)
 
-    sdk.takeoff()                   # 自动播"任务机起飞"
+    sdk.takeoff(height_m=ORBIT_AGL_M)   # 直接起到瞄准高度
     try:
         # 直接飞到瞄准位置：侦察机可能还在附近，靠飞控栈的机间回避。
         # 出发前先把朝向目标设成着火点，飞过去的路上机头就转好了。
@@ -445,7 +447,7 @@ def run_supply(sdk, teammate, notice=None):
     except GotoUnreachableError:
         pass
     sdk.goto_direct(0.0, 0.0, aim[2])           # 最后一段收准再落
-    sdk.land()                                  # 自动播"任务机降落"
+    工具.land_or_confirm(sdk)                   # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
 
 

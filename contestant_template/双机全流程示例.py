@@ -31,6 +31,8 @@
 """
 import argparse
 
+import 任务工具 as 工具
+
 import 地面火情搜索示例 as 地面
 import 编队飞行示例 as 编队
 import 高楼火情绕飞版示例 as 高楼
@@ -67,7 +69,7 @@ def return_home_and_land(sdk):
     # 机头恢复成起飞时的朝向：上一个任务可能把它锁在了对准火点的方向上，
     # 带着那个朝向落地、再起飞，下一个任务的画面朝向就不可预期了
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
-    sdk.land()                      # 自动播"侦察机降落"
+    工具.land_or_confirm(sdk)       # 自动播"侦察机降落"
 
 
 def wait_supply_landed(sdk, 通知):
@@ -100,7 +102,9 @@ def run_recon(sdk):
     sdk.on_teammate_event(SUPPLY_LANDED_EVENT, 任务机已降落.on_event)
     僚机就位 = 编队.listen_standby(sdk)
 
-    sdk.takeoff()                   # 自动播"侦察机起飞"；每段任务各起飞一次
+    # 每段任务各起飞一次，且**直接起到该段的巡航高度**——省掉"起飞到1米再爬"
+    # 那一次纯垂直规划（2026-09-25 加）。自动播"侦察机起飞"。
+    sdk.takeoff(height_m=编队.CRUISE_AGL_M)
 
     # ① 编队飞行：全程唯一开定高的一段。本项目默认 LOCALIZATION_SOURCE=uwb_imu，
     # 那套定位的 z 就是离地高度，所以"钉住高度"= 仿地飞行（见 SDK 里
@@ -114,13 +118,13 @@ def run_recon(sdk):
     wait_supply_landed(sdk, 任务机已降落)
 
     # ② 地面火情（任务机已落地，起飞做下一段）
-    sdk.takeoff()
+    sdk.takeoff(height_m=地面.CRUISE_AGL_M)
     found_ground = 地面.recon_search_and_report(sdk)
     return_home_and_land(sdk)
     wait_supply_landed(sdk, 任务机已降落)
 
     # ③ 高楼火情
-    sdk.takeoff()
+    sdk.takeoff(height_m=高楼.ORBIT_AGL_M)
     found_high = 高楼.recon_orbit_and_fire(sdk)
     return_home_and_land(sdk)       # 最后一段，落地即收工
     sdk.play_sound_light('侦察机任务完成')

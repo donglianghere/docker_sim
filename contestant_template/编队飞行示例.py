@@ -19,6 +19,8 @@
 没运行也不影响飞行，只会打一行警告。
 """
 import argparse
+
+import 任务工具 as 工具
 import math
 import time
 
@@ -98,7 +100,8 @@ def leader_route(sdk, route_xy, inbox=None):
 def leader(sdk, route_xy):
     """长机：起飞 -> 编队航线 -> 返航降落（单独跑这个示例时的完整流程）。"""
     inbox = listen_standby(sdk)         # 必须在僚机可能发事件之前注册
-    sdk.takeoff()
+    # 直接起飞到巡航高度，省掉"起飞到1米再 goto 爬上去"那一次纯垂直规划
+    sdk.takeoff(height_m=CRUISE_AGL_M)
     leader_route(sdk, route_xy, inbox)
     _land_at_pad(sdk)
     sdk.play_sound_light('侦察机任务完成')
@@ -109,7 +112,7 @@ def follower(sdk, spacing_m):
     本来就自带起降，可以直接被《双机全流程示例.py》复用。"""
     inbox = _Inbox(sdk, ROUTE_DONE)
     plan = _Inbox(sdk, ROUTE_PLAN)          # 必须在长机可能发之前就注册
-    sdk.takeoff()
+    sdk.takeoff(height_m=CRUISE_AGL_M)      # 直接起飞到编队巡航高度
     # 这个方法返回的含义是"机载已接管、在自己起飞点上空保持"，不是"已入列"。
     # 必须立刻通知长机——入列要等长机走起来，长机又在等这个通知，等入列会死锁。
     # 高度一并下发：僚机的高度由这个节点按定高雷达保持（天然仿地），默认 1.5 米，
@@ -142,7 +145,7 @@ def _land_at_pad(sdk):
     pad = _own_pad(sdk)
     print(f'[{sdk.namespace}] 回起飞点 {pad} 降落', flush=True)
     sdk.goto_direct(*sdk.world_to_local(pad[0], pad[1], CRUISE_AGL_M))
-    sdk.land()
+    工具.land_or_confirm(sdk)
 
 
 def _own_pad(sdk):

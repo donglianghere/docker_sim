@@ -32,6 +32,8 @@
 这样任务机在侦察机动手之前就已经贴着目标待命了，两发之间只差一段几米的飞行。
 """
 import argparse
+
+import 任务工具 as 工具
 import itertools
 import math
 import time
@@ -155,8 +157,14 @@ def inspect_for_fire(sdk):
                 break
             if step in (2, 4):              # 保持朝向，只换高度
                 print(f'[{sdk.namespace}] 保持朝向，移动到 {height:.1f} m', flush=True)
+                up = sdk.world_to_local(mid[0], mid[1], height)
                 try:
-                    sdk.goto(*sdk.world_to_local(mid[0], mid[1], height))
+                    # 钉在**目标高度**上再飞：不钉的话规划器会把轨迹压下去，飞机爬不
+                    # 上去，goto 按三维距离判不到点就抛不可达，这一步被整个跳过——
+                    # 2026-09-25 实测 12 次检测只做了 4 次，每个点"同朝向换高度"的
+                    # 那两次全丢了，等于没在两个高度各看一遍。
+                    with sdk.fixed_altitude(up[2]):
+                        sdk.goto(*up)
                 except GotoUnreachableError:
                     print(f'[{sdk.namespace}] 这个高度不可达，跳过', flush=True)
                     continue
@@ -369,7 +377,7 @@ def run_recon(sdk):
     任务机就位 = 高楼.Notice()
     sdk.on_teammate_event(STANDBY_EVENT, 任务机就位.on_event)
 
-    sdk.takeoff()                   # 自动播"侦察机起飞"
+    sdk.takeoff(height_m=INSPECT_HEIGHTS_M[0])   # 直接起到第一个巡检高度
     found = recon_inspect_and_fire(sdk, 任务机就位)
     高楼.recon_return_and_land(sdk)
     if found:
@@ -398,7 +406,7 @@ def run_supply(sdk, teammate, 通报=None):
     print(f'[{sdk.namespace}] 收到高层火情通报：瞄准位置 ({aim[0]:.2f}, {aim[1]:.2f}, {aim[2]:.2f})，'
           f'着火点 ({fire[0]:.2f}, {fire[1]:.2f})', flush=True)
 
-    sdk.takeoff()                   # 自动播"任务机起飞"
+    sdk.takeoff(height_m=INSPECT_HEIGHTS_M[-1])  # 直接起到待命/瞄准高度
     try:
         # 先到待命点：离侦察机最近、同高度的那个巡检点。先在这儿等着，等侦察机
         # 破完窗再进场，两发之间只差这一小段路。
@@ -451,7 +459,7 @@ def run_supply(sdk, teammate, 通报=None):
     except GotoUnreachableError:
         pass
     sdk.goto_direct(0.0, 0.0, aim[2])           # 最后一段收准再落
-    sdk.land()                                  # 自动播"任务机降落"
+    工具.land_or_confirm(sdk)                   # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
 
 

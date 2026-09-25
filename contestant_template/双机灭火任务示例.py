@@ -27,6 +27,8 @@
 """
 import argparse
 
+import 任务工具 as 工具
+
 import 地面火情搜索示例 as 地面
 import 高楼火情绕飞版示例 as 高楼
 from contest_sdk import DroneSDK
@@ -57,7 +59,7 @@ def return_home_and_land(sdk):
     # 机头恢复成起飞时的朝向：上一个任务可能把它锁在了对准火点的方向上，
     # 带着那个朝向落地、再起飞，下一个任务的画面朝向就不可预期了
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
-    sdk.land()                      # 自动播"侦察机降落"
+    工具.land_or_confirm(sdk)       # 自动播"侦察机降落"
 
 
 def wait_supply_landed(sdk, 通知):
@@ -76,13 +78,13 @@ def run_recon(sdk):
     任务机已降落 = 高楼.Notice()
     sdk.on_teammate_event(SUPPLY_LANDED_EVENT, 任务机已降落.on_event)
 
-    sdk.takeoff()                   # 自动播"侦察机起飞"
+    sdk.takeoff(height_m=地面.CRUISE_AGL_M)   # 直接起到搜索巡航高度
 
     found_ground = 地面.recon_search_and_report(sdk)
     return_home_and_land(sdk)
     wait_supply_landed(sdk, 任务机已降落)
 
-    sdk.takeoff()                   # 任务机已落地，起飞做高楼任务
+    sdk.takeoff(height_m=高楼.ORBIT_AGL_M)    # 任务机已落地，起飞做高楼任务
     found_high = 高楼.recon_orbit_and_fire(sdk)
     return_home_and_land(sdk)       # 最后一段，落地即收工
     if found_ground or found_high:

@@ -22,6 +22,8 @@
 通报火情、收到通报、发现灭火弹、抓取、投放、任务完成）在下面各步里播。
 """
 import argparse
+
+import 任务工具 as 工具
 import threading
 import time
 
@@ -198,7 +200,7 @@ def recon_return_and_land(sdk):
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准，落点精度高一个量级
-    sdk.land()                      # 自动播"侦察机降落"
+    工具.land_or_confirm(sdk)       # 自动播"侦察机降落"；超时再自己确认是否已贴地
 
 
 # ======================== 任务机（follower） ========================
@@ -236,7 +238,12 @@ def drive_servos(sdk, pwm, label):
 def fly_above(sdk, world_x, world_y, what):
     """飞到某个世界坐标的上方（走规划器，有避障）。"""
     print(f'[{sdk.namespace}] 飞往{what} ({world_x:.2f}, {world_y:.2f})', flush=True)
-    sdk.goto(*sdk.world_to_local(world_x, world_y, CRUISE_AGL_M))
+    leg = sdk.world_to_local(world_x, world_y, CRUISE_AGL_M)
+    # 定高。不加的话规划器会把这段轨迹一路压下去：2026-09-25 实测飞到物资点上空时
+    # 水平只差 6 厘米、高度却只有 1.02 米（目标 2.43），goto 按三维距离判到点（0.3 米）
+    # 永远判不到，抛不可达 -> 整段取弹任务丢失。
+    with sdk.fixed_altitude(leg[2]):
+        sdk.goto(*leg)
 
 
 def aim_at(sdk, tag, what):
@@ -294,7 +301,7 @@ def descend_onto(sdk, tag, what):
     else:
         print(f'[{sdk.namespace}] 边瞄准边降落用满 {PRECISION_LAND_S:.0f} 秒，转普通降落',
               flush=True)
-    sdk.land()                              # 最后一段普通降落
+    工具.land_or_confirm(sdk)               # 最后一段普通降落
 
 
 def pick_up_supply(sdk):
@@ -308,7 +315,7 @@ def pick_up_supply(sdk):
 
     sdk.play_sound_light('任务机抓取灭火弹')
     drive_servos(sdk, GRAB_PWM, '抓取')
-    sdk.takeoff()               # 自动播"任务机起飞"
+    sdk.takeoff(height_m=CRUISE_AGL_M)   # 抓完直接起到巡航高度，自动播"任务机起飞"
 
 
 def drop_on_fire(sdk, fire_world_xy):
@@ -341,7 +348,7 @@ def supply_return_and_land(sdk):
     except GotoUnreachableError as exc:
         print(f'[{sdk.namespace}] 回程判不可达（{exc}），用直飞收尾', flush=True)
     sdk.goto_direct(0.0, 0.0, CRUISE_AGL_M)     # 最后一段收准再落
-    sdk.land()                                  # 自动播"任务机降落"
+    工具.land_or_confirm(sdk)                   # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
     print(f'[{sdk.namespace}] 已返回起飞点降落', flush=True)
 
@@ -370,7 +377,7 @@ def recon_search_and_report(sdk):
 
 def run_recon(sdk):
     """侦察机：起飞 -> 搜索通报 -> 返航降落（单独跑这个示例时的完整流程）。"""
-    sdk.takeoff()                   # 自动播"侦察机起飞"
+    sdk.takeoff(height_m=CRUISE_AGL_M)   # 直接起到搜索巡航高度，自动播"侦察机起飞"
     found = recon_search_and_report(sdk)
     recon_return_and_land(sdk)
     if found:
@@ -406,7 +413,7 @@ def run_supply(sdk, teammate, report=None):
           f'({fire_world_xy[0]:.2f}, {fire_world_xy[1]:.2f})', flush=True)
     sdk.play_sound_light('任务机收到地面火情')
 
-    sdk.takeoff()                   # 自动播"任务机起飞"
+    sdk.takeoff(height_m=CRUISE_AGL_M)   # 自动播"任务机起飞"
     try:
         pick_up_supply(sdk)
         drop_on_fire(sdk, fire_world_xy)
