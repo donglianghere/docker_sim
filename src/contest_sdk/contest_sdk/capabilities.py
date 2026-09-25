@@ -185,6 +185,11 @@ def servo_pwm_to_normalized(spec: ServoSpec, pwm: int) -> float:
 #:数字，物理上各自独立声明，改一边不会悄悄影响另一边的默认行为。
 DEFAULT_SEND_TO_TEAMMATE_TIMEOUT_S = 45.0
 
+#: `takeoff(height_m=...)` 允许的起飞高度范围（米）。下限避开地效区，上限见那个
+#: 方法里的说明（规划器天花板约束）。
+TAKEOFF_HEIGHT_MIN_M = 0.5
+TAKEOFF_HEIGHT_MAX_M = 2.8
+
 #: 所有阻塞方法的"进度打印"节流间隔——方案2.2.2节建议"每2-3秒打印一行"，
 #: 取中间值2.5秒。
 PROGRESS_INTERVAL_S = 2.5
@@ -843,6 +848,10 @@ class DroneSDK:
         )
 
         # ---- start_formation_follow/stop_formation_follow：formation_follower_node ----
+        # 起飞高度是 pt4ctrl 的参数（auto_takeoff_land.takeoff_height），
+        # takeoff(height_m=...) 要在发起飞指令之前先改它，见那个方法的说明。
+        self._pt4ctrl_params_cli = self._node.create_client(
+            SetParameters, 'pt4ctrl/set_parameters')
         self._formation_follower_params_cli = self._node.create_client(
             SetParameters, 'formation_follower_node/set_parameters'
         )
@@ -2044,7 +2053,7 @@ class DroneSDK:
         msg.takeoff_land_cmd = cmd_value
         self._publish_with_retry(self._takeoff_land_pub, msg, repeat=repeat, gap_s=gap_s)
 
-    def takeoff(self, timeout: float = 60.0) -> None:
+    def takeoff(self, timeout: float = 60.0, height_m: Optional[float] = None) -> None:
         """起飞：发布`TakeoffLand{TAKEOFF}`，阻塞直到`armed=True`**且**
         飞控自己的起飞状态机真正爬升到位、转入稳定悬停——不是`armed=
         True`就立刻返回。
@@ -2107,6 +2116,27 @@ class DroneSDK:
         供后续"绕飞完/命中后要恢复到起飞前朝向"这类场景使用（不要再
         写死`0.0`）。
         """
+        # 2026-09-25 用户要求：起飞可以直接带高度，省掉"起飞到1米再 goto 爬上去"
+        # 这一次纯垂直规划。不传就用飞控里原来的值（1.0 米），行为跟以前一字不差。
+        # 上限 TAKEOFF_HEIGHT_MAX_M 不是拍的：规划器有天花板约束
+        # `巡航高度 < virtual_ceil_height(4.5) - 0.1 - dist0(1.5) = 2.9`，起飞高度
+        # 超过它，起飞后第一次重规划就会被天花板代价往下推。
+        if height_m is not None:
+            if not (TAKEOFF_HEIGHT_MIN_M <= height_m <= TAKEOFF_HEIGHT_MAX_M):
+                raise ValueError(
+                    f'起飞高度 {height_m} 米超出允许范围 '
+                    f'[{TAKEOFF_HEIGHT_MIN_M}, {TAKEOFF_HEIGHT_MAX_M}]——下限是地效区，'
+                    f'上限受规划器天花板约束（virtual_ceil_height-0.1-dist0）')
+            ok = self._call_set_parameters_blocking(
+                self._pt4ctrl_params_cli,
+                {'auto_takeoff_land.takeoff_height': float(height_m)},
+                timeout_s=5.0,
+            )
+            if not ok:
+                raise ActionFailedError(
+                    action_name='takeoff:set_height', timeout_s=5.0, namespace=self.namespace)
+            self._progress(f'起飞高度设为 {height_m:.2f} m（pt4ctrl 的 takeoff_height）')
+
         # 2026-09-17新增：所有飞机起飞都要走的统一前置检查+反馈流程（用户
         # 明确要求）——起飞前先确认PX4飞控已连接、UWB/里程计定位数据已经
         # 就绪，两项检查各自独立报超时原因（不要笼统报成"没等到armed"，
