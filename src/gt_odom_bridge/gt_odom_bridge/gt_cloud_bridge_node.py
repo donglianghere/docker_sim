@@ -89,6 +89,39 @@ class GtCloudBridgeNode(Node):
         # 最新一帧里程计位姿缓存——点云到达时直接用这个，不等、不插值、
         # 不按时间戳去TF树里找。跟gt_odom_bridge_node/local_position_
         # readback_node发布dlio/odom_node/odom用的默认QoS(depth=10)对齐。
+        # ---- 已知静态障碍物（立柱）注入，2026-09-26 按用户要求加 ----
+        # 起因：grid_map 的点云路径每帧 resetBuffer 推倒重建、没有任何时间累积
+        # （见 plan_env/src/grid_map.cpp::cloudCallback），所以"这一帧雷达没扫到"
+        # 就等于"地图上没有障碍"。实测两种情况都会发生：
+        #   1) 竖直覆盖空洞——飞行中 4.2~5.8% 的帧里，3# 立柱在"跟飞机同高
+        #      ±0.1m"范围内一个点都没有（竖直膨胀恰好也只有 ±0.1m，补不上），
+        #      单次最长 0.46 秒；
+        #   2) 整片点云异常——曾测到连续 2.6 秒三根立柱同时一个点都没有，而
+        #      点云本身照常是 20000 点（偶发，尚未定案）。
+        # 立柱是赛场固定设施，位置尺寸已知，把它们每帧直接写进点云，上面两种
+        # 情况就都影响不到立柱了。注入点在 odom 系里按锁定后的 world->odom 静态
+        # TF 算出来，**不经过上面那条"最新里程计缓存"的变换链路**，所以那条
+        # 链路出问题时注入的柱子依然在正确位置。
+        self.declare_parameter('static_obstacles_enabled', True)
+        # 世界系坐标，按 [x1,y1, x2,y2, ...] 拉平。默认是本赛场三根立柱。
+        self.declare_parameter('static_obstacles_xy', [4.5, 7.0, -4.5, 7.0, 0.0, 0.0])
+        self.declare_parameter('static_obstacle_half_m', 0.5)     # 立柱半宽(1x1米)
+        self.declare_parameter('static_obstacle_top_m', 5.0)      # 采样到多高
+        self.declare_parameter('static_obstacle_bottom_m', 0.2)   # 从多高开始（避开地面过滤区）
+        # xy 采样间距：要让最外圈采样点落在柱子表面上，膨胀才是从表面算起的。
+        # 0.5 米 = 半宽，正好给出 -0.5/0/+0.5 三档、每层 9 个点。
+        self.declare_parameter('static_obstacle_xy_step_m', 0.5)
+        # z 采样间距：必须 <= 2*竖直膨胀半径，否则层与层之间留空。默认 0.15
+        # 是按最保守的竖直膨胀 ±0.1m（grid_map 默认 obstacles_inflation_z=0.1）
+        # 取的；把那个参数调大之后这里也可以跟着放宽以省点数。
+        self.declare_parameter('static_obstacle_z_step_m', 0.15)
+        self.declare_parameter('world_frame', 'world')
+        self._static_obstacles_enabled = bool(
+            self.get_parameter('static_obstacles_enabled').value)
+        self.world_frame = str(self.get_parameter('world_frame').value)
+        self._injected_points = None      # (M,3) odom系，算出来一次就缓存
+        self._injected_warned = False
+
         self._latest_odom_t = None  # (x, y, z)
         self._latest_odom_R = None  # 3x3
 
@@ -148,6 +181,65 @@ class GtCloudBridgeNode(Node):
         self._static_base_to_sensor[sensor_frame] = result
         return result
 
+    def _build_injected_points(self):
+        """把已知立柱在 odom 系里采样成点，成功一次就缓存。
+
+        world->odom 这条变换是起飞时一次性锁定的静态 TF（origin_setter_node 发
+        world -> {ns}/map，{ns}/map -> {ns}/odom 是恒等），锁定之前查不到——那就
+        先不注入，下一帧再试；飞机那时还在停机坪上，没有避障需求。
+
+        ⚠️ 注入位置的准确性完全取决于这条锁定 TF。原点锁在里程计瞬态上会让整
+        套 world_to_local 都带偏（2026-09-24 踩过，已加静止+雷达一致性判据），
+        那种情况下注入的柱子也会跟着偏 —— 现场若发现柱子位置对不上，先查原点
+        锁定，或者直接把 static_obstacles_enabled 置 False 关掉注入。
+        """
+        if self._injected_points is not None:
+            return self._injected_points
+        if not self._static_obstacles_enabled:
+            return None
+        flat = list(self.get_parameter('static_obstacles_xy').value or [])
+        if len(flat) < 2 or len(flat) % 2 != 0:
+            if not self._injected_warned:
+                self.get_logger().warn(
+                    f'static_obstacles_xy 长度 {len(flat)} 不是成对的世界坐标，不注入')
+                self._injected_warned = True
+            return None
+        try:
+            tf = self.tf_buffer.lookup_transform(self.odom_frame, self.world_frame, Time())
+        except (LookupException, ConnectivityException, ExtrapolationException) as exc:
+            self.get_logger().info(
+                f'起飞点原点还没锁定（查 {self.odom_frame} <- {self.world_frame} 失败：{exc}），'
+                f'暂不注入已知立柱，下一帧重试',
+                throttle_duration_sec=5.0)
+            return None
+
+        half = float(self.get_parameter('static_obstacle_half_m').value)
+        top = float(self.get_parameter('static_obstacle_top_m').value)
+        bottom = float(self.get_parameter('static_obstacle_bottom_m').value)
+        xy_step = max(1e-3, float(self.get_parameter('static_obstacle_xy_step_m').value))
+        z_step = max(1e-3, float(self.get_parameter('static_obstacle_z_step_m').value))
+
+        n_xy = max(1, int(round(2 * half / xy_step)) + 1)
+        offs = np.linspace(-half, half, n_xy)
+        zs = np.arange(bottom, top + 1e-6, z_step)
+        pts = []
+        for k in range(0, len(flat), 2):
+            cx, cy = float(flat[k]), float(flat[k + 1])
+            gx, gy, gz = np.meshgrid(offs + cx, offs + cy, zs, indexing='ij')
+            pts.append(np.column_stack([gx.ravel(), gy.ravel(), gz.ravel()]))
+        world_pts = np.vstack(pts)
+
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        R = _quat_to_rot(q.x, q.y, q.z, q.w)
+        odom_pts = world_pts @ R.T + np.array([t.x, t.y, t.z])
+        self._injected_points = odom_pts.astype(np.float64)
+        self.get_logger().info(
+            f'已知立柱注入就绪：{len(flat) // 2} 根 x 每根 {n_xy}x{n_xy}x{len(zs)} 点 '
+            f'= 共 {len(odom_pts)} 点/帧（world->odom 平移 '
+            f'({t.x:.2f}, {t.y:.2f}, {t.z:.2f})）')
+        return self._injected_points
+
     def _on_cloud(self, msg: PointCloud2) -> None:
         if self._latest_odom_t is None:
             # 还没收到过一帧里程计，没有位姿可用——安全跳过，等第一帧
@@ -177,6 +269,12 @@ class GtCloudBridgeNode(Node):
         rot = R_ob @ R_bs
         trans = R_ob @ t_bs + t_ob
         transformed = points @ rot.T + trans
+
+        # 把已知立柱拼进去（在雷达点之后，顺序对 grid_map 没有影响——它只是
+        # 逐点标占据）。注入点是固定的 odom 系坐标，不参与上面那套位姿变换。
+        injected = self._build_injected_points()
+        if injected is not None:
+            transformed = np.vstack([transformed, injected])
 
         out = point_cloud2.create_cloud_xyz32(msg.header, transformed.astype(np.float32))
         out.header.frame_id = self.odom_frame

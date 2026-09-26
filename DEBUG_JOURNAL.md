@@ -36280,3 +36280,44 @@ md5与103全同，外加 `src/contest_sdk/`(904K) 和 `src/contest_mission/`(940
 顺着这条线查`staging`/`vendor`/`patches`（上一轮因为体积大排除掉了）：`staging`(58,843个文件)和`patches`
 **两边完全一致**，`vendor`差4个文件——补同步后发现正是 `quadrotor_msgs` 的两个新action定义
 (`FormationFollow.action`/`Takeoff.action`)，**编队飞行要用的消息接口，漏了build出来就缺**。
+
+---
+
+## 撞3#立柱的根因订正：grid_map在点云这条路上是"每帧推倒重建"，一帧丢了柱子就等于地图上没有柱子（2026-09-26）
+
+用户给的结论：几次撞3#立柱**不是**"初始规划直线穿过障碍中心、规划器就避不开"，
+而是恰好有若干帧障碍点云是空的/不全，属于仿真数据不同步或丢失。
+
+查`staging/ego-planner-swarm/src/planner/plan_env/src/grid_map.cpp`确认了机理，
+跟这个结论对得上，而且比"概率栅格没涨起来"更直接：
+
+本项目喂给规划器的是**点云**（`grid_map/cloud` ← `dlio/odom_node/pointcloud/deskewed`，
+仿真里由`gt_cloud_bridge_node`顶替DLIO发），走的是`GridMap::cloudCallback()`，
+不是深度图那条路。而`cloudCallback()`里第一件事就是：
+
+```cpp
+if (latest_cloud.points.size() == 0) return;          // 整帧全空：直接返回，不动地图
+this->resetBuffer(camera_pos - local_update_range,
+                  camera_pos + local_update_range);   // 否则：先把整个局部框清空
+for (每个点) { 膨胀后写占据 }                          // 再拿这一帧重建
+```
+
+也就是说**这条路上没有任何时间累积**：占据栅格永远只等于"最新这一帧看到的东西"。
+`prob_hit_log_`/`prob_miss_log_`/`count_hit_`/`raycastProcess()`那套概率累积只服务
+深度图路径，本项目根本不走——之前把`probability_hit/miss`、`min_occupancy_log`
+列为候选根因是找错了方向，可以划掉。
+
+两个推论：
+1. **整帧全空反而无害**（早退，地图保留上一帧）。真正要命的是"点数不少、但柱子那
+   一片的点没了/晚到"的**残帧**——照样触发`resetBuffer`，重建出一张没有柱子的图。
+   这正好解释了为什么之前实测到"输入点云里柱子上有12635个点，膨胀图上那片却是0格"。
+2. 这也解释了避障的**双稳态**（同样的航线，一次直进到0.75m下沉，一次1.91m就绕开）
+   ——是"重规划的那一刻正好摊上哪一帧"的竞争，不是几何上的确定性失败。所以调
+   `dist0`/`lambda_collision`/膨胀半径都治不了这个，只会掩盖。
+
+可选的处置方向（尚未实施，等定）：
+- 别每帧推倒重建：改成带衰减的累积，或给`resetBuffer`加条件；
+- 加一道廉价的健全性闸门：本帧点数比最近若干帧的中位数掉得太多就跳过这次更新；
+- 减少丢帧本身：`grid_map`单线程逐点膨胀已知会把一个核吃满（见2026-09-21条目），
+  且deskewed发布者QoS深度只有1，消费端一慢就丢；
+- 提高该话题QoS深度。

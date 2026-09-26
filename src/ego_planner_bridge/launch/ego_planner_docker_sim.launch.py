@@ -249,6 +249,16 @@ def generate_launch_description():
     #     两个都调高，让优化器更愿意为了避障和动力学可行性牺牲一些平滑度。
     planning_horizon = LaunchConfiguration('planning_horizon', default=EnvironmentVariable('EGO_PLANNING_HORIZON', default_value='15.0'))
     obstacles_inflation = LaunchConfiguration('obstacles_inflation', default=EnvironmentVariable('EGO_OBSTACLES_INFLATION', default_value='0.6'))
+    # 竖直膨胀半径（配合 ego_planner_grid_map_inflation_z.patch）——点云路径
+    # (cloudCallback) 原来把竖直膨胀写死成1格(±0.1m)，水平却是0.6m，差6倍。
+    # Mid360逐帧的竖直覆盖并不均匀，稍远处的障碍在rviz里明显呈"层状"，层与层
+    # 之间正好可能落在飞行高度上；再加上grid_map每帧resetBuffer推倒重建、这条
+    # 路径没有任何时间累积，一帧没打到就等于那一帧地图上没有障碍。2026-09-26
+    # 实测：飞行中4.2~5.8%的帧里3#立柱在"跟飞机同高±0.1m"内一个点都没有，单次
+    # 最长0.46秒。默认0.1保持原行为；调大能把层间空隙补上，代价是每个输入点
+    # 要写的格子数从(2*6+1)^2*3=507线性涨（±0.3m -> 1183，±0.6m -> 2197），而
+    # 逐点膨胀本来就已经吃满一个核，调之前先看CPU。
+    obstacles_inflation_z = LaunchConfiguration('obstacles_inflation_z', default=EnvironmentVariable('EGO_OBSTACLES_INFLATION_Z', default_value='0.1'))
     thresh_replan_time = LaunchConfiguration('thresh_replan_time', default=EnvironmentVariable('EGO_REPLAN_THRESH', default_value='0.1'))
     lambda_collision = LaunchConfiguration('lambda_collision', default=EnvironmentVariable('EGO_LAMBDA_COLLISION', default_value='1.0'))
     lambda_feasibility = LaunchConfiguration('lambda_feasibility', default=EnvironmentVariable('EGO_LAMBDA_FEASIBILITY', default_value='0.3'))
@@ -365,6 +375,7 @@ def generate_launch_description():
         DeclareLaunchArgument('yaw_dot_max', default_value=yaw_dot_max, description='Maximum yaw angular rate (rad/s)'),
         DeclareLaunchArgument('planning_horizon', default_value=planning_horizon, description='Planning horizon'),
         DeclareLaunchArgument('obstacles_inflation', default_value=obstacles_inflation, description='Obstacle inflation radius (m)'),
+        DeclareLaunchArgument('obstacles_inflation_z', default_value=obstacles_inflation_z, description='Obstacle inflation radius along Z (m), cloud path only'),
         DeclareLaunchArgument('thresh_replan_time', default_value=thresh_replan_time, description='Minimum time before considering a replan (s)'),
         DeclareLaunchArgument('lambda_collision', default_value=lambda_collision, description='Collision-avoidance cost weight'),
         DeclareLaunchArgument('lambda_feasibility', default_value=lambda_feasibility, description='Dynamic-feasibility cost weight'),
@@ -424,6 +435,7 @@ def generate_launch_description():
             {'grid_map/local_update_range_y': local_update_range_xy},
             {'grid_map/local_update_range_z': 4.5},
             {'grid_map/obstacles_inflation': obstacles_inflation},  # 飞机半宽0.235m+跟踪误差余量，见文件头说明
+            {'grid_map/obstacles_inflation_z': obstacles_inflation_z},  # 竖直膨胀，默认0.1=原行为，见上面声明处的说明
             {'grid_map/local_map_margin': 10},
             {'grid_map/ground_height': -0.01},
             # 地面回波过滤（配合ego_planner_grid_map_ground_filter.patch）——

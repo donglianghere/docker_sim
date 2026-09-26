@@ -1283,8 +1283,16 @@ if [ "${LOCALIZATION_SOURCE}" = "gt" ] || [ "${LOCALIZATION_SOURCE}" = "uwb_imu"
     # gt_odom_bridge_node发的完全一样，这个节点不用关心背后是哪种定位源），
     # 把点云变换到odom系，重新发到同一个话题名——ego_planner_docker_sim.launch.py
     # 的remap不用区分dlio/gt/uwb_imu，三种模式下这个话题名都存在。
+    # 已知立柱注入（2026-09-26）：grid_map点云路径每帧推倒重建、没有时间累积，
+    # 雷达哪一帧没扫到柱子、那一帧地图上就没有柱子。立柱是赛场固定设施，直接
+    # 每帧写进点云最省事。现场若发现柱子位置对不上（多半是起飞点原点锁偏了），
+    # 把 STATIC_OBSTACLES_ENABLED 置 false 就能整个关掉，不用重新build。
     ros2 run gt_odom_bridge gt_cloud_bridge_node \
-        --ros-args -r __ns:="/${NAMESPACE}" &
+        --ros-args -r __ns:="/${NAMESPACE}" \
+        -p static_obstacles_enabled:="${STATIC_OBSTACLES_ENABLED:-true}" \
+        -p static_obstacles_xy:="[${STATIC_OBSTACLES_XY:-4.5,7.0,-4.5,7.0,0.0,0.0}]" \
+        -p static_obstacle_top_m:="${STATIC_OBSTACLE_TOP_M:-5.0}" \
+        -p static_obstacle_z_step_m:="${STATIC_OBSTACLE_Z_STEP_M:-0.15}" &
 fi
 
 # grid_map/frame_id="${NAMESPACE}/map"只是occupancy_inflate等消息header里的

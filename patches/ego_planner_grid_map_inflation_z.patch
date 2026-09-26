@@ -1,0 +1,47 @@
+--- a/src/planner/plan_env/include/plan_env/grid_map.h
++++ b/src/planner/plan_env/include/plan_env/grid_map.h
+@@ -56,6 +56,13 @@
+   Eigen::Vector3d local_update_range_;
+   double resolution_, resolution_inv_;
+   double obstacles_inflation_;
++  // docker_sim: 点云路径(cloudCallback)的**竖直**膨胀半径，单独成参。原来这条
++  // 路径写死 inf_step_z=1（±1格=±0.1m），水平却是 obstacles_inflation_/分辨率
++  // (±0.6m)，各向异性差6倍——Mid360逐帧竖直覆盖本来就不均匀，稍远处的障碍在
++  // rviz里呈明显的层状，层与层之间就是飞机高度上的空洞；配合"每帧resetBuffer
++  // 推倒重建"，一帧打不到飞机所在高度，那一帧地图上该高度就没有障碍。默认0.1
++  // 保持原行为不变，调大即可把层间空隙补上（代价是每点写的格子数线性增长）。
++  double obstacles_inflation_z_;
+   string frame_id_;
+   int pose_type_;
+ 
+--- a/src/planner/plan_env/src/grid_map.cpp
++++ b/src/planner/plan_env/src/grid_map.cpp
+@@ -17,6 +17,9 @@
+   node_->declare_parameter("grid_map/local_update_range_y", -1.0);
+   node_->declare_parameter("grid_map/local_update_range_z", -1.0);
+   node_->declare_parameter("grid_map/obstacles_inflation", -1.0);
++  // docker_sim: 竖直膨胀半径，见grid_map.h里同名成员的说明。默认0.1米
++  // （=1格，等于改动前写死的 inf_step_z=1），不改参数时行为完全不变。
++  node_->declare_parameter("grid_map/obstacles_inflation_z", 0.1);
+   node_->declare_parameter("grid_map/fx", -1.0);
+   node_->declare_parameter("grid_map/fy", -1.0);
+   node_->declare_parameter("grid_map/cx", -1.0);
+@@ -67,6 +70,7 @@
+   node_->get_parameter("grid_map/local_update_range_y", mp_.local_update_range_(1));
+   node_->get_parameter("grid_map/local_update_range_z", mp_.local_update_range_(2));
+   node_->get_parameter("grid_map/obstacles_inflation", mp_.obstacles_inflation_);
++  node_->get_parameter("grid_map/obstacles_inflation_z", mp_.obstacles_inflation_z_);
+   node_->get_parameter("grid_map/fx", mp_.fx_);
+   node_->get_parameter("grid_map/fy", mp_.fy_);
+   node_->get_parameter("grid_map/cx", mp_.cx_);
+@@ -859,7 +863,9 @@
+   Eigen::Vector3d p3d, p3d_inf;
+ 
+   int inf_step = ceil(mp_.obstacles_inflation_ / mp_.resolution_);
+-  int inf_step_z = 1;
++  // docker_sim: 原来写死 inf_step_z = 1，现在由 grid_map/obstacles_inflation_z 决定
++  // （默认0.1米=1格，跟原来一致）。至少保证1格，免得参数填0把竖直膨胀整没了。
++  int inf_step_z = max(1, (int)ceil(mp_.obstacles_inflation_z_ / mp_.resolution_));
+ 
+   double max_x, max_y, max_z, min_x, min_y, min_z;
+ 

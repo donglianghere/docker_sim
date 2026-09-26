@@ -393,6 +393,20 @@ services:
       # 反馈之后加的，同样是"改这里数字不用重新build镜像"的约定。 ------
       - EGO_PLANNING_HORIZON=${EGO_PLANNING_HORIZON:-15.0}   # [m] 单次规划前瞻距离，
                                   # 原来7.5米太近，遇到障碍物反应距离不够
+      - STATIC_OBSTACLES_ENABLED=${STATIC_OBSTACLES_ENABLED:-true}  # 已知立柱是否每帧注入障碍点云
+                                  # （gt_cloud_bridge_node）。grid_map每帧推倒重建、没有
+                                  # 时间累积，雷达哪一帧没扫到柱子那一帧就等于没柱子；
+                                  # 立柱位置固定已知，直接写进点云最省事。位置对不上就
+                                  # 置false关掉（多半是起飞点原点锁偏了，先查那个）。
+      - STATIC_OBSTACLES_XY=${STATIC_OBSTACLES_XY:-4.5,7.0,-4.5,7.0,0.0,0.0}  # 世界系[x1,y1,x2,y2,...]
+                                  # ⚠️ 每个数都要带小数点（0.0不能写成0），否则ROS
+                                  # 会把它当整数数组、跟double数组参数类型对不上而启动失败。
+      - EGO_OBSTACLES_INFLATION_Z=${EGO_OBSTACLES_INFLATION_Z:-0.1}  # [m] **竖直**膨胀半径（点云路径专用）。
+                                  # 默认0.1=改造前写死的1格，行为不变；调大用来补
+                                  # Mid360逐帧竖直覆盖不均造成的"层状"空洞（rviz里
+                                  # 稍远处障碍一层一层的就是它）。代价：每个输入点写的
+                                  # 格子数 507 -> 1183(±0.3) -> 2197(±0.6)，逐点膨胀
+                                  # 本来就吃满一个核，调大前先看CPU。
       - EGO_OBSTACLES_INFLATION=${EGO_OBSTACLES_INFLATION:-0.6}  # [m] 障碍物膨胀半径，
                                   # 原来0.35（飞机半宽0.235+0.115余量）只够理论值，
                                   # 没给跟踪误差留余量，实测"轨迹绕障、机身贴着
@@ -550,6 +564,9 @@ services:
       - DYN_CONSTR_THRUST_WEIGHT=${DYN_CONSTR_THRUST_WEIGHT:-1e+3}
       # ego_planner专用，必须跟flight-stack-nx01那边给一样的值
       - EGO_PLANNING_HORIZON=${EGO_PLANNING_HORIZON:-15.0}
+      - STATIC_OBSTACLES_ENABLED=${STATIC_OBSTACLES_ENABLED:-true}  # 见NX01那边的说明
+      - STATIC_OBSTACLES_XY=${STATIC_OBSTACLES_XY:-4.5,7.0,-4.5,7.0,0.0,0.0}
+      - EGO_OBSTACLES_INFLATION_Z=${EGO_OBSTACLES_INFLATION_Z:-0.1}  # [m] 竖直膨胀半径，见NX01那边的说明
       - EGO_OBSTACLES_INFLATION=${EGO_OBSTACLES_INFLATION:-0.6}
       - EGO_REPLAN_THRESH=${EGO_REPLAN_THRESH:-0.1}
       - EGO_LAMBDA_COLLISION=${EGO_LAMBDA_COLLISION:-1.0}
