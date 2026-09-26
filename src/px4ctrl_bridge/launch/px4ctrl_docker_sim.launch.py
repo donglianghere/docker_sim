@@ -112,6 +112,16 @@ def generate_launch_description():
                 'auto_takeoff_land.no_RC': True,
                 'auto_takeoff_land.enable': True,
                 'auto_takeoff_land.enable_auto_arm': True,
+                # 2026-09-26：起降爬升/下降速度也拉成环境变量。这个速度跟规划器
+                # 的 max_vel(V_MAX) 毫无关系——AUTO_TAKEOFF/AUTO_LAND 是开环匀速
+                # 积分（PX4CtrlFSM.cpp::get_takeoff_land_des()：
+                # des.p = 起飞点 + (0,0,speed*Δt)），不经过规划器、不发轨迹；
+                # V_MAX 只约束 B 样条轨迹的速度可行性，起飞完成切到 CMD_CTRL
+                # 跟踪轨迹之后才起作用。yaml 里原值 0.3 m/s，这里保持同一个默认。
+                # 降落用的是同一个参数取负号，所以调大它起飞和降落一起变快。
+                'auto_takeoff_land.takeoff_land_speed': ParameterValue(
+                    EnvironmentVariable('PX4CTRL_TAKEOFF_LAND_SPEED', default_value='0.3'),
+                    value_type=float),
             },
         ],
     )

@@ -374,6 +374,11 @@ services:
       # 重新up容器就生效）。默认值等于当前hw_mighty.yaml里实际生效的数字，不设
       # 就是原来的行为；两架飞机必须给一样的值，不然规划行为不一致、多机避让的
       # 假设会被破坏。完整设计说明见README"重要参数放进compose"一节。 ------
+      - PX4CTRL_TAKEOFF_LAND_SPEED=${PX4CTRL_TAKEOFF_LAND_SPEED:-0.3}  # [m/s] 起飞爬升/降落下降速度。
+                                  # pt4ctrl 的 AUTO_TAKEOFF/AUTO_LAND 是开环匀速积分
+                                  # （des.p = 起飞点 + speed*Δt），**跟下面的 V_MAX 无关**——
+                                  # V_MAX 只管规划器轨迹的速度上限，起飞完成切到轨迹跟踪后才起作用。
+                                  # 降落用同一个参数取负号，调大则起降一起变快。
       - V_MAX=${V_MAX:-1.0}                              # [m/s] 最大飞行速度
       - A_MAX=${A_MAX:-3.0}                               # [m/s2] 最大加速度
       - J_MAX=${J_MAX:-5.0}                               # [m/s3] 最大jerk
@@ -552,6 +557,7 @@ services:
       - PX4CTRL_YAW_LOCK_ENABLED=${PX4CTRL_YAW_LOCK_ENABLED:-false}  # 同上，两架飞机
                                   # 必须保持一致，见flight-stack-nx01那边的完整注释
       # 规划/避障/控制参数——必须跟flight-stack-nx01那边给一样的值，见那边的完整注释
+      - PX4CTRL_TAKEOFF_LAND_SPEED=${PX4CTRL_TAKEOFF_LAND_SPEED:-0.3}  # [m/s] 起降速度，见NX01那边的说明
       - V_MAX=${V_MAX:-1.0}
       - A_MAX=${A_MAX:-3.0}
       - J_MAX=${J_MAX:-5.0}
