@@ -71,7 +71,7 @@ MAX_LOOKS = 12                     # 3 个水平点 × 4 次
 # 2#-3# 中点就从侧面（实测入射角约 64°）看到了贴在 2# 上朝着 1# 的标志——看得见，
 # 但既不是正对、也不在该去的位置上。光看"看到了"分不出这两种情况，宽高比能。
 FACE_ON_ASPECT = 0.80              # 宽高比≥这个算正对（cos36.9°=0.80）
-AIM_STANDOFF_M = 3.0               # 正对时停在离标志多远
+AIM_STANDOFF_M = 工具.HANDOFF_STANDOFF_M   # 正对时停在离标志多远（=交接点，规划器只送到这儿）
 STANDBY_CLEARANCE_M = 3.0          # 任务机待命点至少离侦察机这么远（见 standby_point）
 AFTER_FIRE_HOLD_S = 5.0            # 投弹后先在原地停这么久再返航：侦察机这会儿正在
                                    # 往起飞点飞，两机的返航路线会交叠，错开时间最省事
@@ -408,7 +408,10 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
             print(f'[{sdk.namespace}] 等了 {WAIT_STANDBY_S:.0f} 秒没等到任务机就位，先发射', flush=True)
 
     sdk.play_sound_light('侦察机发射破窗弹')
-    高楼.fire_launcher(sdk, '发射破窗弹')
+    # 交接点到这儿为止，最后 1 米脱离规划器直飞进去打，打完原路退回交接点
+    工具.close_in_and_fire(sdk, fire_local, az,
+                           lambda: 高楼.fire_launcher(sdk, '发射破窗弹'),
+                           owner_xy=owner_local)
     sdk.play_sound_light('侦察机破窗完成')
     try:
         sdk.send_to_teammate(BREACH_EVENT, timeout_s=30.0)   # 任务机收到才出发
@@ -487,10 +490,14 @@ def run_supply(sdk, teammate, 通报=None):
         sdk.play_sound_light('任务机到达瞄准点')
         fire_local = sdk.world_to_local(fire[0], fire[1], aim[2])[:2]
         buildings_local = [sdk.world_to_local(bx, by, aim[2])[:2] for bx, by in BUILDINGS]
-        高楼.aim_at_fire(sdk, fire_local, buildings_local)
+        _, fire_local = 高楼.aim_at_fire(sdk, fire_local, buildings_local)
 
         sdk.play_sound_light('任务机发射灭火弹')
-        高楼.fire_launcher(sdk, '发射灭火弹')
+        # 同侦察机：交接点交给规划器，最后 1 米直飞进出
+        owner_local = min(buildings_local, key=lambda b: math.dist(b, tuple(fire_local)))
+        工具.close_in_and_fire(sdk, fire_local, aim_local[2],
+                               lambda: 高楼.fire_launcher(sdk, '发射灭火弹'),
+                               owner_xy=owner_local)
         # 等侦察机先走：它破窗后就开始返航，两机的返航走廊是叠在一起的
         print(f'[{sdk.namespace}] 原地等 {AFTER_FIRE_HOLD_S:.0f} 秒让侦察机先返航', flush=True)
         time.sleep(AFTER_FIRE_HOLD_S)
