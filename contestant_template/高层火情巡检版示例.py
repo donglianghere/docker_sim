@@ -43,6 +43,12 @@ from contest_sdk import DroneSDK
 from contest_sdk.exceptions import DetectionTimeoutError, GotoUnreachableError, TeammateUnreachableError
 
 BUILDINGS = 高楼.BUILDINGS          # 三根立柱的世界坐标，跟绕飞版共用一份
+# 相机内参/标志尺寸也跟绕飞版共用一份，不另写死一套（见那边的注释）
+FOCAL_PX = 高楼.FOCAL_PX
+IMAGE_W = 高楼.IMAGE_W
+IMAGE_H = 480                      # 640x480，跟 camera_info 一致
+TAG_SIZE_M = 高楼.TAG_SIZE_M
+MIN_TAG_PX = 高楼.MIN_TAG_PX
 HIGH_FIRE = 高楼.HIGH_FIRE
 FIRE_EVENT = 高楼.FIRE_EVENT
 
@@ -134,8 +140,7 @@ def inspect_for_fire(sdk):
               flush=True)
         first_local = sdk.world_to_local(mid[0], mid[1], h1)
         try:
-            with sdk.fixed_altitude(first_local[2]):    # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
-                sdk.goto(*first_local)
+            工具.transfer_to(sdk, *first_local)   # 先锁机头朝前进方向、到位等2秒，再定高飞
         except GotoUnreachableError:
             print(f'[{sdk.namespace}] 这个水平点不可达，跳过', flush=True)
             continue
@@ -174,8 +179,44 @@ def inspect_for_fire(sdk):
             det = look_once(sdk, target, why)
             if det is not None:
                 px, py, _ = sdk.get_local_position()
-                return det, (px, py), sdk.get_current_yaw()
+                # 把"这次是在哪个高度看到的"一并带出去：判定着火点实际高度要用
+                return det, (px, py), sdk.get_current_yaw(), height
     return None
+
+
+def elevation_deg(det):
+    """检测框中心相对画面中心的**俯仰**偏差（度，正=目标比飞机高）。
+
+    跟 `bearing_deg()` 的横向偏差是同一套针孔几何，只是换到 y 方向：
+    `atan2(画面中心行 - 框中心行, 焦距像素)`。相机内参 fx=fy=381.35、cy=240.5
+    （见 FOCAL_PX 的注释），这一路一直没被用过。
+    """
+    return math.degrees(math.atan2(IMAGE_H / 2.0 - det.bbox_y, FOCAL_PX))
+
+
+def target_height_from(det, look_agl):
+    """判定着火点的实际高度。**赛项规定它只可能在 INSPECT_HEIGHTS_M 这两个高度上**
+    （用户 2026-09-25 明确），所以这里不是"测高度"，而是**二选一**——这让判据对
+    测距误差非常不敏感。
+
+    做法：把两个候选高度各自"应该看到的俯仰偏差"算出来，跟实测的比，取最接近的。
+        预期偏差(h) = atan2(h - look_agl, 到标志的水平距离)
+    距离用表观尺寸估（FOCAL_PX*TAG_SIZE_M/框宽，跟 locate_fire 同一套）。
+    量级：差 1 米、距离 3~6 米 -> ±9.5°~18°，对应 63~120 像素，远大于检测噪声；
+    同高度则 ≈0°。所以即使距离估计偏个几十厘米，也不会判错。
+
+    框太小（估距不可信）时退回"看到它的那个高度"，并打印说明——这种情况下两个
+    假设都不可信，用手头唯一的直接观测最保守。
+    """
+    elev = elevation_deg(det)
+    if det.bbox_width < MIN_TAG_PX:
+        print(f'  （框只有 {det.bbox_width:.0f} 像素，估距不可信，按看到它的高度 '
+              f'{look_agl:.1f} m 处理）', flush=True)
+        return look_agl
+    range_est = FOCAL_PX * TAG_SIZE_M / det.bbox_width
+    def _predicted(h):
+        return math.degrees(math.atan2(h - look_agl, max(range_est, 0.5)))
+    return min(INSPECT_HEIGHTS_M, key=lambda h: abs(_predicted(h) - elev))
 
 
 def incidence_deg(det):
@@ -263,7 +304,7 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
         return False
     sdk.play_sound_light('侦察机发现高楼火情')
 
-    det, pos, yaw = hit
+    det, pos, yaw, look_agl = hit
     buildings_local = [sdk.world_to_local(bx, by, INSPECT_HEIGHTS_M[-1])[:2] for bx, by in BUILDINGS]
     solved = 高楼.locate_fire(det, pos, yaw, buildings_local)
     if solved is None:
@@ -277,7 +318,15 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
     # 现在的位置到底是不是正对着这个立面？看检测框的宽高比（见 incidence_deg）。
     # 只有相对的那一对立柱之间才贴标志，所以从"不相对"的那条边上看过去必然是斜的，
     # 虽然能看见但不在该去的位置——这一步就是把这两种情况分开。
-    _, _, az = sdk.get_local_position()
+    # 瞄准高度：**从画面里判出来**，既不能用"发现那一刻的高度"，也不能写死一个值。
+    # 在 1.5 m 仰视看到贴在 2.5 m 的标志是完全正常的，"在哪看到"≠"目标在哪"；
+    # 2026-09-25 实测吃过亏——第 5/12 次在 1.5 m 发现，瞄准位姿和通报给任务机的
+    # 高度就都成了 1.5 m，任务机要在低空穿两根立柱之间，规划器卡住、灭火没做成。
+    target_agl = target_height_from(det, look_agl)
+    print(f'[{sdk.namespace}] 判定着火点高度 {target_agl:.1f} m'
+          f'（在 {look_agl:.1f} m 看到，框中心偏画面中心 '
+          f'{elevation_deg(det):+.1f}°）', flush=True)
+    _, _, az = sdk.world_to_local(0.0, 0.0, target_agl)
     aspect = det.bbox_width / det.bbox_height if det.bbox_height >= 1 else 0.0
     if aspect >= FACE_ON_ASPECT:
         print(f'[{sdk.namespace}] 检测框宽高比 {aspect:.2f}，已经是正对着立面，不用挪位置',
@@ -296,10 +345,9 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
         for k, (_, _, pillar, aim_xy) in enumerate(cands, start=1):
             print(f'[{sdk.namespace}] 试候选{k}：正对位置 ({aim_xy[0]:.2f}, {aim_xy[1]:.2f})'
                   f'（这一面朝 ({pillar[0]:.1f}, {pillar[1]:.1f})）', flush=True)
-            sdk.set_yaw_mode_point(*fire_local)     # 出发前设好，路上机头就转到位
             try:
-                with sdk.fixed_altitude(az):            # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
-                    sdk.goto(aim_xy[0], aim_xy[1], az)
+                # 机头锁在着火点上（到了就能直接看），到位等2秒再飞
+                工具.transfer_to(sdk, aim_xy[0], aim_xy[1], az, face_xy=fire_local)
             except GotoUnreachableError:
                 print(f'[{sdk.namespace}] 这个正对位置不可达，换下一个候选', flush=True)
                 continue
@@ -324,8 +372,7 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
         if best is not None and best[1] != aim_xy:
             # 试到最后停在别的候选上，回到看得最清楚的那个
             try:
-                with sdk.fixed_altitude(az):            # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
-                    sdk.goto(best[1][0], best[1][1], az)
+                工具.transfer_to(sdk, best[1][0], best[1][1], az, face_xy=fire_local)
             except GotoUnreachableError:
                 pass
 
@@ -414,11 +461,11 @@ def run_supply(sdk, teammate, 通报=None):
                       if 'pad_x' in 通报.data else None)
         sx, sy, sz = standby_point(aim, aim[2], recon_home)
         print(f'[{sdk.namespace}] 到待命点 ({sx:.2f}, {sy:.2f}, {sz:.2f}) 等侦察机破窗', flush=True)
-        sdk.set_yaw_mode_point(*sdk.world_to_local(fire[0], fire[1], sz)[:2])
         standby_local = sdk.world_to_local(sx, sy, sz)
         try:
-            with sdk.fixed_altitude(standby_local[2]):  # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
-                sdk.goto(*standby_local)
+            # 机头锁在着火点上，到位等2秒再飞——到了待命点就已经对着目标
+            工具.transfer_to(sdk, *standby_local,
+                             face_xy=sdk.world_to_local(fire[0], fire[1], sz)[:2])
         except GotoUnreachableError as exc:
             # 待命点只是个等待的地方，进不去就在原地等——绝不能因此跳过报到，
             # 那样侦察机会一直等我们（2026-09-24 实测过一次）
@@ -435,8 +482,8 @@ def run_supply(sdk, teammate, 通报=None):
             print(f'[{sdk.namespace}] 等了 {WAIT_BREACH_S:.0f} 秒没等到破窗通知，自行进场', flush=True)
 
         aim_local = sdk.world_to_local(*aim)
-        with sdk.fixed_altitude(aim_local[2]):          # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
-            sdk.goto(*aim_local)
+        工具.transfer_to(sdk, *aim_local,
+                         face_xy=sdk.world_to_local(fire[0], fire[1], aim[2])[:2])
         sdk.play_sound_light('任务机到达瞄准点')
         fire_local = sdk.world_to_local(fire[0], fire[1], aim[2])[:2]
         buildings_local = [sdk.world_to_local(bx, by, aim[2])[:2] for bx, by in BUILDINGS]
@@ -454,8 +501,7 @@ def run_supply(sdk, teammate, 通报=None):
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
     home = sdk.world_to_local(pad[0], pad[1], aim[2])
     try:
-        with sdk.fixed_altitude(home[2]):               # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
-            sdk.goto(*home)
+        工具.transfer_to(sdk, *home)    # 先锁机头朝起飞点方向、到位等2秒，再定高飞回去
     except GotoUnreachableError:
         pass
     sdk.goto_direct(0.0, 0.0, aim[2])           # 最后一段收准再落

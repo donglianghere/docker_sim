@@ -49,10 +49,9 @@ def return_home_and_land(sdk):
     print(f'[{sdk.namespace}] 返回起飞点', flush=True)
     home = (0.0, 0.0, RETURN_AGL_M)
     try:
-        # 转场段定高：这一段最长（从场地另一头飞回来），不钉住的话规划器高频
-        # 重规划会把轨迹高度压得很低——用户 2026-09-24 实测高层段返航时看到过
-        with sdk.fixed_altitude(RETURN_AGL_M):
-            sdk.goto(*home)         # 远距离回程走规划器，有避障
+        # 转场段统一动作：先把机头锁到"朝起飞点"的方向、到位后等 2 秒再飞，全程
+        # 定高（这一段最长，不钉住的话规划器会把轨迹高度压下去）
+        工具.transfer_to(sdk, *home)
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准，下一次起飞还是这个点

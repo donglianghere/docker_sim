@@ -16,6 +16,7 @@
 判据不靠"多等几秒"，而是**看飞机自己到底落没落地**：离地高度低于 LANDED_AGL_M
 且基本不动，就认为已落地、继续往下做。真机上同样成立（同一颗雷达、同一条话题）。
 """
+import math
 import time
 
 from contest_sdk.exceptions import DetectionTimeoutError, LandTimeoutError
@@ -54,3 +55,40 @@ def land_or_confirm(sdk) -> bool:
     print(f'[{sdk.namespace}] 没能确认落地：离地 {agl:.2f} m、位移 {moved:.2f} m，还在空中',
           flush=True)
     return False
+
+
+# ---- 转场段的统一动作（用户 2026-09-25 要求：先锁 yaw，到位后等 2 秒再飞）----
+TRANSFER_SETTLE_S = 2.0      # 机头到位后再稳这么久才起步
+TRANSFER_YAW_TIMEOUT_S = 15.0
+
+
+def transfer_to(sdk, x, y, z, face_xy=None, settle_s=TRANSFER_SETTLE_S):
+    """转场到 (x, y, z)：**先把机头锁好、到位后等 settle_s 秒，再定高飞过去**。
+
+    统一三件事，原来各段写法不一致（有的先锁 yaw 再飞、有的飞完才锁、有的一路
+    对着上一个目标）：
+    · 朝向：`face_xy=None` 就**锁住当前朝向**（不转、不等，用户 2026-09-25：没有
+      明确朝向要求的水平转场，锁定当前 yaw 就行）；给了点就悬停转到对着那个点、
+      到位后再等 settle_s 秒才起步（进场瞄准这类，到了就要能直接看目标）；
+    · 高度：整段 `fixed_altitude` 钉在 z 上，规划器不能把它压下去。
+
+    Args:
+        x/y/z: 目标点，这架飞机自己的局部坐标系（跟 `goto()` 一致）。
+        face_xy: 机头要对着的点（局部系）；None=对着前进方向。
+    Raises:
+        跟 `sdk.goto()` 一样——调用方自己决定怎么处理 GotoUnreachableError。
+    """
+    if face_xy is None:
+        # 没有朝向要求：**锁住当前朝向**就行，不必转、也不必等（用户 2026-09-25）。
+        # 锁一下是必要的——不锁的话 traj_server 可能还停在上一段的 POINT 模式，
+        # 机头会在飞行途中跟着目标点慢慢转。
+        sdk.set_yaw_mode_constant(sdk.get_current_yaw())
+    else:
+        # 有朝向要求（进场瞄准、待命点这种，到了就要能直接看目标）：悬停转到位，
+        # 再稳 settle_s 秒才起步，不允许一边偏航一边飞。
+        if not sdk.face_point(face_xy[0], face_xy[1], timeout=TRANSFER_YAW_TIMEOUT_S):
+            print(f'[{sdk.namespace}] 转场前机头没转到位（仍继续，注意画面朝向可能不对）',
+                  flush=True)
+        time.sleep(settle_s)
+    with sdk.fixed_altitude(z):
+        sdk.goto(x, y, z)

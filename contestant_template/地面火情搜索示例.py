@@ -135,6 +135,12 @@ def build_route(sdk):
 def search(sdk, watcher):
     route = build_route(sdk)
     print(f'[{sdk.namespace}] 弓字搜索开始，共 {len(route)} 个航点', flush=True)
+    # 全程朝向不变（用户 2026-09-25 要求）：弓字搜索靠下视相机，机头指向不影响
+    # 覆盖；锁死一个角度可以免掉每次折返时机头跟着航迹来回甩。锁的是起飞时的
+    # 朝向——下一段任务从这个朝向接着做，可预期。
+    hold_yaw = sdk.pretakeoff_yaw if sdk.pretakeoff_yaw is not None else sdk.get_current_yaw()
+    if not sdk.face_yaw(hold_yaw):
+        print(f'[{sdk.namespace}] 搜索前机头没转到位，仍按当前朝向开始搜索', flush=True)
     # 整条搜索航线定高：航点本来就都是同一个高度，钉住之后下视相机的地面覆盖
     # 宽度也恒定（行距就是按这个高度算的），不会因为轨迹高度波动漏扫
     with sdk.fixed_altitude(sdk.world_to_local(0.0, 0.0, CRUISE_AGL_M)[2]):
@@ -195,8 +201,7 @@ def recon_return_and_land(sdk):
     pad = sdk.local_to_world(0.0, 0.0, 0.0)
     home = sdk.world_to_local(pad[0], pad[1], CRUISE_AGL_M)
     try:
-        with sdk.fixed_altitude(home[2]):   # 转场段定高：不然规划器高频重规划会把轨迹高度压下去（见SDK fixed_altitude）
-            sdk.goto(*home)         # 远距离回程走规划器，有避障
+        工具.transfer_to(sdk, *home)    # 先锁机头朝起飞点方向、到位等2秒，再定高飞回去
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准，落点精度高一个量级
@@ -239,11 +244,7 @@ def fly_above(sdk, world_x, world_y, what):
     """飞到某个世界坐标的上方（走规划器，有避障）。"""
     print(f'[{sdk.namespace}] 飞往{what} ({world_x:.2f}, {world_y:.2f})', flush=True)
     leg = sdk.world_to_local(world_x, world_y, CRUISE_AGL_M)
-    # 定高。不加的话规划器会把这段轨迹一路压下去：2026-09-25 实测飞到物资点上空时
-    # 水平只差 6 厘米、高度却只有 1.02 米（目标 2.43），goto 按三维距离判到点（0.3 米）
-    # 永远判不到，抛不可达 -> 整段取弹任务丢失。
-    with sdk.fixed_altitude(leg[2]):
-        sdk.goto(*leg)
+    工具.transfer_to(sdk, *leg)     # 先锁机头朝前进方向、到位等2秒，再定高飞
 
 
 def aim_at(sdk, tag, what):
