@@ -71,7 +71,6 @@ MAX_LOOKS = 12                     # 3 个水平点 × 4 次
 # 2#-3# 中点就从侧面（实测入射角约 64°）看到了贴在 2# 上朝着 1# 的标志——看得见，
 # 但既不是正对、也不在该去的位置上。光看"看到了"分不出这两种情况，宽高比能。
 FACE_ON_ASPECT = 0.80              # 宽高比≥这个算正对（cos36.9°=0.80）
-AIM_STANDOFF_M = 工具.HANDOFF_STANDOFF_M   # 正对时停在离标志多远（=交接点，规划器只送到这儿）
 STANDBY_CLEARANCE_M = 3.0          # 任务机待命点至少离侦察机这么远（见 standby_point）
 AFTER_FIRE_HOLD_S = 5.0            # 投弹后先在原地停这么久再返航：侦察机这会儿正在
                                    # 往起飞点飞，两机的返航路线会交叠，错开时间最省事
@@ -227,7 +226,7 @@ def incidence_deg(det):
 
 
 def face_on_candidates(fire_local, owner_local, buildings_local, drone_xy, det):
-    """按"哪一面朝哪根柱"的两个候选，各给一个正对位置，按可信度排好序。
+    """按"哪一面朝哪根柱"的两个候选，各给一个站位（那条边的水平中点），按可信度排序。
 
     候选只有两个（部署规则：贴在两柱相对的面上，法线必然指向另外某一根柱）。
     排序用测得的入射角（由检测框宽高比反推）跟各假设算出的入射角比，差小的在前。
@@ -248,7 +247,11 @@ def face_on_candidates(fire_local, owner_local, buildings_local, drone_xy, det):
         nx, ny = nx / nn, ny / nn
         angle = math.degrees(math.acos(max(-1.0, min(1.0, nx * vx + ny * vy))))
         err = abs(angle - measured) if measured is not None else 0.0
-        aim = (fire_local[0] + nx * AIM_STANDOFF_M, fire_local[1] + ny * AIM_STANDOFF_M)
+        # 站位就用**这条边的水平中点**（用户 2026-09-26 定）——中点本来就正对着
+        # 贴标志的那个立面，而且是巡检时已经飞过的点，可达性有保证。不再用
+        # "火点 + 法线×站位距离"算：法线得靠检测解出来的火点推，横向偏 0.4 m
+        # 就能把方向带歪 27°、落点甩出 1.4 m（09-26 实测）。
+        aim = ((owner_local[0] + bx) / 2.0, (owner_local[1] + by) / 2.0)
         out.append((err, angle, (bx, by), aim))
     out.sort(key=lambda t: t[0])
     return measured, out
@@ -343,13 +346,13 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
         # 哪个候选，试错本身仍然有效，最多多飞一趟。
         best = None                     # (标志宽度像素, 航点, 火点坐标)
         for k, (_, _, pillar, aim_xy) in enumerate(cands, start=1):
-            print(f'[{sdk.namespace}] 试候选{k}：正对位置 ({aim_xy[0]:.2f}, {aim_xy[1]:.2f})'
+            print(f'[{sdk.namespace}] 试候选{k}：边中点 ({aim_xy[0]:.2f}, {aim_xy[1]:.2f})'
                   f'（这一面朝 ({pillar[0]:.1f}, {pillar[1]:.1f})）', flush=True)
             try:
                 # 机头锁在着火点上（到了就能直接看），到位等2秒再飞
                 工具.transfer_to(sdk, aim_xy[0], aim_xy[1], az, face_xy=fire_local)
             except GotoUnreachableError:
-                print(f'[{sdk.namespace}] 这个正对位置不可达，换下一个候选', flush=True)
+                print(f'[{sdk.namespace}] 这个边中点不可达，换下一个候选', flush=True)
                 continue
             if not sdk.face_point(*fire_local):
                 print(f'[{sdk.namespace}] 到位后朝向没转好，换下一个候选', flush=True)
@@ -399,21 +402,22 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
     except TeammateUnreachableError as exc:
         print(f'[{sdk.namespace}] 高层火情通报没送达队友：{exc}', flush=True)
 
-    # 原地等任务机到待命点再动手：这样它在本机发射前就已经贴着目标了
+    # 就停在当前这个边中点上等任务机到待命点——通报已经发出去了，等的时候机头
+    # 已经对着火情，等完直接进场，不用再挪位置（用户 2026-09-26 定的次序）。
     if 任务机就位 is not None:
-        print(f'[{sdk.namespace}] 在瞄准位置等任务机到待命点…', flush=True)
+        print(f'[{sdk.namespace}] 在边中点原地等任务机到待命点…', flush=True)
         if 任务机就位.wait(WAIT_STANDBY_S):
             print(f'[{sdk.namespace}] 任务机已就位，发射', flush=True)
         else:
             print(f'[{sdk.namespace}] 等了 {WAIT_STANDBY_S:.0f} 秒没等到任务机就位，先发射', flush=True)
 
     sdk.play_sound_light('侦察机发射破窗弹')
-    # 交接点到这儿为止，最后 1 米脱离规划器直飞进去打，打完原路退回交接点
+    # 从边中点直飞进到发射点打，打完原路退回边中点（这中间不走规划器）
     工具.close_in_and_fire(sdk, fire_local, az,
-                           lambda: 高楼.fire_launcher(sdk, '发射破窗弹'),
-                           owner_xy=owner_local)
+                           lambda: 高楼.fire_launcher(sdk, '发射破窗弹'))
     sdk.play_sound_light('侦察机破窗完成')
     try:
+        # 退回边中点**之后**才通知——队友一收到就会进场，这时走廊必须已经让开
         sdk.send_to_teammate(BREACH_EVENT, timeout_s=30.0)   # 任务机收到才出发
     except TeammateUnreachableError as exc:
         print(f'[{sdk.namespace}] 破窗完成没通知到队友：{exc}', flush=True)
@@ -493,11 +497,9 @@ def run_supply(sdk, teammate, 通报=None):
         _, fire_local = 高楼.aim_at_fire(sdk, fire_local, buildings_local)
 
         sdk.play_sound_light('任务机发射灭火弹')
-        # 同侦察机：交接点交给规划器，最后 1 米直飞进出
-        owner_local = min(buildings_local, key=lambda b: math.dist(b, tuple(fire_local)))
+        # 同侦察机：规划器只送到瞄准点（侦察机通报的那个边中点），最后一段直飞进出
         工具.close_in_and_fire(sdk, fire_local, aim_local[2],
-                               lambda: 高楼.fire_launcher(sdk, '发射灭火弹'),
-                               owner_xy=owner_local)
+                               lambda: 高楼.fire_launcher(sdk, '发射灭火弹'))
         # 等侦察机先走：它破窗后就开始返航，两机的返航走廊是叠在一起的
         print(f'[{sdk.namespace}] 原地等 {AFTER_FIRE_HOLD_S:.0f} 秒让侦察机先返航', flush=True)
         time.sleep(AFTER_FIRE_HOLD_S)

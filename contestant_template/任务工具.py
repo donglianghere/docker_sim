@@ -94,80 +94,64 @@ def transfer_to(sdk, x, y, z, face_xy=None, settle_s=TRANSFER_SETTLE_S):
         sdk.goto(x, y, z)
 
 
-# ---- 贴近发射（用户 2026-09-26 要求）------------------------------------
-# 规划器管不到最后这一米：立柱膨胀边界在离柱心 1.10 m（半宽0.5+膨胀0.6），
+# ---- 抵近发射（用户 2026-09-26 定的流程）--------------------------------
+# 规划器管不到最后这一段：立柱膨胀边界在离柱心 1.10 m（半宽0.5+膨胀0.6），
 # 零代价边界在 2.10 m（再加 dist0=1.0）。飞进膨胀区，ego-planner 的
-# rebound_optimize() 会对"起点在障碍里"直接拒绝规划、FSM 原地自旋（今天实测的
+# rebound_optimize() 会对"起点在障碍里"直接拒绝规划、FSM 原地自旋（实测过的
 # 死锁）。所以最后一段必须脱离规划器、用直飞走。
 #
-# 距离都从**标志面**算（标志贴在柱面上，离柱心 0.51 m）：
-HANDOFF_STANDOFF_M = 2.0   # 交接点：规划器只送到这儿（离柱心 2.51 m，在零代价边界外）
-FIRE_STANDOFF_M = 1.0      # 发射点：直飞进到这儿（离柱心 1.51 m，标志约 191 像素宽）
+# 整段动作的次序：站在**正对火情那条边的水平中点**上、机头朝火情 -> 通报队友
+# -> 原地等队友到待命点 -> 沿"中点->火情"这条直线进到发射点 -> 发射 -> 原路退回
+# **出发时那个中点** -> 退到位之后才通知队友 -> 再启动规划器返航。
+# 通知放在退回之后是关键：队友一收到就会进场，这时本机必须已经让出走廊。
+#
+# 进/退方向直接用"出发点->火情"这条线，**不再去推立面法线**（用户 09-26 要求）：
+# 中点本来就正对着立面，这条线就是法线；而推算法线要用检测解出来的火点坐标，
+# 那个坐标横向偏个 0.4 m，3 米外就把方向带歪 27°、把落点甩出 1.4 m（09-26 实测）。
+FIRE_STANDOFF_M = 1.2      # 发射点：直飞进到离火情这么近（标志约 159 像素宽）
 CLOSE_IN_TIMEOUT_S = 30.0
-HANDOFF_SNAP_M = 0.35      # 离交接点这么近就算已经站好了，不再让规划器挪一次
-# 最小站位是这么估出来的：桨尖半径 0.38 m（Iris 电机轴 ±0.13/±0.22，加桨约 0.13）
-# + 直飞到点判据 0.30 m + 余量 0.20 m ≈ 0.9 m，取 1.0 m。
+# 这个距离的下限：桨尖半径 0.38 m（Iris 电机轴 ±0.13/±0.22，加桨约 0.13）
+# + 直飞到点判据 0.30 m + 余量 0.20 m ≈ 0.9 m，取 1.2 m 留更多余量。
 
 
-def close_in_and_fire(sdk, fire_xy, z, fire_fn, owner_xy=None):
-    """最后一段贴近发射：直飞进 -> 发射 -> 原路直飞退回交接点。
+def close_in_and_fire(sdk, fire_xy, z, fire_fn):
+    """抵近发射：从当前位置直飞进到 FIRE_STANDOFF_M -> 发射 -> 原路退回出发点。
 
-    进/退走的是**同一条直线**（默认是立面外法线，见 `owner_xy`）——直进直出，
-    路径上任何一点到立柱的距离都不小于终点，这是几何上最安全的进场方式；斜着
-    进出会让中途某段比终点更贴柱子。
+    出发点就是调用时飞机所在的位置（按流程是正对火情那条边的水平中点），退回时
+    原样飞回去，进退是同一条直线——直进直出，路径上任何一点离立柱都不比终点近。
 
-    调用前飞机应该已经在交接点附近、机头对着火点（`transfer_to(face_xy=...)`
-    会做到）。**这中间绝不能调 `goto()`**：飞机此时在膨胀区内，规划器会拒绝
-    规划并原地自旋。退回交接点之后才允许恢复用规划器。
+    **这中间绝不能调 `goto()`**：飞机此时在膨胀区内，规划器会拒绝规划并原地自旋。
+    退回出发点之后才允许恢复用规划器。
 
     Args:
         fire_xy: 着火点的局部坐标 (x, y)。
         z: 保持的高度（局部系）。
         fire_fn: 发射动作，无参可调用对象（破窗弹/灭火弹各自传自己的）。
-        owner_xy: 贴标志那根柱的柱心局部坐标。给了就沿立面外法线垂直进场；
-            不给就沿"当前位置->火点"这条线进场（那条线的方向取决于飞机停在哪）。
     """
     cx, cy, _ = sdk.get_local_position()
+    back = (cx, cy)                       # 出发点，打完退回这儿
     dx, dy = cx - fire_xy[0], cy - fire_xy[1]
-    n = math.hypot(dx, dy) or 1.0
-    if owner_xy is not None:
-        # 给了柱心就用**立面外法线**（柱心->标志）当进场方向：垂直进场，进场线上
-        # 每一点离柱子都不比终点近。斜着进场的话，1.0 m 处可能已经贴到相邻立面
-        # 或柱角上了（柱角离柱心 0.71 m，比立面的 0.51 m 远）。
-        ox, oy = fire_xy[0] - owner_xy[0], fire_xy[1] - owner_xy[1]
-        on = math.hypot(ox, oy)
-        if on > 1e-3:
-            dx, dy = ox, oy
-            n = on
+    n = math.hypot(dx, dy)
+    if n < FIRE_STANDOFF_M:
+        print(f'[{sdk.namespace}] 当前离火情只有 {n:.2f} m，已经比发射点还近，直接发射',
+              flush=True)
+        sdk.face_point(*fire_xy)
+        fire_fn()
+        return
     ux, uy = dx / n, dy / n
     fire_pos = (fire_xy[0] + ux * FIRE_STANDOFF_M, fire_xy[1] + uy * FIRE_STANDOFF_M)
-    hand_pos = (fire_xy[0] + ux * HANDOFF_STANDOFF_M, fire_xy[1] + uy * HANDOFF_STANDOFF_M)
-    cur = math.dist((cx, cy), tuple(fire_xy))
-    print(f'[{sdk.namespace}] 贴近发射：当前离火点 {cur:.2f} m -> 沿'
-          + ('立面法线' if owner_xy is not None else '当前连线')
-          + f'进到 {FIRE_STANDOFF_M:.1f} m 处发射', flush=True)
-    # ① 先用规划器上到交接点。这一步不能省：`goto_direct` 是从**当前位置**拉直线
-    # 飞的，飞机不在法线上时那条直线会抄近道切柱角。站到交接点上，后面的直飞
-    # 才真的是沿法线进场。
-    if math.dist((cx, cy), hand_pos) > HANDOFF_SNAP_M:
-        print(f'[{sdk.namespace}] 先到交接点 ({hand_pos[0]:.2f}, {hand_pos[1]:.2f})', flush=True)
-        try:
-            transfer_to(sdk, hand_pos[0], hand_pos[1], z, face_xy=fire_xy)
-        except ContestSdkError as exc:
-            print(f'[{sdk.namespace}] 交接点进不去（{exc}），从当前位置直飞进场', flush=True)
-    # ② 锁机头到火点（直飞途中不再转）
-    sdk.face_point(*fire_xy)
-    # ③ 脱离规划器直飞进场
+    print(f'[{sdk.namespace}] 抵近发射：从 ({cx:.2f}, {cy:.2f}) 离火情 {n:.2f} m '
+          f'-> 直飞进到 {FIRE_STANDOFF_M:.1f} m（不经过规划器）', flush=True)
+    sdk.face_point(*fire_xy)              # 锁机头，直飞途中不再转
     try:
         sdk.goto_direct(fire_pos[0], fire_pos[1], z, timeout=CLOSE_IN_TIMEOUT_S)
     except ContestSdkError as exc:
         print(f'[{sdk.namespace}] 进场没走到位（{exc}），就当前位置发射', flush=True)
-    fire_fn()                       # ④ 发射
-    # ⑤ 原路直飞退回交接点，退到位之后调用方才能重新用 goto()
-    print(f'[{sdk.namespace}] 发射完毕，原路直飞退回交接点 {HANDOFF_STANDOFF_M:.1f} m',
+    fire_fn()
+    print(f'[{sdk.namespace}] 发射完毕，原路直飞退回出发点 ({back[0]:.2f}, {back[1]:.2f})',
           flush=True)
     try:
-        sdk.goto_direct(hand_pos[0], hand_pos[1], z, timeout=CLOSE_IN_TIMEOUT_S)
+        sdk.goto_direct(back[0], back[1], z, timeout=CLOSE_IN_TIMEOUT_S)
     except ContestSdkError as exc:
         print(f'[{sdk.namespace}] 退出没走到位（{exc}）——注意此时可能仍在膨胀区内，'
               f'接下来的 goto() 有卡住风险', flush=True)
