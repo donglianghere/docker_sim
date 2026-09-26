@@ -1,3 +1,4 @@
+#include <cmath>
 #include "PX4CtrlParam.h"
 
 Parameter_t::Parameter_t()
@@ -36,3 +37,19 @@ void Parameter_t::config_from_ros_handle(rclcpp::Node *node)
 		RCLCPP_ERROR(node->get_logger(), "\"no_RC\" is only allowd with both \"auto_takeoff_land\" and \"enable_auto_arm\" enabled.");
 	}
 };
+
+// docker_sim 2026-09-25：见头文件说明。只重读这一个参数——起飞高度是唯一一个
+// "任务过程中会想改"的量（每段任务起飞到各自的巡航高度），其余参数保持"启动时
+// 读一次"的语义不变，避免运行中被意外改动影响控制律。
+void Parameter_t::refresh_takeoff_height(rclcpp::Node *node)
+{
+	double h = takeoff_land.height;
+	node->get_parameter("auto_takeoff_land.takeoff_height", h);
+	if (h > 0.0 && std::fabs(h - takeoff_land.height) > 1e-6)
+	{
+		RCLCPP_INFO(node->get_logger(),
+					"\033[32m[pt4ctrl] 起飞高度已更新: %.2f -> %.2f m\033[32m",
+					takeoff_land.height, h);
+		takeoff_land.height = h;
+	}
+}

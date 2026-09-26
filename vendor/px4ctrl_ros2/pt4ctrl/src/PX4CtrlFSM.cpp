@@ -116,6 +116,8 @@ void PX4CtrlFSM::process()
 				}
 			}
 
+			// docker_sim 2026-09-25：每次起飞前重读一次起飞高度，见 PX4CtrlParam.h 说明
+			param.refresh_takeoff_height(node_);
 			state = AUTO_TAKEOFF;
 			set_start_pose_for_takeoff_land(odom_data);
 			toggle_offboard_mode(true);				  // toggle on offboard before arm

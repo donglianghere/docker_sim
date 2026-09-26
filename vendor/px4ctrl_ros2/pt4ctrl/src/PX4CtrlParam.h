@@ -54,6 +54,11 @@ public:
 
 	Parameter_t();
 	void config_from_ros_handle(rclcpp::Node *node);
+	// docker_sim 2026-09-25：起飞高度改成**每次起飞前重读**。原来只在节点启动时
+	// 读一次存进 takeoff_land.height，运行时改 ROS 参数完全不生效——选手 SDK 的
+	// takeoff(height_m=...) 因此是个假动作：参数设成功了、飞机照旧爬到老高度
+	// （实测设 2.0 米，实际爬到 1.08 米就判定完成）。
+	void refresh_takeoff_height(rclcpp::Node *node);
 
 private:
 	// 逐字照抄px4ctrl的read_essential_param实现，见该文件同名函数的完整
