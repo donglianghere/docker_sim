@@ -136,6 +136,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, EnvironmentVariable, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -484,6 +485,21 @@ def generate_launch_description():
             {'manager/feasibility_tolerance': 0.05},
             {'manager/planning_horizon': planning_horizon},
             {'manager/use_distinctive_trajs': True},
+            # 多候选挑选时额外计入弧长/总转角（配合 ego_planner_multi_traj_select.patch）。
+            # 默认 0.0 = 只比 final_cost，跟改造前一致；打印始终有，先看诊断再决定调不调。
+            # 量纲参考：len 单位米、turn 单位度，final_cost 实测多在 0.02~0.2 量级，
+            # 所以 select_lambda_length 取 0.01~0.05、select_lambda_turn 取 0.0005~0.002
+            # 才是同一量级，一上来给大了会变成"只看形状不看代价"。
+            # 定期用多项式重置初值（配合 ego_planner_poly_reset.patch），秒。
+            # 0=关闭（行为不变）。建议从 2.0 试起：航段多在 10~20 秒，2 秒意味着
+            # 任何一个弯最多存活 2 秒 ≈ 2 米航程，而重置后还有十几次重规划能把
+            # 新种子优化透。太短（<1s）会一直在用没优化透的初值，反而更差。
+            {'fsm/poly_reset_period_s': ParameterValue(
+                EnvironmentVariable('EGO_POLY_RESET_PERIOD_S', default_value='0.0'), value_type=float)},
+            {'manager/select_lambda_length': ParameterValue(
+                EnvironmentVariable('EGO_SELECT_LAMBDA_LENGTH', default_value='0.0'), value_type=float)},
+            {'manager/select_lambda_turn': ParameterValue(
+                EnvironmentVariable('EGO_SELECT_LAMBDA_TURN', default_value='0.0'), value_type=float)},
             {'manager/drone_id': drone_id},
 
             {'swarm/use_frame_alignment': use_frame_alignment},

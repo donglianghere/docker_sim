@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.duration import Duration
 from rclpy.time import Time
 from std_srvs.srv import Trigger
@@ -862,6 +862,22 @@ class DroneSDK:
         self._precision_servo_params_cli = self._node.create_client(
             SetParameters, 'precision_servo_node/set_parameters'
         )
+        # ---- set_max_vel：ego_planner 的巡航限速（2026-09-28）----
+        self._ego_planner_params_cli = self._node.create_client(
+            SetParameters, 'ego_planner_node/set_parameters'
+        )
+        self._ego_planner_get_params_cli = self._node.create_client(
+            GetParameters, 'ego_planner_node/get_parameters'
+        )
+        # ---- 队友编队落后量（2026-09-28）：长机"照顾模式"用 ----
+        # 订的是队友 formation_follower_node 发的诊断话题（绝对话题名，跨命名空间）。
+        # 为什么不自己拿两机位置去算：外面算弧长用的折线基准、采样率、有没有
+        # "向后延伸"那一段都跟跟随节点内部不一样，算出来的数不是控制回路看到的那个。
+        from std_msgs.msg import Float64MultiArray as _F64MA
+        self._teammate_lag_m: Optional[float] = None
+        self._node.create_subscription(
+            _F64MA, f'/{self.teammate_namespace}/formation_diag',
+            self._on_teammate_formation_diag, 10)
 
         # ---- reset_aim：fire_pillar_aim_node ----
         self._reset_aim_cli = self._node.create_client(Trigger, 'fire_pillar_aim_node/reset_aim')
@@ -1767,6 +1783,73 @@ class DroneSDK:
     # 2.1节能力7：编队跟随开关（一次性触发调用，不做持续订阅/计算）
     # ------------------------------------------------------------------
 
+    def _on_teammate_formation_diag(self, msg: Any) -> None:
+        if len(msg.data) >= 1:
+            self._teammate_lag_m = float(msg.data[0])
+
+    def teammate_formation_lag(self) -> Optional[float]:
+        """队友（僚机）沿长机轨迹的落后量，米。正值=落后，0 附近=在队形位置上。
+
+        只有队友那边的 `formation_follower_node` 真在跟随时才有数；没启用、
+        还没入列、或者话题还没到，返回 None。
+
+        典型用法是长机的"照顾模式"：落后多了就减速等一等，而不是一路飞到底
+        把僚机甩开（僚机那边只有追赶、没有让长机等的手段）。
+        """
+        return self._teammate_lag_m
+
+    def _get_ego_planner_double(self, name: str, timeout: float) -> float:
+        """读 ego_planner 的一个 double 参数。读不到返回 0.0（不抛异常——这只是
+        为了给调用方一个"用完好恢复"的旧值，读失败不该让整个动作失败）。"""
+        req = GetParameters.Request()
+        req.names = [name]
+        try:
+            ok, resp = self._call_service_blocking(
+                self._ego_planner_get_params_cli, req, timeout_s=timeout)
+        except Exception as exc:                      # noqa: BLE001 - 读失败不致命
+            self._progress(f'读不到 {name}（{exc}），旧值按 0 处理')
+            return 0.0
+        if not ok or resp is None or not resp.values:
+            return 0.0
+        return float(resp.values[0].double_value)
+
+    def set_max_vel(self, max_vel_mps: float, timeout: float = 5.0) -> float:
+        """改`ego_planner`的巡航限速，返回改之前的值（方便用完恢复）。
+
+        用在"起步缓加速"这类场景：编队起步时长机一上来就顶到 1.0 m/s 会把僚机
+        甩开，先压到 0.4、几秒后再恢复。
+
+        改的是`manager/max_vel`——它进的是初值多项式的**时间分配**（梯形剖面），
+        限速压低，加速段就被拉长。优化器那边的`optimization/max_vel`（动力学可行性
+        罚项）**不动**：那一项只在超限时才罚，限速压低时根本不会绑定，两边不打架。
+
+        ⚠️ 需要`ego_planner_max_vel_runtime.patch`——原版这个参数只在
+        `initPlanModules()`读一次，运行时改了不生效。镜像没打这个补丁时本方法
+        依然会"成功"（参数确实设上了），但规划器不会理它。
+
+        Args:
+            max_vel_mps: 新的限速，米/秒。必须为正。
+            timeout: 等参数服务响应的超时秒数。
+
+        Returns:
+            改之前的限速值；读不到就返回 0.0。
+
+        Raises:
+            ValueError: `max_vel_mps <= 0`。
+            ActionFailedError: 参数服务调用超时或被拒绝。
+        """
+        if max_vel_mps <= 0.0:
+            raise ValueError(f'max_vel_mps 必须为正，收到 {max_vel_mps}')
+        old = self._get_ego_planner_double('manager/max_vel', timeout)
+        ok = self._call_set_parameters_blocking(
+            self._ego_planner_params_cli,
+            {'manager/max_vel': float(max_vel_mps)}, timeout_s=timeout)
+        if not ok:
+            raise ActionFailedError(action_name=f'set_max_vel({max_vel_mps})',
+                                    timeout_s=timeout, namespace=self.namespace)
+        self._progress(f'规划器限速 -> {max_vel_mps:.2f} m/s（原 {old:.2f}）')
+        return old
+
     def start_formation_follow(self, follow_distance_m: float, timeout: float = 10.0,
                                altitude_agl_m: Optional[float] = None,
                                turn_in_place: Optional[bool] = None,
@@ -2474,7 +2557,6 @@ class DroneSDK:
                 distance_m=dist, namespace=self.namespace)
         if not ok:
             raise GotoTimeoutError(timeout_s=timeout, target_xyz=(x, y, z), namespace=self.namespace)
-
         if self._waypoint_state == 'cancelled':
             # 判断依据：这次goto()是被别的线程/回调调用cancel_goto()主动
             # 打断的，不是飞不到/超时——这是选手代码自己触发的控制流，
@@ -2486,6 +2568,68 @@ class DroneSDK:
             self._progress('目标点已被取消，goto()提前返回（未到达目标点）')
             return
         self._progress(f'已到达({x:.2f}, {y:.2f}, {z:.2f})')
+
+    def goto_route(self, points, timeout: float = 300.0) -> None:
+        """一次下发整条航线，阻塞到最后一个航点到达确认或超时。
+
+        跟连着调好几次 `goto()` 的区别，**不只是少几次往返**：
+
+        - 逐段 `goto()` 时，每一段对 ego_planner 都是一个独立的终点，规划出来
+          的轨迹**终点速度为零**；桥接节点又要等飞机进到 0.3 米球内才判到点、
+          才发下一个目标。于是每个航点必然"减速到 0 → 判到点 → 从 0 重新加速"。
+          2026-09-28 实测编队航线四个拐点最低速度 0.01~0.09 m/s、速度<0.3 的
+          时长各 2.2~5.4 秒，长机巡航速度中位只有 0.59 m/s（限速 1.0）。
+        - 整条航线一次下发之后，桥接节点自己按顺序推进；配合它的
+          `flythrough_radius_m` 参数（环境变量 `WAYPOINT_FLYTHROUGH_M`），
+          **中间**航点可以提前切换，ego_planner 从"还在动"的状态重新规划，
+          带着速度拐过去。最后一个航点仍然要真的到位。
+
+        坐标系同 `goto()`：每个点都是这架飞机**自己局部坐标系**下的 (x, y, z)，
+        `waypoint_queue` 的消费方不做任何 TF 变换。世界坐标要先过
+        `sdk.world_to_local()`。
+
+        Args:
+            points: [(x, y, z), ...]，至少一个点。
+            timeout: 整条航线的总超时秒数。
+
+        Raises:
+            GotoTimeoutError: 超时仍未确认飞完最后一个航点。
+        """
+        pts = [tuple(float(v) for v in p) for p in points]
+        if not pts:
+            raise ValueError('goto_route() 至少要给一个航点')
+        path = self._Path()
+        path.header.stamp = self._node.get_clock().now().to_msg()
+        path.header.frame_id = self._target_frame
+        path.poses = [_make_pose_stamped(path.header, x, y, z) for x, y, z in pts]
+        # 连发几次的理由同 goto()：单发一次赶上 DDS discovery 窗口会被静默丢弃，
+        # 而 waypoint_queue 这条链路没有"反正最终会追上"的持续状态兜底。
+        self._waypoint_state = None
+        self._publish_with_retry(self._waypoint_queue_pub, path)
+        last = pts[-1]
+
+        def _progress() -> None:
+            cur = self._odom_xyz
+            cur_text = f'({cur[0]:.2f}, {cur[1]:.2f}, {cur[2]:.2f})' if cur is not None else '未知'
+            self._progress(
+                f'航线执行中（{len(pts)}个航点，终点 {last[0]:.2f}, {last[1]:.2f}）…'
+                f'当前位置{cur_text}，waypoint_state={self._waypoint_state!r}'
+            )
+
+        # 这里**不做**逐点的卡死检测：中间航点是穿越式切换的，飞机在某个点
+        # 附近"没怎么动"是正常的（它正在拐弯），拿 goto() 那套判据会误报。
+        # 整条航线只靠 timeout 兜底。
+        def _check() -> bool:
+            return self._waypoint_state in ('completed', 'cancelled')
+
+        self._progress(f'下发航线：{len(pts)}个航点，终点({last[0]:.2f}, {last[1]:.2f}, {last[2]:.2f})')
+        if not self._poll_until(_check, timeout, _progress):
+            raise GotoTimeoutError(timeout_s=timeout, target_xyz=last, namespace=self.namespace)
+
+        if self._waypoint_state == 'cancelled':
+            self._progress('航线已被取消，goto_route()提前返回（未飞完）')
+            return
+        self._progress(f'航线执行完毕，终点({last[0]:.2f}, {last[1]:.2f}, {last[2]:.2f})')
 
     def cancel_goto(self) -> None:
         """打断当前正在进行的`goto()`（发布`Empty`到`waypoint_cancel`）。

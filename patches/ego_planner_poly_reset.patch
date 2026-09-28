@@ -1,0 +1,78 @@
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -4,6 +4,12 @@
+ namespace ego_planner
+ {
+ 
++  // docker_sim: 定期多项式重置用的状态。放文件级静态量是为了不动头文件
++  // （一个进程一个 FSM）。
++  static double g_poly_reset_period_s = 0.0;
++  static double g_last_poly_reset_s = 0.0;
++
++
+   void EGOReplanFSM::init(rclcpp::Node::SharedPtr &node)
+   {
+     node_ = node;
+@@ -22,6 +28,15 @@
+     node_->declare_parameter("fsm/emergency_time", 1.0);
+     node_->declare_parameter("fsm/realworld_experiment", false);
+     node_->declare_parameter("fsm/fail_safe", true);
++    // docker_sim 2026-09-28：定期用多项式重置初值。
++    // 为什么需要：每次重规划都拿上一条轨迹重采样当初值，而代价函数
++    // f_combine(jerk + 离障 + 可行性) 里**没有任何长度或转角项**，一条平滑的
++    // S 形在代价上完全不吃亏，优化器没有动力把它拉直（实测有
++    // cost=0.048 len=16.66m turn=425° 这种），于是"弯"被一路继承下去。
++    // 这个参数让"用多项式重置初值"定期发生一次，直接切断继承链。
++    // 0 = 关闭（只在重规划失败时才退回多项式，即改造前的行为）。
++    node_->declare_parameter("fsm/poly_reset_period_s", 0.0);
++    node_->get_parameter("fsm/poly_reset_period_s", g_poly_reset_period_s);
+ 
+     node_->get_parameter("fsm/flight_type", target_type_);
+     node_->get_parameter("fsm/thresh_replan_time", replan_thresh_);
+@@ -947,7 +962,45 @@
+                 local_target_pt_(0), local_target_pt_(1), local_target_pt_(2),
+                 t_cur, info->duration_);
+ 
+-    bool success = callReboundReplan(false, false);
++    // docker_sim 2026-09-28：定期用多项式重置初值，切断"弯被一路继承"。
++    // 两个条件都满足才重置：
++    //   · 距上次重置超过 fsm/poly_reset_period_s（>0 才启用）；
++    //   · **起点到局部目标的直线在膨胀图上是通的**。这一条是关键：多项式种子
++    //     完全不看障碍物，正绕柱子绕到一半时重置，种子会画一条直插柱子的线，
++    //     A* 重新选边有可能选到跟当前相反的一侧，飞机当场拐一下；直线本来就
++    //     通的时候重置，种子跟当前轨迹同伦，不会换边。
++    bool flag_poly_reset = false;
++    if (g_poly_reset_period_s > 0.0)
++    {
++      double now_s = rclcpp::Clock().now().seconds();
++      if (now_s - g_last_poly_reset_s >= g_poly_reset_period_s)
++      {
++        bool line_free = true;
++        Eigen::Vector3d seg = local_target_pt_ - start_pt_;
++        double seg_len = seg.norm();
++        double step = planner_manager_->grid_map_->getResolution();
++        if (seg_len > 1e-3 && step > 1e-6)
++        {
++          for (double d = 0.0; d <= seg_len; d += step)
++          {
++            if (planner_manager_->grid_map_->getInflateOccupancy(start_pt_ + seg * (d / seg_len)))
++            {
++              line_free = false;
++              break;
++            }
++          }
++        }
++        if (line_free)
++        {
++          flag_poly_reset = true;
++          printf("[fsm] poly reset (%.1fs since last, straight line clear)\n",
++                 now_s - g_last_poly_reset_s);
++          g_last_poly_reset_s = now_s;
++        }
++      }
++    }
++
++    bool success = callReboundReplan(flag_poly_reset, false);
+ 
+     if (!success)
+     {

@@ -141,6 +141,19 @@ class RvizGoalBridgeNode(Node):
             'goal_retransform_enabled',
             os.environ.get('GOAL_RETRANSFORM', 'true').lower()
             not in ('0', 'false', 'no'))
+        # ---- 穿越式切换（2026-09-28）----
+        # 原来队列里每个航点都等飞机进到 ARRIVAL_THRESHOLD_M(0.3) 才发下一个。
+        # 后果是**每个航点都停死**：ego_planner 规划的轨迹终点速度为零，飞机
+        # 减速到 0 → 判到点 → 发下一个目标 → 从 0 重新加速。实测编队航线四个
+        # 拐点处最低速度 0.01~0.09 m/s、速度<0.3 的时长各 2.2~5.4 秒，长机巡航
+        # 速度中位只有 0.59 m/s（限速 1.0），大部分时间在这些停顿前后加减速。
+        #
+        # 打开之后：**中间**航点提前这么远就切下一个目标，ego_planner 从"还在
+        # 动"的状态重新规划，带着速度拐过去；**最后一个**航点仍用
+        # ARRIVAL_THRESHOLD_M，该停到位还是要停到位。
+        # 默认 0.0 = 行为跟改造前一字不差，需要的任务自己打开。
+        self.declare_parameter('flythrough_radius_m',
+                               float(os.environ.get('WAYPOINT_FLYTHROUGH_M', '0.0')))
         self.declare_parameter('goal_retransform_rate_hz', 2.0)
         self.declare_parameter('goal_retransform_min_delta_m', 0.05)
         self._retransform_enabled = self.get_parameter(
@@ -348,7 +361,14 @@ class RvizGoalBridgeNode(Node):
         tx, ty, tz = self._current_local_goal() or self._queue[self._queue_idx]
         p = msg.pose.pose.position
         dist = math.sqrt((p.x - tx) ** 2 + (p.y - ty) ** 2 + (p.z - tz) ** 2)
-        if dist > ARRIVAL_THRESHOLD_M:
+        # 中间航点可以"穿越式"提前切换，最后一个必须真的到位（见
+        # flythrough_radius_m 的说明）。
+        is_last = self._queue_idx >= len(self._queue) - 1
+        thresh = ARRIVAL_THRESHOLD_M
+        if not is_last:
+            thresh = max(ARRIVAL_THRESHOLD_M,
+                         float(self.get_parameter('flythrough_radius_m').value))
+        if dist > thresh:
             return
         self._queue_idx += 1
         self._publish_progress()
@@ -363,8 +383,8 @@ class RvizGoalBridgeNode(Node):
         x, y, z = self._current_local_goal() or self._queue[self._queue_idx]
         self._publish_local_goal(x, y, z)
         self.get_logger().info(
-            f'到达第{self._queue_idx}个航点，飞往第{self._queue_idx + 1}个：'
-            f'({x:.2f}, {y:.2f}, {z:.2f})')
+            f'第{self._queue_idx}个航点已切换（距离{dist:.2f}m，阈值{thresh:.2f}m），'
+            f'飞往第{self._queue_idx + 1}个：({x:.2f}, {y:.2f}, {z:.2f})')
 
     def _cancel_cb(self, _msg: Empty):
         if self._queue_idx < 0:

@@ -806,7 +806,7 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #    话题，是明确的已知限制。
 # ============================================================
 COPY staging/ego-planner-swarm/src/planner /opt/ego_planner_ws/src
-COPY patches/ego_planner_traj_server_relative_poscmd.patch patches/ego_planner_traj_server_yaw_rate_limit.patch patches/ego_planner_grid_map_ground_filter.patch patches/ego_planner_grid_map_min_ray_length.patch patches/ego_planner_visualization_namespace_frame.patch patches/ego_planner_manual_target_goal_marker.patch patches/ego_planner_terminal_collision_check.patch patches/ego_planner_waypoint_recursive_spin_fix.patch patches/ego_planner_swarm_frame_alignment.patch patches/ego_planner_rebound_replan_arclength_underflow.patch patches/ego_planner_segment_point_underflow.patch patches/ego_planner_exec_traj_reach_check.patch patches/ego_planner_progress_diag.patch patches/ego_planner_traj_server_stop_after_finish.patch patches/ego_planner_traj_server_yaw_mode.patch patches/ego_planner_traj_server_yaw_constant_no_slew.patch patches/ego_planner_traj_server_yaw_hold.patch patches/ego_planner_traj_server_fixed_altitude.patch patches/ego_planner_goal_z_from_msg.patch patches/ego_planner_grid_map_inflation_z.patch /tmp/
+COPY patches/ego_planner_traj_server_relative_poscmd.patch patches/ego_planner_traj_server_yaw_rate_limit.patch patches/ego_planner_grid_map_ground_filter.patch patches/ego_planner_grid_map_min_ray_length.patch patches/ego_planner_visualization_namespace_frame.patch patches/ego_planner_manual_target_goal_marker.patch patches/ego_planner_terminal_collision_check.patch patches/ego_planner_waypoint_recursive_spin_fix.patch patches/ego_planner_swarm_frame_alignment.patch patches/ego_planner_rebound_replan_arclength_underflow.patch patches/ego_planner_segment_point_underflow.patch patches/ego_planner_exec_traj_reach_check.patch patches/ego_planner_progress_diag.patch patches/ego_planner_traj_server_stop_after_finish.patch patches/ego_planner_traj_server_yaw_mode.patch patches/ego_planner_traj_server_yaw_constant_no_slew.patch patches/ego_planner_traj_server_yaw_hold.patch patches/ego_planner_traj_server_fixed_altitude.patch patches/ego_planner_goal_z_from_msg.patch patches/ego_planner_grid_map_inflation_z.patch patches/ego_planner_multi_traj_select.patch patches/ego_planner_astar_diag.patch patches/ego_planner_max_vel_runtime.patch patches/ego_planner_poly_reset.patch /tmp/
 RUN cd /opt/ego_planner_ws/src \
     && (git apply -p3 --check /tmp/ego_planner_traj_server_relative_poscmd.patch \
         && git apply -p3 /tmp/ego_planner_traj_server_relative_poscmd.patch \
@@ -867,7 +867,19 @@ RUN cd /opt/ego_planner_ws/src \
         || echo "!! ego_planner_goal_z_from_msg.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp 的 waypointCallback()：end_wp 的第三个分量要用 msg->pose.position.z，不能是 upstream 写死的 1.0。写死会把选手 goto(x,y,z) 指定的高度整个丢掉、飞机一律飞 1.0 米（2026-09-25 纯爬升实验实测：命令爬到 2.59 米，position_cmd 的 z 变成 1.00、飞机降到 0.99），连带导致取弹段判不可达、高层巡检换高度永远到不了 !!") \
     && (git apply -p3 --check /tmp/ego_planner_grid_map_inflation_z.patch \
         && git apply -p3 /tmp/ego_planner_grid_map_inflation_z.patch \
-        || echo "!! ego_planner_grid_map_inflation_z.patch 未能自动应用，需人工核对后手动改 plan_env/src/grid_map.cpp 的 cloudCallback()：写死的 inf_step_z=1 要改成由新参数 grid_map/obstacles_inflation_z 算出来（默认0.1米=1格，行为不变）。点云路径的水平膨胀是 ±0.6 米、竖直却只有 ±0.1 米，各向异性差6倍，配合每帧 resetBuffer 推倒重建，Mid360 逐帧竖直覆盖不均匀就会在飞机所在高度上留下空洞（2026-09-26 实测：飞行中 4.2~5.8% 的帧里 3# 立柱在飞机同高 ±0.1 米内一个点都没有，单次最长 0.46 秒），rviz 里表现为稍远处障碍呈层状 !!")
+        || echo "!! ego_planner_grid_map_inflation_z.patch 未能自动应用，需人工核对后手动改 plan_env/src/grid_map.cpp 的 cloudCallback()：写死的 inf_step_z=1 要改成由新参数 grid_map/obstacles_inflation_z 算出来（默认0.1米=1格，行为不变）。点云路径的水平膨胀是 ±0.6 米、竖直却只有 ±0.1 米，各向异性差6倍，配合每帧 resetBuffer 推倒重建，Mid360 逐帧竖直覆盖不均匀就会在飞机所在高度上留下空洞（2026-09-26 实测：飞行中 4.2~5.8% 的帧里 3# 立柱在飞机同高 ±0.1 米内一个点都没有，单次最长 0.46 秒），rviz 里表现为稍远处障碍呈层状 !!") \
+    && (git apply -p3 --check /tmp/ego_planner_multi_traj_select.patch \
+        && git apply -p3 /tmp/ego_planner_multi_traj_select.patch \
+        || echo "!! ego_planner_multi_traj_select.patch 未能自动应用，需人工核对后手动改 plan_manage/src/planner_manager.cpp 的 use_distinctive_trajs 分支：多条候选轨迹原版只比 final_cost 挑最小，而 final_cost=lambda1*jerk平方和+lambda2*离障+lambda3*动力学可行，里面没有任何路径长度项，于是\"绕远但平滑\"会赢过\"短但拐两下\"。补丁加 manager/select_lambda_length 和 manager/select_lambda_turn 两个权重（默认0=行为不变）把弧长和总转角计入挑选分，并始终打印每条候选的 cost/len/turn/score 便于诊断 !!") \
+    && (git apply -p3 --check /tmp/ego_planner_astar_diag.patch \
+        && git apply -p3 /tmp/ego_planner_astar_diag.patch \
+        || echo "!! ego_planner_astar_diag.patch 未能自动应用，需人工核对后手动改 bspline_opt/src/bspline_optimizer.cpp：纯诊断打印，不改任何行为。三处——initControlPoints() 的 segment_ids.size()==0 早退处打 no_collision_segment（分清\"没有碰撞段所以A*不跑\"和\"A*失败\"，后者本来就有 a star error 日志）；A* 成功处打每段的 astar_pts/len/straight/ratio/turn（A*路径是推离目标的参考线，它有多锯齿推出来的控制点就有多锯齿）；distinctiveTrajs() 返回前打 segs_in/segs_left/candidates（segs_in>0 而 candidates==1 说明段被 erase 光了，左右选最优等于没生效） !!") \
+    && (git apply -p3 --check /tmp/ego_planner_max_vel_runtime.patch \
+        && git apply -p3 /tmp/ego_planner_max_vel_runtime.patch \
+        || echo "!! ego_planner_max_vel_runtime.patch 未能自动应用，需人工核对后手动改 plan_manage/src/planner_manager.cpp：reboundReplan() 开头重读一次 manager/max_vel 写回 pp_.max_vel_。原来这个参数只在 initPlanModules() 读一次，运行时 ros2 param set 不生效，编队起步没法让长机缓慢加速。只改 pp_.max_vel_（进初值多项式的梯形时间分配），optimization/max_vel 那个动力学可行性罚项不动 !!") \
+    && (git apply -p3 --check /tmp/ego_planner_poly_reset.patch \
+        && git apply -p3 /tmp/ego_planner_poly_reset.patch \
+        || echo "!! ego_planner_poly_reset.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp 的 planFromCurrentTraj()：新参数 fsm/poly_reset_period_s（默认0=关闭，行为不变）让\"用多项式重置初值\"定期发生一次，切断\"弯被上一条轨迹一路继承\"。重置前必须确认起点到局部目标的直线在膨胀图上是通的——多项式种子不看障碍物，正绕障时重置会让 A* 重新选边、飞机当场拐一下 !!")
 COPY src/ego_planner_bridge /opt/ego_planner_ws/src/ego_planner_bridge
 RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     source /opt/ros/humble/setup.bash \
@@ -942,10 +954,14 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #     不要假设"这次pip装的东西不一样就不会中招"。
 # ============================================================
 COPY src/contest_mission /opt/contest_mission_ws/src/contest_mission
+# matplotlib（2026-09-28新增）：编队/全流程的实时监视图 scripts/编队监视.py——
+# 飞行中动画显示两机水平轨迹、高度曲线、间距曲线，落地后存一张 PNG 报告图。
+# 装在 flight-stack 而不是 sim-world，是因为只有这个容器的 DDS 环境验证过
+# 能稳定订到 NX01/NX02 的话题。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update \
-    && apt-get install -y --no-install-recommends python3-pyzbar ros-humble-vision-msgs \
-    && pip3 install "numpy<2" apriltag \
+    && apt-get install -y --no-install-recommends python3-pyzbar ros-humble-vision-msgs python3-tk fonts-wqy-zenhei \
+    && pip3 install "numpy<2" apriltag matplotlib \
     && source /opt/ros/humble/setup.bash \
     && cd /opt/contest_mission_ws \
     && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release

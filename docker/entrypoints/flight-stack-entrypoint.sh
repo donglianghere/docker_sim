@@ -1267,8 +1267,36 @@ ros2 run contest_mission fire_pillar_aim_node \
 # single_uwb_imu三种定位源下这个节点的坐标处理逻辑完全一样，见文件
 # 头说明——uwb_imu模式下两机局部系天然对齐，不做任何坐标转换）。
 echo "== [flight-stack:${NAMESPACE}] 启动 formation_follower_node（阶段A3编队跟随，默认enabled=False待命） =="
+# 追赶项（2026-09-28）：参考点原来是恒速前进、跟长机同速，起步阶段拉开的间距
+# 永远收不回来。gain>0 后落后超过死区就按比例提速。节点里的默认值是 0（行为
+# 不变），这里给本项目一个生效的默认值，改 .env 即可调。
 ros2 run contest_mission formation_follower_node \
-    --ros-args -r __ns:="/${NAMESPACE}" &
+    --ros-args -r __ns:="/${NAMESPACE}" \
+    -p reference_rate_headroom:="${FORMATION_RATE_HEADROOM:-1.5}" \
+    -p reference_accel_limit:="${FORMATION_REF_ACCEL:-0.3}" \
+    -p corner_ff_radius_m:="${FORMATION_CORNER_FF_R:-2.0}" \
+    -p corner_ff_min_ratio:="${FORMATION_CORNER_FF_MIN:-0.4}" \
+    -p catchup_gain:="${FORMATION_CATCHUP_GAIN:-0.0}" \
+    -p catchup_ratio_max:="${FORMATION_CATCHUP_RATIO_MAX:-1.3}" \
+    -p catchup_deadband_m:="${FORMATION_CATCHUP_DEADBAND_M:-0.5}" \
+    -p lookahead_m:="${FORMATION_LOOKAHEAD_M:-0.6}" \
+    -p max_lead_m:="${FORMATION_MAX_LEAD_M:-2.0}" \
+    -p ff_rate_tau_s:="${FORMATION_FF_TAU_S:-0.5}" \
+    -p bias_trim_gain:="${FORMATION_BIAS_TRIM_GAIN:-0.15}" \
+    -p bias_trim_max_m:="${FORMATION_BIAS_TRIM_MAX_M:-1.5}" \
+    -p path_prune_max_chord_m:="${FORMATION_PRUNE_CHORD_M:-2.5}" \
+    -p yaw_turn_in_place:="${FORMATION_TURN_IN_PLACE:-false}" \
+    -p yaw_slew_rate_dps:="${FORMATION_YAW_SLEW_DPS:-60.0}" &
+# yaw_turn_in_place=false（2026-09-28 用户要求"拐点处不停留，协调转弯"）：
+# 僚机到拐点不再停下转向，机头按限速连续转过去，参考点一刻不停。长机侧的
+# 对应改动在 contestant_template/编队飞行示例.py 的 _start_coordinated_yaw。
+# path_prune_max_chord_m：长机轨迹清洗，丢掉不让航线进度前进的点（拐点回钩、
+# 悬停飘移），僚机就不会复刻它们。0=不清洗。
+# lookahead_m（节点默认 1.2）：参考点最多领先僚机投影多少弧长。落后量的上界是
+# **lookahead + 飞机自身跟踪误差**：参考点被这条线钳住不再前进，飞机又落在参考点
+# 后面一截。run31（lookahead=0.6）实测落后量最大 +1.20 = 0.6 + 0.6，两项各占一半。
+# 0.6 和 max_lead_m=2.0 这两个之前是每轮手动 ros2 param set 的，2026-09-28 落到
+# 默认值里，免得每轮忘一次。
 
 if [ "${LOCALIZATION_SOURCE}" = "gt" ] || [ "${LOCALIZATION_SOURCE}" = "uwb_imu" ] || [ "${LOCALIZATION_SOURCE}" = "single_uwb_imu" ]; then
     echo "== [flight-stack:${NAMESPACE}] 定位模式=${LOCALIZATION_SOURCE}：启动 gt_cloud_bridge_node（原始点云->odom系，补上DLIO deskewed话题的等价物）=="

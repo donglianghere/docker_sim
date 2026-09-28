@@ -1,0 +1,63 @@
+--- a/src/planner/bspline_opt/src/bspline_optimizer.cpp
++++ b/src/planner/bspline_opt/src/bspline_optimizer.cpp
+@@ -473,6 +473,12 @@
+     abandon_this_trajectory:;
+     }
+ 
++    // docker_sim 诊断：进来时有几段、翻转后还剩几段、最终生成几条候选。
++    // 如果 segs_in>0 而 candidates==1，说明段在上面被 erase 光了（翻到反面
++    // 找不到可用的 base_point），那"左右选最优"就等于没生效。
++    printf("[distinctiveTrajs] segs_in=%d segs_left=%d candidates=%d\n",
++           (int)segments.size(), (int)RichInfoSegs.size(), (int)control_pts_buf.size());
++
+     return control_pts_buf;
+   } // namespace ego_planner
+ 
+@@ -567,6 +573,10 @@
+     // return in advance
+     if (segment_ids.size() == 0)
+     {
++      // docker_sim 诊断：分清"压根没有碰撞段(A*不跑)"和"A*失败"两种空返回。
++      // 实测 1005 次重规划里 1002 次 multi-trajs=1，但 multi-trajs 分不出是这里
++      // 早退、还是 distinctiveTrajs 把段都 erase 了，只能在源头打一条。
++      printf("[initCP] no_collision_segment\n");
+       vector<std::pair<int, int>> blank_ret;
+       return blank_ret;
+     }
+@@ -580,7 +590,35 @@
+       Eigen::Vector3d in(init_points.col(segment_ids[i].first)), out(init_points.col(segment_ids[i].second));
+       if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1, in, out))
+       {
+-        a_star_pathes.push_back(a_star_->getPath());
++        // docker_sim 诊断：A* 路径是拿来当"推离目标"的参考线（后面用它跟每个控制点
++        // 的法平面求交点，生成 base_point/direction），所以它有多锯齿，推出来的控制点
++        // 就有多锯齿。这里打三个数：路径点数、路径长度、绕行系数(路径长/首尾直线长)，
++        // 外加总转角。栅格 A*(26邻域 + 对角启发式 + tie_breaker)走的是阶梯折线。
++        std::vector<Eigen::Vector3d> ap = a_star_->getPath();
++        double ap_len = 0.0, ap_turn = 0.0;
++        Eigen::Vector3d prev_dir = Eigen::Vector3d::Zero();
++        bool has_prev = false;
++        for (size_t k = 0; k + 1 < ap.size(); ++k)
++        {
++          Eigen::Vector3d aseg = ap[k + 1] - ap[k];
++          double sn = aseg.norm();
++          ap_len += sn;
++          if (sn < 1e-9)
++            continue;
++          Eigen::Vector3d d = aseg / sn;
++          if (has_prev)
++          {
++            double c = std::max(-1.0, std::min(1.0, prev_dir.dot(d)));
++            ap_turn += std::acos(c) * 180.0 / M_PI;
++          }
++          prev_dir = d;
++          has_prev = true;
++        }
++        double straight = (out - in).norm();
++        printf("[initCP] seg %d/%d ids=%d~%d astar_pts=%d len=%.2fm straight=%.2fm ratio=%.2f turn=%.0fdeg\n",
++               (int)i + 1, (int)segment_ids.size(), segment_ids[i].first, segment_ids[i].second,
++               (int)ap.size(), ap_len, straight, straight > 1e-6 ? ap_len / straight : -1.0, ap_turn);
++        a_star_pathes.push_back(ap);
+       }
+       else
+       {

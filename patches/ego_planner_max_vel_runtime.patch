@@ -1,0 +1,47 @@
+--- a/src/planner/plan_manage/src/planner_manager.cpp
++++ b/src/planner/plan_manage/src/planner_manager.cpp
+@@ -26,6 +26,13 @@
+   static double select_lambda_length = 0.0;
+   static double select_lambda_turn = 0.0;
+ 
++  // docker_sim: 运行时重读 manager/max_vel 用的节点指针。EGOPlannerManager 自己
++  // 不存 node，为了少改一个头文件，这里用文件级静态量（一个进程一个规划器）。
++  // 为什么要能运行时改：编队起步时想让长机缓慢加速，而 max_vel 原本只在
++  // initPlanModules() 读一次，`ros2 param set` 改了不生效。跟当初给 pt4ctrl 的
++  // auto_takeoff_land.takeoff_height 加重读是同一个套路。
++  static rclcpp::Node *g_param_node = nullptr;
++
+   // 用控制多边形算弧长和总转角：均匀 B 样条曲线被控制多边形包住，两者单调相关，
+   // 而且控制点就是优化变量本身，不用再去 evaluateDeBoorT 采样曲线，最省事。
+   // length: 折线总长（米）。turn: 相邻两段方向夹角之和（度），直线为 0，
+@@ -85,6 +92,7 @@
+     node->get_parameter("manager/use_distinctive_trajs", pp_.use_distinctive_trajs);
+     node->get_parameter("manager/select_lambda_length", select_lambda_length);
+     node->get_parameter("manager/select_lambda_turn", select_lambda_turn);
++    g_param_node = node.get();
+     node->get_parameter("manager/drone_id", pp_.drone_id);
+ 
+     local_data_.traj_id_ = 0;
+@@ -109,6 +117,22 @@
+     static int count = 0;
+     printf("\033[47;30m\n[drone %d replan %d]==============================================\033[0m\n", pp_.drone_id, count++);
+ 
++    // docker_sim: 每次重规划前重读一次限速，让运行时 `ros2 param set
++    // manager/max_vel` 真正生效（编队起步缓加速用）。只改这一处 pp_.max_vel_，
++    // 它进的是初值多项式的时间分配（梯形剖面）——限速压低，加速段就被拉长。
++    // 优化器那边的 optimization/max_vel（动力学可行性罚项）不动，保持原值就行：
++    // 它只在超限时才罚，限速压低时根本不会绑定。
++    if (g_param_node != nullptr)
++    {
++      double v_new = pp_.max_vel_;
++      g_param_node->get_parameter("manager/max_vel", v_new);
++      if (v_new > 0.0 && std::fabs(v_new - pp_.max_vel_) > 1e-6)
++      {
++        printf("[planner] max_vel %.2f -> %.2f m/s\n", pp_.max_vel_, v_new);
++        pp_.max_vel_ = v_new;
++      }
++    }
++
+     if ((start_pt - local_target_pt).norm() < 0.2)
+     {
+       cout << "Close to goal" << endl;

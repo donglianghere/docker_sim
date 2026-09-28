@@ -77,6 +77,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Float64MultiArray
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Range
 from quadrotor_msgs.action import FormationFollow
@@ -167,6 +168,10 @@ class LeaderPathBuffer:
         self._ys: List[float] = []
         self._zs: List[float] = []   # 2026-09-20：轨迹跟随要"高度相同"，z也要沿轨迹取
         self._ts: List[float] = []
+        # 累积弧长表的缓存。2026-09-28 加：航线基准下一拍要二分取好几次
+        # 参考点（每次都要一张弧长表），缓冲区又有几百个点，不缓存的话这
+        # 一段是纯浪费。只在缓冲区变动时作废。
+        self._arc_cache: Optional[List[float]] = None
 
     def __len__(self) -> int:
         return len(self._xs)
@@ -179,6 +184,7 @@ class LeaderPathBuffer:
         self._ys.clear()
         self._zs.clear()
         self._ts.clear()
+        self._arc_cache = None
 
     def append(self, x: float, y: float, z: float, t: float) -> None:
         """往缓冲区追加长机的一个新轨迹点。t是时间戳（秒，浮点数，用
@@ -194,6 +200,7 @@ class LeaderPathBuffer:
         self._ys.append(y)
         self._zs.append(z)
         self._ts.append(t)
+        self._arc_cache = None
         self._trim()
 
     def _trim(self) -> None:
@@ -208,6 +215,13 @@ class LeaderPathBuffer:
             self._ys.pop(0)
             self._zs.pop(0)
             self._ts.pop(0)
+            self._arc_cache = None
+
+    def last_xy(self) -> Optional[Tuple[float, float]]:
+        """长机当前位置（缓冲区最后一个点）。拐点前馈要用。"""
+        if not self._xs:
+            return None
+        return (self._xs[-1], self._ys[-1])
 
     def total_length(self) -> float:
         """缓冲区里这条折线的总水平弧长（米）。跟随者据此判断长机是否
@@ -215,10 +229,9 @@ class LeaderPathBuffer:
         return self._total_length()
 
     def _total_length(self) -> float:
-        total = 0.0
-        for i in range(len(self._xs) - 1):
-            total += math.hypot(self._xs[i + 1] - self._xs[i], self._ys[i + 1] - self._ys[i])
-        return total
+        if len(self._xs) < 2:
+            return 0.0
+        return self._arc_table()[-1]
 
     def point_at_arc_length_behind(self, follow_distance_m: float) -> Optional[Tuple[float, float]]:
         """从缓冲区里"最新的那个点"开始，**沿折线本身**往回走
@@ -326,10 +339,13 @@ class LeaderPathBuffer:
 
     def _arc_table(self) -> List[float]:
         """累积弧长表：_arc[i] 是从缓冲区起点走到第i个点的弧长。"""
+        if self._arc_cache is not None and len(self._arc_cache) == len(self._xs):
+            return self._arc_cache
         arc = [0.0]
         for i in range(1, len(self._xs)):
             arc.append(arc[-1] + math.hypot(self._xs[i] - self._xs[i - 1],
                                             self._ys[i] - self._ys[i - 1]))
+        self._arc_cache = arc
         return arc
 
     def _point_at_arc(self, arc: List[float], s: float):
@@ -348,16 +364,38 @@ class LeaderPathBuffer:
         speed = seg / dt if dt > 1e-6 else 0.0
         return x, y, z, yaw, speed
 
-    def project_arc_length(self, own_x: float, own_y: float) -> Optional[float]:
+    # 投影搜索窗口（米）：只在上次弧长的 ±这个范围内找。窗口跟着飞机走，
+    # 天然排除闭合回路另一端那个分支。
+    SEARCH_WINDOW_M = 5.0
+    # 逃逸门限（米）：窗口内最近的点也离飞机这么远，说明飞机根本不在这一段
+    # 附近（定位跳变、重新入列、轨迹被裁剪…），退回全局搜索重新捕获。
+    # 没有这条的话窗口会变成闩锁——2026-09-28 实测：用"离上次最近"做消歧义，
+    # 一旦锁在错误分支上就永远出不来，落后量冻在 10.64 m、两机互相等死。
+    REACQUIRE_DIST_M = 2.0
+
+    def project_arc_length(self, own_x: float, own_y: float,
+                           last_s: Optional[float] = None) -> Optional[float]:
         """僚机当前位置投影到长机折线上，返回它"走到哪了"的弧长坐标。
 
         只用水平坐标（用户要求：距离判断只考虑水平距离，不考虑垂直距离）。
+
+        `last_s`（2026-09-28 新增）：上一次的投影弧长，用来消歧义。
+        航线绕一圈回到起降点时长机轨迹是闭合的，僚机停在起降点附近时，
+        轨迹**起点**和**末端**到它的距离几乎一样近，只比距离的话选哪个是
+        任意的——实测长机返航到家那一刻，僚机的投影 snap 回轨迹起点，
+        lag = s_limit_gap − s_proj 瞬间变成 +72 米。这个数喂给入列判据、
+        action 反馈、以及长机的照顾模式（看到 72 会直接切 hold 把长机停死）。
+
+        做法是**滑动窗口 + 逃逸**：只在 last_s ± SEARCH_WINDOW_M 内搜，窗口
+        跟着飞机走，自然排除另一端；窗口内最近距离超过 REACQUIRE_DIST_M 就
+        退回全局搜索重新捕获。第一版用的是"在相近候选里选离上次最近的"，
+        那个没有逃逸路径、会闩死（见 REACQUIRE_DIST_M 的注释）。
         """
         n = len(self._xs)
         if n < 2:
             return None
         arc = self._arc_table()
-        best_s, best_d2 = 0.0, float('inf')
+        cands = []
         for i in range(1, n):
             x0, y0, x1, y1 = self._xs[i - 1], self._ys[i - 1], self._xs[i], self._ys[i]
             dx, dy = x1 - x0, y1 - y0
@@ -367,9 +405,18 @@ class LeaderPathBuffer:
             t = max(0.0, min(1.0, ((own_x - x0) * dx + (own_y - y0) * dy) / seg2))
             px, py = x0 + t * dx, y0 + t * dy
             d2 = (own_x - px) ** 2 + (own_y - py) ** 2
-            if d2 < best_d2:
-                best_d2, best_s = d2, arc[i - 1] + t * math.sqrt(seg2)
-        return best_s
+            cands.append((d2, arc[i - 1] + t * math.sqrt(seg2)))
+        if not cands:
+            return None
+        if last_s is None:
+            return min(cands, key=lambda c: c[0])[1]
+        in_win = [c for c in cands if abs(c[1] - last_s) <= self.SEARCH_WINDOW_M]
+        if in_win:
+            best = min(in_win, key=lambda c: c[0])
+            if best[0] <= self.REACQUIRE_DIST_M ** 2:
+                return best[1]
+        # 窗口内没有、或者窗口内最近的点也太远 -> 全局重新捕获
+        return min(cands, key=lambda c: c[0])[1]
 
     def point_at_arc_length(self, s_query: float):
         """取折线上弧长坐标为`s_query`的那个点，返回(x, y, z)。
@@ -383,6 +430,110 @@ class LeaderPathBuffer:
         s_clamped = max(0.0, min(float(s_query), arc[-1]))
         x, y, z, _yaw, _speed = self._point_at_arc(arc, s_clamped)
         return (x, y, z)
+
+class RouteRuler:
+    """把**规划航线**当一把里程尺：只量进度，不决定飞哪儿。
+
+    2026-09-28 加这个类的缘由（用户 run36 复盘"第一个航点附近有错乱"）：
+    僚机沿长机**实飞轨迹**跟随，弧长也按实飞轨迹算。长机在拐点处会
+    冲过头、原地转向时飘、下一段起手又往旁边让（实测 1# 航点处冲过
+    0.5 m 后倒退 2.2 m、在那儿悬停 3 秒，t=36~62 实飞弧长 20.5 m 而
+    起终点直线只有 7.7 m）。这个"回钩"既虚增了弧长，又被僚机原样复刻，
+    间距先扎到 1.51 m 再窜到 6.96 m——全程所有超过 1 m 的偏差都出在
+    这一段。
+
+    治法不是让僚机改飞航线——**那会撞柱子**：僚机在编队模式下
+    relay_mode=formation，绕开了自己的 ego_planner，没有独立避障能力，
+    "沿长机实飞轨迹飞"正是它唯一的避障保证（长机那条线是 ego_planner
+    绕出来的，天然无障碍）。所以分成两件事：
+
+      飞哪条线 -> 还是长机实飞轨迹（不变，避障照旧）
+      量多远   -> 换成航线弧长（这把尺）
+
+    航线是干净折线，没有回钩、没有悬停抖动，量出来的进度跟评价指标
+    （沿航线的间距）也是同一个基准。
+    """
+
+    SEARCH_WINDOW_M = 6.0     # 投影消歧的滑动窗口，同 LeaderPathBuffer
+    REACQUIRE_DIST_M = 3.0    # 窗口内最近点也比这远 -> 全局重新捕获
+
+    def __init__(self, pts, back_extend_m: float = 0.0):
+        self._xs: List[float] = []
+        self._ys: List[float] = []
+        pts = [(float(a), float(b)) for a, b in pts]
+        if len(pts) >= 2 and back_extend_m > 0.0:
+            # 往起点**之前**延一段：僚机的起始站位在长机起飞点后方，
+            # 不延的话它投影出来恒等于 0，跟"正好站在起点上"分不开，
+            # 那段身位差会变成一笔看不见的欠账（跟长机轨迹那边的
+            # _path_prepad_m 同一个道理）。两机的 s 都平移同一个常数，
+            # 差值不受影响。
+            dx, dy = pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]
+            n = math.hypot(dx, dy)
+            if n > 1e-6:
+                pts.insert(0, (pts[0][0] - dx / n * back_extend_m,
+                               pts[0][1] - dy / n * back_extend_m))
+        for x, y in pts:
+            if self._xs and math.hypot(x - self._xs[-1], y - self._ys[-1]) < 1e-6:
+                continue
+            self._xs.append(x)
+            self._ys.append(y)
+        self._arc = [0.0]
+        for i in range(len(self._xs) - 1):
+            self._arc.append(self._arc[-1] + math.hypot(
+                self._xs[i + 1] - self._xs[i], self._ys[i + 1] - self._ys[i]))
+
+    def ok(self) -> bool:
+        return len(self._xs) >= 2
+
+    def total(self) -> float:
+        return self._arc[-1] if self._arc else 0.0
+
+    def project(self, x: float, y: float, last_s: Optional[float] = None) -> Optional[float]:
+        """位置投到航线上，返回弧长坐标。消歧同 LeaderPathBuffer：滑动窗口+逃逸。"""
+        n = len(self._xs)
+        if n < 2:
+            return None
+        cands = []
+        for i in range(1, n):
+            x0, y0, x1, y1 = self._xs[i - 1], self._ys[i - 1], self._xs[i], self._ys[i]
+            dx, dy = x1 - x0, y1 - y0
+            seg2 = dx * dx + dy * dy
+            if seg2 < 1e-12:
+                continue
+            t = max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / seg2))
+            px, py = x0 + t * dx, y0 + t * dy
+            cands.append(((x - px) ** 2 + (y - py) ** 2, self._arc[i - 1] + t * math.sqrt(seg2)))
+        if not cands:
+            return None
+        if last_s is None:
+            return min(cands, key=lambda c: c[0])[1]
+        in_win = [c for c in cands if abs(c[1] - last_s) <= self.SEARCH_WINDOW_M]
+        if in_win:
+            best = min(in_win, key=lambda c: c[0])
+            if best[0] <= self.REACQUIRE_DIST_M ** 2:
+                return best[1]
+        return min(cands, key=lambda c: c[0])[1]
+
+    def project_unwrapped(self, x: float, y: float, state: dict) -> Optional[float]:
+        """带圈数展开的投影：航线绕一圈回起降点是**闭合**的，原始弧长会在
+        终点处突然跳回 0。这里记住上一次的原始值和已经绕过的圈数，跨越
+        首尾时加一圈，返回的是单调递增的"累计里程"，两机相减才有意义。
+        """
+        raw = self.project(x, y, state.get('raw'))
+        if raw is None:
+            return None
+        L = self.total()
+        laps = state.get('laps', 0)
+        prev = state.get('raw')
+        if prev is not None and L > 1e-6:
+            if raw - prev < -L * 0.5:
+                laps += 1
+            elif raw - prev > L * 0.5:
+                laps -= 1
+        state['raw'] = raw
+        state['laps'] = laps
+        return raw + laps * L
+
 
 # ============================================================
 # 第2部分：几何队形 / 控制策略——策略模式的两层可替换接口（1.4.1节）
@@ -604,6 +755,69 @@ class FormationFollowerNode(Node):
         # （V_MAX 环境变量，docker-compose.yml 里默认 1.0），这样两机是
         # 同一个巡航速度、各飞各的。
         self.declare_parameter('cruise_speed_mps', 1.0)
+        # ---- 2026-09-28 新增：追赶项 ----
+        # 原来参考点是**恒定**速度前进，跟长机同速。两个同速的点，间距恒定不变——
+        # 也就是说起步阶段（长机已走、僚机还没入列）拉开的那段距离，在设计上
+        # 永远收不回来。落后量 `_last_lag_m` 一直算着，但从来没有回到速度上。
+        # 现在：落后超过 catchup_deadband_m 就按比例提速，回到位自动退回匀速。
+        #   cruise_eff = cruise * clamp(1 + gain*(lag - deadband), 1.0, ratio_max)
+        # gain 默认 0.0 = 行为跟改造前一字不变。ratio_max 限制最多比长机快多少，
+        # 别设太大：僚机的设定点还受 max_lead_m(1.5) 的单步限幅和 PX4 位置环
+        # 自身速度限幅约束，参考点跑太快只会顶到 lookahead_m 那条线空转。
+        # 参考点变化率相对巡航速度的余量。1.0 = 参考点最快只能跟长机同速（旧行为，
+        # 落后了就追不回来）；>1 时 s_limit_gap 才是真正的约束，弧长间距被钉死。
+        # 别设太大：参考点跑太快只会顶到 lookahead_m 那条线空转，而且设定点
+        # 单步还受 max_lead_m(1.5) 限幅、实际速度由 PX4 位置环决定。
+        self.declare_parameter('reference_rate_headroom', 1.5)
+        # 参考点推进速率的**变化率**上限（m/s²）。只限速度不限加速度的话，
+        # 参考点可以一拍之内从 1.0 跳到 1.5，僚机跟着猛加速，观感上速度变化
+        # 很剧烈。限住之后僚机的加减速是平滑的。0 = 不限（旧行为）。
+        self.declare_parameter('reference_accel_limit', 0.3)
+        # ---- 拐点前馈 ----
+        # 长机每到一个航点都"先悬停转向再前飞"，这是个**已知的、可预告的**
+        # 减速事件：航线僚机手里就有，长机现在在哪它也知道。与其等长机停了、
+        # 落后量涨起来再从反馈里发现，不如提前收油。
+        # 做法：长机离任一航点小于 corner_ff_radius_m 时，按距离线性压低参考点
+        # 推进速率（最低压到 corner_ff_min_ratio）。半径设 0 即关闭。
+        self.declare_parameter('corner_ff_radius_m', 2.0)
+        self.declare_parameter('corner_ff_min_ratio', 0.4)
+        # ---- 2026-09-28 新增：速度前馈用"达成速率"而不是"限幅值" ----
+        # reference_rate_headroom 引入之后，cruise 只是参考点推进速率的**上限**
+        # （1.5），实际推进量被 s_limit_gap 钳成长机的速度（1.0）。之前把 cruise
+        # 直接当速度前馈发出去，等于告诉 pt4ctrl "你该按 1.5 m/s 飞"，多喂了
+        # 50%，僚机持续往前顶，实测出现负落后（-0.49，僚机反超参考点）。
+        # 现在：前馈取 (Δs_cmd/dt) 的低通值。长机轨迹是按里程计一帧帧长出来的，
+        # s_limit_gap 呈台阶式增长，瞬时速率抖得厉害，所以要滤。
+        self.declare_parameter('ff_rate_tau_s', 0.5)
+        # ---- 2026-09-28：航线里程尺只用来**清洗长机轨迹**，不当间距基准 ----
+        # 试过让间距也按航线里程算（route_basis），实测更差：run37 间距
+        # -2.55~14.49，对照 run36 的 1.51~6.96。机理是僚机**飞**的是长机实飞
+        # 轨迹、却按**航线**里程约束间距，两把尺长度不等——绕柱子那段实飞轨迹
+        # 比航线长，僚机得超速才能维持航线间距，超不动就掉队，绕完又过冲。
+        # 基准不统一，比统一到任何一边都差。那套双尺切换（二分查找、只读投影）
+        # 已整体删除，别再加回来。
+        # 长机轨迹清洗：只有让**航线进度前进**的点才进缓冲区。拐点冲过头再
+        # 倒回来、原地转向时的飘移，航线弧长不增反减，直接丢掉，僚机就不会
+        # 跟着复刻。绕柱子那种绕行**是前进的**（偏离航线但里程一直在涨），
+        # 照留不误——这是这条判据跟"按偏离航线远近过滤"的本质区别。
+        # 护栏：丢点造成的跨度超过这个值就不丢了，老老实实照抄——万一长机是
+        # "倒车绕障"，抄近道那条弦可能正好穿过障碍物。
+        self.declare_parameter('path_prune_max_chord_m', 2.5)
+        # ---- 2026-09-28 新增：间距偏置补偿（慢积分）----
+        # 实测落后量中位 +0.39 米——这是个**稳定偏置**（飞机始终落在参考点后面，
+        # 位置环的稳态误差 + 单步限幅），不是噪声。既然稳定就能直接补掉：
+        # 把有效跟随距离慢慢往下修，让**实际**间距收敛到 follow_distance_m，
+        # 而不是让参考点收敛到它。
+        # 时间常数远慢于僚机位置环和长机照顾模式（~1 s），不会跟它们打架。
+        # gain 设 0 = 关闭，退回改造前行为。
+        self.declare_parameter('bias_trim_gain', 0.15)     # 1/s，trim += gain*lag*dt
+        # 收敛后 trim 大致等于参考点到飞机那段不可消除的落后（lookahead +
+        # 飞机自身跟踪误差，实测 0.6~1.2），上限要留余量，顶到栏杆就不再调节了。
+        self.declare_parameter('bias_trim_max_m', 1.5)     # 最多把跟随距离修小这么多
+        self.declare_parameter('bias_trim_min_m', -0.5)    # 最多修大这么多（僚机反超时）
+        self.declare_parameter('catchup_gain', 0.0)
+        self.declare_parameter('catchup_ratio_max', 1.3)
+        self.declare_parameter('catchup_deadband_m', 0.5)
         self.declare_parameter('max_z_lead_m', 0.4)
 
         # ---- 定高（2026-09-20订正，用户要求）----
@@ -632,6 +846,14 @@ class FormationFollowerNode(Node):
         # 由选手程序按需打开，不改默认行为。
         self.declare_parameter('yaw_follow_leg', False)
         self.declare_parameter('yaw_leg_tol_deg', 5.0)
+        # ---- 协调转弯（2026-09-28 用户要求：拐点处不停留）----
+        # yaw_follow_leg 打开后原本是"到了拐点就地停下、把机头转到下一段航向、
+        # 转到位再走"。停下来这件事本身是编队的大扰动：僚机停 3 秒，长机没停，
+        # 间距就涨 3 米，之后还得追回来。
+        # turn_in_place=False 改成：机头按限速**连续**转向当前段航向，参考点
+        # 一刻不停。长机侧的对应改动在 编队飞行示例.py 的 _start_coordinated_yaw。
+        self.declare_parameter('yaw_turn_in_place', True)
+        self.declare_parameter('yaw_slew_rate_dps', 60.0)
         # 航线（世界坐标，[x0,y0,x1,y1,...]，第一个点是长机起飞点）。航向**只能**
         # 来自这条航线：每段一个精确值，全程只在起飞点和各航点变一次，中途恒定。
         # 2026-09-24 先试过"从长机走过的轨迹算切线"，无论短基线还是长基线弦向都
@@ -669,6 +891,9 @@ class FormationFollowerNode(Node):
         # self.get_parameter(...)（那个要等回调返回、rclpy真正写入
         # 参数存储之后才会更新）。
         self._leader_path = LeaderPathBuffer()
+        # 长机轨迹**向后延伸**的那一段的长度，见 _on_leader_pose 里的说明。
+        # 0 表示没延伸（拿不到航线时退回旧行为）。
+        self._path_prepad_m = 0.0
         self._leader_latest_z: float = 0.0
         self._current_leader_ns: str = ''
         self._leader_sub = None
@@ -681,12 +906,33 @@ class FormationFollowerNode(Node):
         self.goal_pub = self.create_publisher(PoseStamped, 'rviz_goal_world', 10)
         # 轨迹跟随的真正输出口（见 cmd_rate_hz 参数上面的说明）
         self.cmd_pub = self.create_publisher(PositionCommand, 'formation_cmd', 10)
+        # 诊断话题（2026-09-28）：把跟随回路内部真正看到的几个量发出来，供
+        # scripts/编队监视.py 和长机的"照顾模式"用。外面自己拿两机位置去算
+        # 弧长是算不准的——折线基准、采样率、向后延伸那一段都跟这里不一样。
+        #   data[0] = lag_m        落后量 = s_limit_gap - s_proj（>0 表示落后）
+        #   data[1] = s_cmd        参考点弧长
+        #   data[2] = s_proj       僚机投影弧长
+        #   data[3] = total_length 长机轨迹总弧长（含向后延伸段）
+        #   data[4] = 弧长间距 = total_length - s_proj
+        self.diag_pub = self.create_publisher(Float64MultiArray, 'formation_diag', 10)
 
         # 2026-09-20：入列判据需要知道"我自己在哪"，原来这个节点只订阅
         # 长机odom、不看自己的位置（稳态跟随不需要）。
         self._own_xy: Optional[Tuple[float, float]] = None
         self._own_z: Optional[float] = None
         self._last_lag_m: Optional[float] = None
+        self._last_s_proj: Optional[float] = None   # 上一次的投影弧长，消歧义用
+        self._s_rate: Optional[float] = None        # 参考点当前推进速率，限加速度用
+        self._s_rate_ff: Optional[float] = None     # 参考点**达成**推进速率（低通），速度前馈用
+        self._fd_trim: float = 0.0                  # 跟随距离的偏置补偿量（慢积分）
+        # ---- 航线里程尺（2026-09-28）----
+        self._route_ruler: Optional[RouteRuler] = None
+        self._route_key: Optional[tuple] = None     # 建尺时用的 leg_route_xy，变了就重建
+        self._rs_lead: dict = {}                    # 长机、僚机、参考点各自的展开状态
+        self._rs_own: dict = {}
+        self._lead_route_s_max: Optional[float] = None   # 长机航线进度的历史最大值
+        self._s_route_lead: Optional[float] = None       # 长机当前的航线里程（长机回调里算）
+        self._leader_raw_xy: Optional[Tuple[float, float]] = None  # 长机最新实测位置（未经清洗）
         # 高度基准（2026-09-20炸机+自降两次事故后加）：两机的 odom z **不在
         # 同一个基准上**——`world->{ns}/odom` 的 z 平移量是每架飞机开机时
         # 各自运行时锁定的（uwb_imu 定位源的已知性质），实测同在地面时
@@ -862,6 +1108,8 @@ class FormationFollowerNode(Node):
         # 旧长机的历史轨迹点对新长机的跟随逻辑毫无意义，留着只会让
         # TandemGeometry第一次调用时用旧数据算出一个错误的目标点。
         self._leader_path.clear()
+        self._path_prepad_m = 0.0
+        self._last_s_proj = None
         self._leader_latest_z = 0.0
         self._current_leader_ns = desired_ns
 
@@ -904,7 +1152,88 @@ class FormationFollowerNode(Node):
         """
         self._leader_last_rx = time.monotonic()
         p = msg.pose.position
+        # ---- 2026-09-28：第一个点之前先补一段"向后延伸" ----
+        # 为什么要补：僚机的起始站位在长机起飞点**后方** follow_distance_m 处
+        # （编队示例 2026-09-28 起会先飞过去站好）。而 project_arc_length() 把
+        # 投影钳在 [0, 全长] 内，站在起点之前的僚机投影出来就是 0——跟"正好站在
+        # 长机起飞点上"完全无法区分。于是那 follow_distance_m 的身位差成了一笔
+        # **隐形欠账**：间距约束 s_limit_gap = 全长 - follow_distance 仍然按
+        # "僚机在起点上"来算，僚机得多飞这一段才能补回来，而它跟长机同速，
+        # 只能靠追赶项一点点还，实测起步阶段明显落后。
+        # 补上这一段之后，弧长 0 就是僚机**当前实际位置**、长机从一开始就在
+        # 一个身位之外，两边的账本对齐，起步瞬间 lag=0。
+        #
+        # 2026-09-28 订正（用户指出）：延伸的终点直接取僚机的实测位置，不要用
+        # "航线第一段方向 × follow_distance"算出来的名义站位——僚机站位有零点
+        # 几米的误差，用实测值账本才真对得上。而且这样**判据一个字都不用改**：
+        # 原来的 total_length >= follow_distance 一上来就被这段延伸满足，僚机
+        # 直接进入跟随态；而跟随的数学本身会把它按住不动（s_limit_gap =
+        # 全长 - follow_distance ≈ 0，参考点就停在僚机自己身上），长机不动它就
+        # 不动。hold 那一段等于自动失效，不需要再判"长机飞够 3.5 米没有"——
+        # 上一版扣掉 prepad 反而把等待拉长到 7 秒（叠上起步缓加速后更明显）。
+        if len(self._leader_path) == 0:
+            # 僚机自己在 UWB 系里的位置——节点本来就订着自己的 uwb/pose_abs
+            # 存在这个属性里（见 _on_own_uwb），跟长机轨迹同一个系，直接用。
+            anchor = self._own_uwb_xy
+            if anchor is not None:
+                d = math.hypot(p.x - anchor[0], p.y - anchor[1])
+                self._leader_path.append(anchor[0], anchor[1], p.z,
+                                         self._stamp_to_sec(msg.header.stamp))
+                self._path_prepad_m = d
+                self.get_logger().info(
+                    f'长机轨迹向后延伸到僚机当前位置 ({anchor[0]:.2f}, {anchor[1]:.2f})，'
+                    f'长 {d:.2f} m，弧长0对齐到僚机')
+        self._leader_raw_xy = (p.x, p.y)
+        # ---- 轨迹清洗：只有让航线进度前进的点才进缓冲区（见 path_prune_max_chord_m）----
+        prune_chord = float(self.get_parameter('path_prune_max_chord_m').value)
+        ruler = self._route_ruler_or_none() if prune_chord > 0.0 else None
+        if ruler is not None:
+            # 长机的航线里程只在这里算一次，控制循环直接读 _s_route_lead——
+            # 两处各算一次的话，两个线程会抢同一份展开状态。
+            s_lead = ruler.project_unwrapped(p.x, p.y, self._rs_lead)
+            self._s_route_lead = s_lead
+            if s_lead is not None and len(self._leader_path) > 0:
+                if self._lead_route_s_max is None:
+                    self._lead_route_s_max = s_lead
+                elif s_lead <= self._lead_route_s_max + 1e-6:
+                    # 航线进度没前进：冲过头往回退、原地转向飘移之类。丢掉，
+                    # 除非丢掉会让轨迹出现一段过长的直线跨越（见参数说明）。
+                    last = self._leader_path.last_xy()
+                    chord = (math.hypot(p.x - last[0], p.y - last[1])
+                             if last is not None else 0.0)
+                    if chord <= prune_chord:
+                        return
+                else:
+                    self._lead_route_s_max = s_lead
         self._leader_path.append(p.x, p.y, p.z, self._stamp_to_sec(msg.header.stamp))
+
+    def _route_ruler_or_none(self) -> Optional['RouteRuler']:
+        """按当前 leg_route_xy 取（必要时重建）航线里程尺；没航线就返回 None。
+
+        这把尺只用来**清洗长机轨迹**（丢掉不让航线进度前进的点），不当间距
+        基准——当间距基准试过，更差，原委见 declare_parameter 那一段。
+        """
+        pts = self._leg_route_points()
+        if len(pts) < 2:
+            return None
+        key = tuple(pts)
+        if key != self._route_key:
+            # 往起点之前延一段，长度取跟随距离再加点余量：僚机的起始站位在
+            # 长机起飞点后方，不延的话它的投影会被钳在 0（见 RouteRuler）。
+            back = float(self.get_parameter('follow_distance_m').value) + 2.0
+            self._route_ruler = RouteRuler(pts, back_extend_m=back)
+            self._route_key = key
+            self._rs_lead, self._rs_own = {}, {}
+            self._lead_route_s_max = None
+            self.get_logger().info(
+                f'航线里程尺已建立：{len(pts)} 个航点，总长 {self._route_ruler.total():.1f} m'
+                f'（向后延伸 {back:.1f} m）。进度与间距按航线量，飞行路径仍是长机实飞轨迹')
+        return self._route_ruler if (self._route_ruler and self._route_ruler.ok()) else None
+
+    def _leg_route_points(self) -> List[Tuple[float, float]]:
+        """把 leg_route_xy 这个拉平的 double 数组还原成 [(x, y), ...]。"""
+        flat = list(self.get_parameter('leg_route_xy').value or [])
+        return [(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)]
 
     def _uwb_to_odom_offset(self) -> Optional[Tuple[float, float]]:
         """UWB 系 -> 自己 odom 系 的实时平移。
@@ -970,7 +1299,12 @@ class FormationFollowerNode(Node):
             #   ② 不越过"落后长机 follow_distance_m"那条线（间距下限）；
             #   ③ 不领先僚机实际投影位置超过 lookahead_m（飞机跟不上时等它）。
             # 取点永远沿折线插值，所以走的就是长机走过的路径，不会抄近道。
-            s_proj = self._leader_path.project_arc_length(own_uwb_x, own_uwb_y)
+            # 传上一次的投影弧长消歧义：航线闭合时僚机在起降点附近会 snap 到
+            # 轨迹起点，lag 瞬间变成几十米（见 project_arc_length 的说明）。
+            s_proj = self._leader_path.project_arc_length(
+                own_uwb_x, own_uwb_y, last_s=self._last_s_proj)
+            if s_proj is not None:
+                self._last_s_proj = s_proj
             if s_proj is None:
                 self.get_logger().warn(
                     f'enabled=True但还没收到过长机({self._current_leader_ns})的里程计，暂不发布指令',
@@ -984,10 +1318,66 @@ class FormationFollowerNode(Node):
             if self._s_cmd is None:
                 self._s_cmd = s_proj      # 入列瞬间从飞机当前投影位置起步
             cruise = float(self.get_parameter('cruise_speed_mps').value)
-            s_limit_gap = max(0.0, self._leader_path.total_length() - follow_distance_m)
+            # 有效跟随距离 = 标称值 - 偏置补偿量（见 bias_trim_gain 处说明）
+            fd_eff = follow_distance_m - self._fd_trim
+            s_limit_gap = max(0.0, self._leader_path.total_length() - fd_eff)
             s_limit_lead = s_proj + float(self.get_parameter('lookahead_m').value)
+            # 真实间距：沿长机（已清洗的）实飞轨迹，从僚机投影到长机当前位置
+            gap_now = self._leader_path.total_length() - s_proj
+            # ---- 2026-09-28 改：参考点由"匀速推进"改成"锁在间距线上，速度只做限幅" ----
+            # 原来 cruise 跟长机的 max_vel 一模一样（都是 1.0），于是 s_cmd 每拍
+            # 前进的量跟 s_limit_gap 每拍增长的量**恰好相等**——一旦落后就永远
+            # 追不回来，长机每到一个航点还要停下转向（先悬停转向再前飞），走走停停
+            # 之间落后量不断累积。实测间距在 2.7~5.3 m 之间来回摆、中位 3.86。
+            # 现在：给一个高于长机巡航速度的**变化率上限**，让真正起约束作用的是
+            # s_limit_gap（= 长机弧长 - 跟随距离）。这样长机停、参考点就停；长机
+            # 加速、参考点跟着加速；弧长间距恒等于 follow_distance_m，只剩飞机
+            # 自身跟踪滞后那一点点误差。
+            # rate_headroom 是相对长机巡航速度的余量，1.0 等于退回旧行为。
+            cruise *= max(1.0, float(self.get_parameter('reference_rate_headroom').value))
+            # 拐点前馈：长机快到航点了就提前收油（前馈，不等落后量涨起来）
+            ff_r = float(self.get_parameter('corner_ff_radius_m').value)
+            if ff_r > 0.0:
+                # 用长机**实测**位置，不是缓冲区末点——轨迹清洗开着的时候，
+                # 长机在拐点回钩那几秒里的点会被丢掉，缓冲区末点是停滞的。
+                lead_xy = self._leader_raw_xy or self._leader_path.last_xy()
+                pts = self._leg_route_points()
+                if lead_xy is not None and len(pts) >= 2:
+                    d_corner = min(math.hypot(lead_xy[0] - px, lead_xy[1] - py)
+                                   for px, py in pts)
+                    if d_corner < ff_r:
+                        ff_min = float(self.get_parameter('corner_ff_min_ratio').value)
+                        cruise *= max(ff_min, d_corner / ff_r)
+            # 参考点速率限加速度：目标速率是 cruise，但每拍最多改
+            # reference_accel_limit * dt，避免一拍跳满、僚机猛加速
+            accel_lim = float(self.get_parameter('reference_accel_limit').value)
+            if accel_lim > 0.0:
+                if self._s_rate is None:
+                    self._s_rate = 0.0
+                step = accel_lim * dt
+                self._s_rate += max(-step, min(step, cruise - self._s_rate))
+                cruise = self._s_rate
             s_hold = self._s_cmd          # 转向期间要钉回来的弧长（分段航向用）
-            self._s_cmd = min(self._s_cmd + cruise * dt, s_limit_gap, s_limit_lead)
+            s_before = self._s_cmd
+            # 分两步，别合并：
+            #   s_want —— 只受**真实物理约束**（速率上限 + 不能贴长机太近）；
+            #   s_cmd  —— 再套上 lookahead，那只是"设定点别跑到飞机前面太远"的
+            #             安全阀，不是物理约束。
+            s_want = min(self._s_cmd + cruise * dt, s_limit_gap)
+            self._s_cmd = min(s_want, s_limit_lead)
+            # 前馈取 s_want 的推进速率，**不是** s_cmd 的。
+            # 2026-09-28 踩过的坑：一开始拿 s_cmd 的达成速率当前馈，起步时
+            # 参考点被 lookahead 钳在静止飞机前方 0.6 m，达成速率≈0 -> 前馈≈0
+            # -> 飞机只靠 0.6 m 位置误差慢慢挪 -> 参考点继续被钳住，自锁。
+            # 实测僚机起步后纹丝不动 4 秒、间距拉到 7.5 m（run38 t=29~33）。
+            # 用 s_want：长机一动，间距线就以长机的速度推进，前馈立刻是 1 m/s；
+            # 稳态时 s_want 和 s_cmd 推进速率本来就相等，也不会多喂。
+            if dt > 1e-3:
+                rate_now = max(0.0, (s_want - s_before) / dt)
+                tau = max(1e-3, float(self.get_parameter('ff_rate_tau_s').value))
+                a_ff = min(1.0, dt / tau)
+                self._s_rate_ff = (rate_now if self._s_rate_ff is None
+                                   else self._s_rate_ff + a_ff * (rate_now - self._s_rate_ff))
             # 只前进不后退：长机轨迹是单向增长的，参考点回退没有物理意义
             self._s_cmd = max(self._s_cmd, s_proj)
 
@@ -997,7 +1387,16 @@ class FormationFollowerNode(Node):
             cx = target[0] + offset[0]     # 换回自己的 odom 系再发给 pt4ctrl
             cy = target[1] + offset[1]
             self._last_target_xy = (cx, cy)
-            self._last_lag_m = s_limit_gap - s_proj   # 沿轨迹的落后量，仅用于反馈/入列判据
+            # 落后量：实际间距超出有效跟随距离多少（>0 = 落后）。航线基准下
+            # 这两个量都按航线里程算，跟评价指标同一把尺。
+            self._last_lag_m = gap_now - fd_eff
+            diag = Float64MultiArray()
+            diag.data = [float(self._last_lag_m), float(self._s_cmd), float(s_proj),
+                         float(self._leader_path.total_length()),
+                         float(gap_now),
+                         float(self._fd_trim),
+                         float(self._s_rate_ff if self._s_rate_ff is not None else 0.0)]
+            self.diag_pub.publish(diag)
 
             # 步长限幅：设定点最多领先当前位置 max_lead_m。参考点已经落在
             # 轨迹上，这一步只是防止"一次给出好几米外的点"被 PX4 当成远距离
@@ -1060,8 +1459,7 @@ class FormationFollowerNode(Node):
             if bool(self.get_parameter('yaw_follow_leg').value):
                 tol = math.radians(float(self.get_parameter('yaw_leg_tol_deg').value))
                 own_yaw = self._own_yaw if self._own_yaw is not None else self._yaw_ref
-                flat = list(self.get_parameter('leg_route_xy').value or [])
-                pts = [(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)]
+                pts = self._leg_route_points()
                 if len(pts) >= 2 and not self._yaw_turning:
                     # 参考点 target 就在共享（UWB/世界）系里，直接拿它定位在第几段。
                     # 只前进不后退：投影超过本段末端就进下一段。
@@ -1075,7 +1473,17 @@ class FormationFollowerNode(Node):
                         self._leg_idx += 1
                     a, b = pts[self._leg_idx], pts[self._leg_idx + 1]
                     leg_dir = math.atan2(b[1] - a[1], b[0] - a[0])
-                    if _ang_diff(leg_dir, self._yaw_ref) > tol:
+                    if not bool(self.get_parameter('yaw_turn_in_place').value):
+                        # 协调转弯：机头按限速连续转过去，**不停**（见参数说明）。
+                        # 每拍挪一点，所以这里不设 _yaw_turning，参考点照常推进。
+                        step = math.radians(
+                            float(self.get_parameter('yaw_slew_rate_dps').value)) * dt
+                        d = math.atan2(math.sin(leg_dir - self._yaw_ref),
+                                       math.cos(leg_dir - self._yaw_ref))
+                        self._yaw_ref = math.atan2(
+                            math.sin(self._yaw_ref + max(-step, min(step, d))),
+                            math.cos(self._yaw_ref + max(-step, min(step, d))))
+                    elif _ang_diff(leg_dir, self._yaw_ref) > tol:
                         self._yaw_ref = leg_dir        # 这一段的航向，中途不再变
                         self._yaw_turning = True
                         self.get_logger().info(
@@ -1093,13 +1501,33 @@ class FormationFollowerNode(Node):
                         if self._last_target_xy is not None:
                             sx, sy = self._last_target_xy
 
+            # 前馈速度：参考点**实际**推进的速率（见 ff_rate_tau_s 处说明）。
+            # cruise 只是上限，发它会多喂 50%。
+            v_ff = self._s_rate_ff if self._s_rate_ff is not None else 0.0
+            v_ff = max(0.0, min(v_ff, cruise))
             cmd.position.x, cmd.position.y = float(sx), float(sy)
-            cmd.velocity.x = float(cruise * math.cos(tdir)) if moving else 0.0
-            cmd.velocity.y = float(cruise * math.sin(tdir)) if moving else 0.0
+            cmd.velocity.x = float(v_ff * math.cos(tdir)) if moving else 0.0
+            cmd.velocity.y = float(v_ff * math.sin(tdir)) if moving else 0.0
             cmd.velocity.z = 0.0
             cmd.yaw = float(self._yaw_ref if self._yaw_ref is not None else 0.0)
             cmd.trajectory_id = 1
             self.cmd_pub.publish(cmd)
+
+            # 偏置补偿积分：只在"正常巡航"时积（转向悬停、顶到间距下限时飞机
+            # 本来就该停，那时的落后量不是稳态误差，积进去会积饱和）。
+            trim_gain = float(self.get_parameter('bias_trim_gain').value)
+            if trim_gain > 0.0 and moving and not self._yaw_turning and dt > 1e-3:
+                # 积的是**真实间距误差**，不是 _last_lag_m。
+                # lag = s_limit_gap - s_proj = (实际间距 - fd_eff) = err + trim，
+                # 拿它当误差等于把积分器自己的输出也积进去（正反馈）；而且参考点
+                # 被 lookahead 钳在 s_proj+0.6 时 lag>=0.6 恒成立，积分永远不收敛，
+                # 必然一路顶到限幅（2026-09-28 run33 实测 trim railed 到 1.0、
+                # 实际间距被拉近到 3.14）。真实间距 = 长机轨迹全长 - 僚机投影。
+                err = gap_now - follow_distance_m
+                self._fd_trim += trim_gain * err * dt
+                self._fd_trim = max(float(self.get_parameter('bias_trim_min_m').value),
+                                    min(float(self.get_parameter('bias_trim_max_m').value),
+                                        self._fd_trim))
             return
 
         params = {'follow_distance_m': follow_distance_m}
@@ -1181,6 +1609,15 @@ class FormationFollowerNode(Node):
         ])
         self._yaw_ref = None
         self._s_cmd = None
+        self._last_s_proj = None
+        self._s_rate = None
+        self._s_rate_ff = None
+        self._fd_trim = 0.0
+        self._route_key = None          # 强制重建里程尺（跟随距离变了、航线可能也变了）
+        self._route_ruler = None
+        self._rs_lead, self._rs_own = {}, {}
+        self._lead_route_s_max = None
+        self._s_route_lead = None
         self._s_cmd_t = None
         self._yaw_turning = False
         self._leg_idx = 0

@@ -1,0 +1,104 @@
+--- a/src/planner/plan_manage/src/planner_manager.cpp
++++ b/src/planner/plan_manage/src/planner_manager.cpp
+@@ -6,6 +6,57 @@
+ namespace ego_planner
+ {
+ 
++  // ---- docker_sim: 多候选轨迹的挑选准则 ------------------------------------
++  // use_distinctive_trajs 会把每个碰撞段的推离方向翻到相反侧，生成拓扑不同的
++  // 多条初值，各优化一遍再挑一条。原版只比 final_cost，而 final_cost =
++  // lambda1*jerk平方和 + lambda2*离障 + lambda3*动力学可行（见
++  // bspline_optimizer.cpp::combineCostRebound），**里面没有任何路径长度项**——
++  // 于是"绕远但很平滑"的那条完全可能赢过"短但要拐两下"的那条，表现就是用户说的
++  // "撑开方向不对、弯特别多、并非最优"。
++  //
++  // 这里在挑选处（不是在 f_combine 里）额外计入弧长和总转角。放在挑选处而不是
++  // 代价函数里，是因为：L-BFGS 改的是控制点位置，**改不了拓扑**——轨迹绕障碍
++  // 哪一侧是由 initControlPoints/distinctiveTrajs 生成的 (base_point, direction)
++  // 推离对钉死的，往 f_combine 里加长度项只能让每条候选各自稍微拉直一点，
++  // 不可能把它掀到障碍另一侧去；而"选错了边"恰恰是拓扑问题，只能在挑选处解决。
++  // 加在 f_combine 里还有额外代价：多两项梯度要跟平滑项/离障项相互拉扯，收敛性
++  // 和既有调参都会受影响。
++  //
++  // 两个权重默认 0.0 —— 不配置时挑选行为跟改造前一字不变，只多打印诊断信息。
++  static double select_lambda_length = 0.0;
++  static double select_lambda_turn = 0.0;
++
++  // 用控制多边形算弧长和总转角：均匀 B 样条曲线被控制多边形包住，两者单调相关，
++  // 而且控制点就是优化变量本身，不用再去 evaluateDeBoorT 采样曲线，最省事。
++  // length: 折线总长（米）。turn: 相邻两段方向夹角之和（度），直线为 0，
++  // 走一个 90 度弯约 90，来回绕两下就会明显大于绕远那条。
++  static void trajShapeMetrics(const Eigen::MatrixXd &q, double &length, double &turn)
++  {
++    length = 0.0;
++    turn = 0.0;
++    if (q.cols() < 2)
++      return;
++    Eigen::Vector3d prev_dir = Eigen::Vector3d::Zero();
++    bool has_prev = false;
++    for (int i = 0; i < q.cols() - 1; ++i)
++    {
++      Eigen::Vector3d seg = q.col(i + 1) - q.col(i);
++      double n = seg.norm();
++      length += n;
++      if (n < 1e-6)
++        continue;
++      Eigen::Vector3d dir = seg / n;
++      if (has_prev)
++      {
++        double c = prev_dir.dot(dir);
++        c = std::max(-1.0, std::min(1.0, c));
++        turn += std::acos(c) * 180.0 / M_PI;
++      }
++      prev_dir = dir;
++      has_prev = true;
++    }
++  }
++
+   EGOPlannerManager::EGOPlannerManager() {}
+ 
+   EGOPlannerManager::~EGOPlannerManager() {}
+@@ -19,6 +70,10 @@
+     node->declare_parameter("manager/control_points_distance", -1.0);
+     node->declare_parameter("manager/planning_horizon", 5.0);
+     node->declare_parameter("manager/use_distinctive_trajs", false);
++    // docker_sim: 多候选挑选时额外计入的弧长/总转角权重，默认0=只比 final_cost，
++    // 行为跟改造前一致。见本文件顶部 trajShapeMetrics() 上方的说明。
++    node->declare_parameter("manager/select_lambda_length", 0.0);
++    node->declare_parameter("manager/select_lambda_turn", 0.0);
+     node->declare_parameter("manager/drone_id", -1);
+ 
+     node->get_parameter("manager/max_vel", pp_.max_vel_);
+@@ -28,6 +83,8 @@
+     node->get_parameter("manager/control_points_distance", pp_.ctrl_pt_dist);
+     node->get_parameter("manager/planning_horizon", pp_.planning_horizen_);
+     node->get_parameter("manager/use_distinctive_trajs", pp_.use_distinctive_trajs);
++    node->get_parameter("manager/select_lambda_length", select_lambda_length);
++    node->get_parameter("manager/select_lambda_turn", select_lambda_turn);
+     node->get_parameter("manager/drone_id", pp_.drone_id);
+ 
+     local_data_.traj_id_ = 0;
+@@ -297,13 +354,20 @@
+       {
+         if (bspline_optimizer_->BsplineOptimizeTrajRebound(ctrl_pts_temp, final_cost, trajs[i], ts))
+         {
++          // docker_sim: 挑选分 = final_cost + w_len*弧长 + w_turn*总转角。
++          // 两个权重默认 0，那时 score 就等于 final_cost，挑选结果跟原版一致；
++          // 打印始终保留，便于看清"到底是只有一条候选，还是两条里挑错了"。
++          double traj_len = 0.0, traj_turn = 0.0;
++          trajShapeMetrics(ctrl_pts_temp, traj_len, traj_turn);
++          double score = final_cost + select_lambda_length * traj_len + select_lambda_turn * traj_turn;
+ 
+-          cout << "traj " << trajs.size() - i << " success." << endl;
++          printf("traj %d success. cost=%.3f len=%.2fm turn=%.0fdeg score=%.3f\n",
++                 (int)(trajs.size() - i), final_cost, traj_len, traj_turn, score);
+ 
+           flag_step_1_success = true;
+-          if (final_cost < min_cost)
++          if (score < min_cost)
+           {
+-            min_cost = final_cost;
++            min_cost = score;
+             ctrl_pts = ctrl_pts_temp;
+           }
+ 
