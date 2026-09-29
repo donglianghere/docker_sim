@@ -42,13 +42,45 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float64MultiArray
 from rclpy.node import Node
 
-# 场地（世界系，跟 fire_drill_room 一致）
-ROOM_X, ROOM_Y = 20.0, 25.0          # 房间尺寸
+# 场地底图。2026-09-29 之前这几个常量是**写死的 fire_drill_room 坐标**，
+# 换成样题场景之后俯视图画的还是老房子（房间画在原点居中、立柱在 (4.5,7)
+# 那套、起降点在 (±2,-9.5)），轨迹叠在错误的底图上，看着像飞机飞到墙外去了。
+# 现在改成从布局 yaml 读，读不到才退回这组老值（并打一行提示，不静默）。
+ROOM_X, ROOM_Y = 20.0, 25.0
+ROOM_ORIGIN = 'center'               # 'center'=原点在房间中心；'southwest'=在西南角
 PILLARS = [(4.5, 7.0), (-4.5, 7.0), (0.0, 0.0)]
 PILLAR_HALF = 0.5
 PADS = {'NX01': (2.0, -9.5), 'NX02': (-2.0, -9.5)}
+CYLINDERS = []                       # [(x, y, r), ...]
+TERRAIN = None                       # (x, y, size_x, size_y)
+
+
+def load_scene(path):
+    """从布局 yaml 覆盖上面那组底图常量。找不到文件就保持原值。"""
+    global ROOM_X, ROOM_Y, ROOM_ORIGIN, PILLARS, PILLAR_HALF, PADS, CYLINDERS, TERRAIN
+    import yaml
+    with open(path, encoding='utf-8') as f:
+        L = yaml.safe_load(f)
+    R = L['room']
+    ROOM_X, ROOM_Y = float(R['size_x']), float(R['size_y'])
+    ROOM_ORIGIN = R.get('origin', 'center')
+    PILLAR_HALF = float(L['pillar_size']) / 2.0
+    PILLARS = []
+    for q in L['pillars']:
+        PILLARS.append((float(q['x']), float(q['y'])))
+        if q.get('twin_east'):       # 正东孪生柱，底图上要画成两个方块
+            PILLARS.append((float(q['x']) + 2 * PILLAR_HALF, float(q['y'])))
+    PADS = {p['id'].upper(): (float(p['x']), float(p['y']))
+            for p in L['takeoff_landing_pads']}
+    c = L.get('obstacle_cylinder')
+    CYLINDERS = [(float(c['x']), float(c['y']), float(c['diameter']) / 2)] if c else []
+    t = L.get('terrain_module')
+    TERRAIN = (float(t['x']), float(t['y']), float(t['size_x']), float(t['size_y'])) if t else None
 COLORS = {'NX01': '#d62728', 'NX02': '#1f77b4'}   # 长机红、僚机蓝
 
+AIRBORNE_Z = 1.0        # 高于这个算"在空中"（判"两机都起飞过"用）
+HOVER_DONE_S = 20.0     # 没降落的飞机原地悬停这么久也算任务结束（长机在 A 点选题）
+HOVER_DONE_M = 0.8      # 这段时间内水平位移不超过这个算"原地"
 LANDED_AGL = 0.3        # 低于这个高度算落地
 LANDED_HOLD = 3.0       # 且要持续这么久
 # 时间轴一律画全程，不滚动（用户 2026-09-28 要求）——起步那一段恰恰是要看的，
@@ -142,6 +174,7 @@ class FormationMonitor(Node):
         self.gap_t, self.gap_d = [], []      # 沿航线的间距（主指标）
         self.gap_line = []                    # 直线距离，只作参考对照
         self.gap_xy = []                      # 算这个间距时两机的原始 xy，存 CSV 用
+        self._all_airborne_seen = False       # 是否出现过"两机同时在空中"
         self.diag_t, self.diag_lag = [], []   # 跟随节点自报的落后量
         self.diag_trim = []                   # 跟随距离的偏置补偿量（data[5]，可能没有）
         self.diag_gap = []                    # 节点自报的实际间距 = 长机轨迹全长 - 僚机投影（data[4]）
@@ -177,6 +210,7 @@ class FormationMonitor(Node):
             d['t'].append(t); d['x'].append(p.x); d['y'].append(p.y)
             d['z'].append(p.z); d['yaw'].append(yaw)
             self._update_landed(name, p.z)
+            self._note_airborne()
             self._update_gap(t)
         return cb
 
@@ -189,6 +223,14 @@ class FormationMonitor(Node):
             # 眼里的真实间距。画 3.5+lag 是不对的：lag 是相对**补偿后**的跟随距离
             # 算的（lag = 实际间距 - fd_eff），3.5+lag 会恒比实际间距高出一个 trim。
             self.diag_gap.append(float(msg.data[4]) if len(msg.data) >= 5 else float('nan'))
+
+    def _note_airborne(self):
+        """两机同时高于 AIRBORNE_Z 就置位——任务结束判据的前置条件。"""
+        if self._all_airborne_seen:
+            return
+        zs = [self.track[n]['z'][-1] for n in self.names if self.track[n]['z']]
+        if len(zs) == len(self.names) and all(z > AIRBORNE_Z for z in zs):
+            self._all_airborne_seen = True
 
     def _update_landed(self, name, z):
         now = time.monotonic()
@@ -238,6 +280,41 @@ class FormationMonitor(Node):
         return all(self.landed[n] for n in self.names) and \
             all(self.track[n]['t'] for n in self.names)
 
+    def mission_done(self):
+        """任务是否结束——不能只看"两机都降落了"。
+
+        2026-09-29 样题流程里长机跑完航线是**回 A 点悬停、不降落**的，只判降落
+        的话监视脚本永远等不到结束条件，报告就一直不生成（实测 run52 就是这样
+        白跑了一整轮，PNG 还停在上一轮）。
+        判据放宽成："每架飞机要么已降落，要么已经在原地悬停 HOVER_DONE_S 秒"
+        （悬停=这段时间内水平位移不超过 HOVER_DONE_M），且至少有一架真的落了
+        ——只有悬停没人降落，多半是还在飞，不算结束。
+        """
+        if not all(self.track[n]['t'] for n in self.names):
+            return False
+        # 前置：必须**两机都真的飞起来过**。少了这一条，起飞前就会误判结束——
+        # 两机都还在地上算"已降落"，先起飞那架刚离地悬停算"原地悬停"，
+        # 条件当场成立（2026-09-29 run54 实测：采样才 137 点，NX02 高度
+        # 中位 0.04 米，压根没起飞就出报告了）。
+        if not self._all_airborne_seen:
+            return False
+        if not any(self.landed[n] for n in self.names):
+            return False
+        now = time.monotonic() - self.t0
+        for n in self.names:
+            if self.landed[n]:
+                continue
+            d = self.track[n]
+            win = [(t, x, y) for t, x, y in zip(d['t'], d['x'], d['y'])
+                   if t >= now - HOVER_DONE_S]
+            if len(win) < 5 or (now - win[0][0]) < HOVER_DONE_S * 0.8:
+                return False            # 样本不够久，还说不准
+            cx = sum(q[1] for q in win) / len(win)
+            cy = sum(q[2] for q in win) / len(win)
+            if max(math.hypot(q[1] - cx, q[2] - cy) for q in win) > HOVER_DONE_M:
+                return False            # 还在动
+        return True
+
 
 def draw(fig, axes, mon):
     ax_xy, ax_z, ax_gap = axes
@@ -246,13 +323,20 @@ def draw(fig, axes, mon):
 
     # ---- ① 俯视轨迹 ----
     ax_xy.set_title('水平轨迹（俯视）')
+    # 房间：原点在西南角时左下角就是 (0,0)，在中心时左下角是 (-X/2,-Y/2)
+    _x0, _y0 = (0.0, 0.0) if ROOM_ORIGIN == 'southwest' else (-ROOM_X / 2, -ROOM_Y / 2)
     ax_xy.add_patch(matplotlib.patches.Rectangle(
-        (-ROOM_X / 2, -ROOM_Y / 2), ROOM_X, ROOM_Y,
-        fill=False, ec='#888', lw=1.2))
+        (_x0, _y0), ROOM_X, ROOM_Y, fill=False, ec='#888', lw=1.2))
     for px, py in PILLARS:
         ax_xy.add_patch(matplotlib.patches.Rectangle(
             (px - PILLAR_HALF, py - PILLAR_HALF), 2 * PILLAR_HALF, 2 * PILLAR_HALF,
             fc='#bbb', ec='#666'))
+    for cx, cy, cr in CYLINDERS:
+        ax_xy.add_patch(matplotlib.patches.Circle((cx, cy), cr, fc='#9ecae1', ec='#3182bd'))
+    if TERRAIN is not None:
+        tx, ty, tw, th = TERRAIN
+        ax_xy.add_patch(matplotlib.patches.Rectangle(
+            (tx - tw / 2, ty - th / 2), tw, th, fc='#f2e6a0', ec='#b8a020'))
     for n, (px, py) in PADS.items():
         ax_xy.plot(px, py, 'x', color=COLORS.get(n, 'k'), ms=9, mew=2)
     last = {}
@@ -360,9 +444,24 @@ def main():
     ap.add_argument('--route', default='',
                     help='规划航线（世界坐标，"x,y x,y ..."，第一个是长机起飞点）。'
                          '给了才按"沿航线弧长"算间距，不给退回直线距离。')
+    ap.add_argument('--layout', default='',
+                    help='布局 yaml（画俯视底图用：房间/立柱/起降点/障碍/仿地模块）。'
+                         '不给就用脚本里写死的 fire_drill_room 那组老坐标。')
     ap.add_argument('--no-gui', action='store_true', help='只出PNG，不弹窗')
     args = ap.parse_args()
 
+    if not args.layout:
+        print('[监视] ⚠️ 没给 --layout，俯视底图用的是写死的 fire_drill_room 老坐标'
+              '（房间原点在中心、立柱 (4.5,7) 那套）。跑样题场景务必带上 --layout，'
+              '否则轨迹会叠在错误的底图上。', flush=True)
+    if args.layout:
+        try:
+            load_scene(args.layout)
+            print(f'[监视] 底图取自 {args.layout}（房间 {ROOM_X:.0f}x{ROOM_Y:.0f}，'
+                  f'原点 {ROOM_ORIGIN}，立柱 {len(PILLARS)} 根）', flush=True)
+        except Exception as exc:
+            print(f'[监视] 布局 {args.layout} 读不了（{exc}），底图退回写死的老坐标——'
+                  f'俯视图的房间/立柱位置可能跟实际场景对不上', flush=True)
     gui = (not args.no_gui) and bool(os.environ.get('DISPLAY'))
     matplotlib.use('TkAgg' if gui else 'Agg')
     import matplotlib.pyplot as plt              # 只绑定 plt，不会遮蔽模块级的 matplotlib
@@ -400,8 +499,9 @@ def main():
                 draw(fig, axes, mon)
                 if gui:
                     plt.pause(0.001)
-            if mon.all_landed() and now > 20.0:
-                print('[监视] 两机都已降落，出报告', flush=True)
+            if mon.mission_done() and now > 20.0:
+                who = '、'.join(n for n in mon.names if mon.landed[n])
+                print(f'[监视] 任务结束（{who} 已降落，其余在原地悬停），出报告', flush=True)
                 break
     finally:
         draw(fig, axes, mon)

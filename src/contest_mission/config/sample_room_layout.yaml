@@ -1,0 +1,138 @@
+# sample_room.world 场景道具坐标——样题版布局的单一权威来源。
+#
+# 2026-09-29 新建。对标 2026-09-27 商定的大赛样题，房间本身（20x25 米、
+# 墙高 6 米、天花板 z=6）跟 fire_drill_room 完全一样，只有内部道具部署变了。
+#
+# ⚠️ 坐标系跟 fire_drill_room_layout.yaml **不同**：
+#   fire_drill_room：世界原点在房间**几何中心**，坐标有正有负（x∈[-10,10]）。
+#   sample_room（本文件）：世界原点在房间**西南角**，坐标全为正（x∈[0,20]，
+#     y∈[0,25]）——用户给样题坐标时明确"房子西南角为原点"，仿真里就照字面
+#     摆，省得选手代码和样题文档之间还要做一次平移换算。
+#   两套 world 各自独立，互不影响；换场景用 WORLD_ENV 切。
+#
+# world 文件不是手写的，由 docker/scripts/gen_sample_room_world.py 从这份
+# yaml 渲染（fire_drill_room 那份是手工同步的，立柱翻倍+每根 5 圈楼层线之后
+# 手工同步不现实）。改布局只改这里，然后重新生成 world。
+
+room:
+  size_x: 20.0
+  size_y: 25.0
+  height: 6.0
+  wall_thickness: 0.3
+  # 原点在西南角：房间占 x∈[0,size_x]、y∈[0,size_y]，墙体中心线压在边界上。
+  origin: southwest
+
+apriltag_size_m: 0.5
+
+# 巡检航线（样题指定，顺序即飞行顺序）。这几个点只是航线坐标，world 里
+# **不放实体**，写在这里是给任务脚本当单一来源用。
+# 2026-09-29 二改成 A B C G E G D 七段：到 G 之后向西支出到 E，原路退回 G，
+# 再南下到 D。E-G 这条支线正好从地面火情点 (13,16) 头上压过去。
+# 长机跑完 D 之后回 A 点悬停选题；僚机回自己起降点降落。
+# ⚠️ G 出现两次 = 航线**自己跟自己重合**，按航线弧长投影算间距在这段有歧义
+#    （同一位置两个弧长坐标），统计间距要看"沿长机实飞轨迹"那个口径。
+route_waypoints:
+  - {id: A, x: 3.0,  y: 3.0}
+  - {id: B, x: 3.0,  y: 22.0}
+  - {id: C, x: 17.0, y: 22.0}
+  - {id: G, x: 17.0, y: 16.0}
+  - {id: E, x: 10.0, y: 16.0}
+  - {id: G, x: 17.0, y: 16.0}
+  - {id: D, x: 17.0, y: 3.0}
+
+# 起降点（起飞=降落合一，50 厘米 H 标识）。yaw_deg 是飞机 spawn 朝向，
+# 90 度=机头指向 Y 正方向（朝北，也就是航线展开的方向）。
+takeoff_landing_pads:
+  - id: nx01
+    x: 8.0
+    y: 3.0
+    z: 0.1
+    yaw_deg: 90.0
+  - id: nx02
+    x: 12.0
+    y: 3.0
+    z: 0.1
+    yaw_deg: 90.0
+
+# 物资点（AprilTag ID 0），精准降落用。
+supply_point:
+  x: 10.0
+  y: 8.0
+  apriltag_id: 0
+
+# 独立障碍物圆柱：直径 0.5 米、高 6 米，跟方形立柱靠"圆形 vs 方形 + 直径"
+# 区分（pillar_detector_node 的过滤逻辑靠这个）。
+# 注意它正好压在航线西段 x=3 上（航点1->2），是航线上的避障考点。
+obstacle_cylinder:
+  x: 3.0
+  y: 8.0
+  diameter: 0.5
+  height: 6.0
+
+# 立柱（模拟高层建筑）。样题版有两处变化：
+#   ① 位置按样题重新指定；
+#   ② **每根立柱正东紧挨着再放一根同样的**——截面 1.0 米，所以孪生柱中心
+#      在 x+1.0 处，两柱侧面正好贴合，合起来是 2.0(x) x 1.0(y) 的一栋楼。
+#      孪生柱 id 是在原 id 后加 `_e`（east）。
+# `twin_east: true` 由生成脚本展开，不用在这里把 6 根都列出来——列出来就
+# 得靠人记住"孪生柱要跟本柱一起改"，迟早对不上。
+pillars:
+  - {id: pillar_1, x: 13.5, y: 19.5, twin_east: true}
+  - {id: pillar_2, x: 5.5,  y: 19.5, twin_east: true}
+  - {id: pillar_3, x: 5.5,  y: 12.5, twin_east: true}
+pillar_size: 1.0
+pillar_height: 6.0
+# 样题版**不随机**（2026-09-29 用户明确）：立柱朝向固定 yaw=0（截面跟坐标轴
+# 平行），高层着火点固定贴在 2# 南面。fire_drill_room 那套"每次重置随机转立柱
+# + 随机挑一根柱子一个面贴 tag"在这里全部关掉——样题的考点是既定布局下的
+# 巡检和处置，不是找柱子。scenario_reset_node 读这个开关。
+randomize_pillars: false
+
+# 楼层线：立柱每隔 1 米画一圈线，模拟高楼层。
+# 实现是**纯视觉**的薄环（比柱身四周各外扩 floor_ring_protrude_m），没有
+# <collision>——Gazebo 的射线传感器打的是 collision 几何，所以这圈线不会
+# 被雷达扫到、不会进障碍点云，纯粹给人看的楼层刻度。
+floor_rings:
+  enabled: true
+  spacing_m: 1.0          # 每 1 米一圈
+  thickness_m: 0.04       # 线本身的厚度（沿 z）
+  protrude_m: 0.03        # 相对柱面外扩多少
+  color: [0.50, 0.50, 0.50]   # 2026-09-29 用户要求：楼层分割线改灰色
+
+# 单元分隔线：每栋楼（=本柱+正东孪生柱，合 2.0x1.0 米）中间加一条**竖直**线，
+# 体现"每层楼有两个单元"（2026-09-29 用户要求）。
+# 位置就压在两根柱子贴合的那条缝上（本柱局部 +x 面），从地面通到楼顶。
+# 跟楼层线一样是**纯视觉**，没有 collision，不会被雷达扫成障碍。
+unit_divider:
+  enabled: true
+  width_m: 0.06           # 线宽（沿 x）
+  protrude_m: 0.03        # 相对柱面外扩多少（跟楼层线一致，不会互相穿模）
+  color: [0.50, 0.50, 0.50]
+
+# 高层着火点标识（AprilTag ID 1）。样题版固定贴在 2# 立柱、**朝向 Y 轴负方向**
+# （即贴在 2# 的南面），高度不变仍是 2.5 米。
+# mount_standoff_m = 立柱半宽 0.5 + 0.01（避免跟柱身共面 Z-fighting）。
+fire_apriltag_id: 1
+fire_apriltag_height_m: 2.5
+fire_apriltag_marker:
+  mount_standoff_m: 0.51
+  pillar_id: pillar_2
+  face: -y                # 朝向 Y 轴负方向
+
+# 地面火情标识（AprilTag ID 2）。2026-09-29 用户指定 (13,16)。
+ground_fire_point:
+  x: 13.0
+  y: 16.0
+  apriltag_id: 2
+
+# 黄色仿地模块（梯形坡道）：长 4 米(沿X)、下底 3 米、上底 1 米(沿Y)、高 0.5 米。
+# 放在航线东段 x=17 上，飞机沿 Y 方向经过时依次是上坡->平顶->下坡，
+# 正好考"仿地飞行/高度跟随"。center_z=0 表示模型原点在地面上。
+terrain_module:
+  x: 17.0
+  y: 9.5
+  center_z: 0.0
+  size_x: 4.0
+  size_y: 3.0
+  size_z: 0.5
+  top_width_y: 1.0

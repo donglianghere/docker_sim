@@ -3,7 +3,7 @@
 """双机一字纵队编队飞行。两机跑同一份代码，靠 --role 区分。
 
     python3 编队飞行示例.py --namespace NX01 --role leader  --teammate NX02 \
-        --route "7,-9.5 7,9.5 -7,9.5 -7,-9.5" --spacing 3.5
+        --route "3,3 3,22 17,22 17,16 10,16 17,16 17,3" --spacing 4.0
     python3 编队飞行示例.py --namespace NX02 --role follower --teammate NX01 --spacing 3.5
 
 航点是世界坐标 (x, y)，至少两个，按顺序飞。僚机不需要知道航线，它沿长机
@@ -36,6 +36,26 @@ CRUISE_AGL_M = 2.0
 # 长机就先判超时终止了。
 STANDBY_WAIT_S = 300.0
 ROUTE_DONE_WAIT_S = 600.0     # 僚机等航线飞完的上限
+# ---- 编队解散时机（2026-09-29 用户定稿）----
+# 判据：**长机飞回自己的起飞点上空时解散**。
+#
+# 航线最后一段 D(17,3) -> A(3,3) 沿 y=3 向西，正好从长机起飞点 (8,3) 上空穿过。
+# 这个判据有个很顺的性质：僚机恒落后 spacing(4) 米，长机压在 (8,3) 时僚机正好
+# 在 (12,3)——**就是僚机自己的起降点**，解散那一刻它就悬在自家停机坪上方，
+# 直接降落即可，不用再飞回来。
+#
+# 之前试过"过 D 点之后解散"：因为僚机恒落后 spacing 米，长机一到 D 就停的话
+# 僚机永远过不完 D，得等长机离开 D 超过 spacing 才行，判据绕。换成起飞点之后
+# 这些都不需要了。
+#
+# 两阶段判据（不能只判"离起飞点近"——飞机一开始就停在起飞点上）：
+#   ① 先等长机离开起飞点超过 DISBAND_DEPART_M，确认航线真的开始了；
+#   ② 再等它回到起飞点 DISBAND_NEAR_M 以内 -> 发解散。
+DISBAND_DEPART_M = 5.0        # 离起飞点超过这么远才算"已经出发"
+DISBAND_NEAR_M = 1.2          # 回到起飞点这么近 = 解散
+DISBAND_POLL_S = 0.2
+SELECT_TOPIC_HOVER_S = 15.0   # 长机到 A 点后悬停多久（选题占位，见 _select_topic_at_a）
+                              # 悬停结束示例就返回，飞机留在空中不降落
 TURN_TIMEOUT_S = 15.0         # 每个航点转到航向角的上限（转 180° 实测十几秒）
 TURN_TOL_DEG = 5.0            # 差这么多度以内算转到位
 # ---- 协调转弯（2026-09-28 用户要求：拐点处不停留）----
@@ -80,9 +100,21 @@ START_RAMP_PERIOD_S = 1.5     # 每档保持多久
 # IN_POSITION 事件）和起步缓加速（START_SLOW_*），那两处是**前馈**，不是回路。
 # 长机的巡航限速。要跟 .env 里的 V_MAX 一致——照顾模式减速之后靠它恢复。
 CRUISE_VEL_MPS = 1.0
-# 不传 --route 时用的默认航线（世界坐标），跟《双机全流程示例.py》里的 ROUTE 一致。
+# 不传 --route 时用的默认航线（世界坐标）。
+# 2026-09-29 换成**样题场景**的 4 个航点：原点在房间西南角，坐标全为正，
+# 权威来源是 src/contest_mission/config/sample_room_layout.yaml 的
+# route_waypoints（那份 yaml 同时也是 world 文件的生成输入）。
+# 旧的 fire_drill_room 航线 '7,-9.5 7,9.5 -7,9.5 -7,-9.5' 是中心原点那套坐标，
+# 两套坐标系差了 (10, 12.5)，混用会整体偏十几米——换场景时 WORLD_ENV 和这条
+# 航线必须一起换。
+# 2026-09-29 二改，样题航线是 A B C G E G D 七个点：
+#   A(3,3) -> B(3,22) -> C(17,22) -> G(17,16) -> E(10,16) -> G(17,16) -> D(17,3)
+# 注意 G 出现**两次**：到 G 之后向西支出到 E，再原路退回 G，然后才南下到 D。
+# 这种"支线往返"会让航线**自己跟自己重合**（G-E 和 E-G 完全重叠），按航线弧长
+# 投影算间距在这段会出现同一位置对应两个弧长坐标的歧义——监视脚本的
+# "沿航线间距"统计在这条航线上不可信，看"节点自报间距"那条（沿长机实飞轨迹）。
 # 加默认值是因为 运行仿真.sh 不往任务程序传额外参数，单独跑这个示例时没法给航线。
-DEFAULT_ROUTE = '7,-9.5 7,9.5 -7,9.5 -7,-9.5'
+DEFAULT_ROUTE = '3,3 3,22 17,22 17,16 10,16 17,16 17,3'
 
 
 def listen_standby(sdk):
@@ -91,7 +123,7 @@ def listen_standby(sdk):
     return _Inbox(sdk, READY, IN_POSITION)
 
 
-def leader_route(sdk, route_xy, inbox=None):
+def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0):
     """长机的编队任务段：等僚机就位 -> 按航线飞一圈 -> 通知僚机航线已完成。
 
     **不起飞、不降落**，留给调用方决定，这样《双机全流程示例.py》能把编队接在
@@ -102,8 +134,11 @@ def leader_route(sdk, route_xy, inbox=None):
 
     pad = _own_pad(sdk)
     waypoints = list(route_xy)
-    if tuple(waypoints[-1]) != pad:
-        waypoints.append(pad)           # 起飞点当最后一个航点
+    # 2026-09-29 样题流程：A->B->C->D 跑完之后**长机回到 A 点选题**，不是回起飞点。
+    # 所以收尾航点是 route_xy[0]（A），不是 pad。僚机那边不受影响——它收到
+    # ROUTE_DONE 之后各回各的起降点降落（见 follower()）。
+    if tuple(waypoints[-1]) != tuple(route_xy[0]):
+        waypoints.append(tuple(route_xy[0]))
     # 从起飞点出发，每一段都是"上一个点 -> 这个点"
     legs = list(zip([pad] + waypoints[:-1], waypoints))
 
@@ -153,6 +188,10 @@ def leader_route(sdk, route_xy, inbox=None):
     # WAYPOINT_FLYTHROUGH_M）中间航点提前切换，规划器从"还在动"的状态接着规划。
     _, _, tz = sdk.world_to_local(legs[0][1][0], legs[0][1][1], CRUISE_AGL_M)
     route_pts = [(tx, ty, tz) for (_f, (tx, ty)) in legs_local]
+    # 解散看门狗：盯着长机什么时候飞回**自己的起飞点**上空，到了就发 ROUTE_DONE
+    disband_state = {'stop': False, 'sent': False}
+    stop_disband = _start_disband_watch(sdk, pad, spacing_m, disband_state)
+
     for i, (frm, to) in enumerate(legs, start=1):
         (fx, fy), (tx, ty) = legs_local[i - 1]
         print(f'[长机] 航点 {i}/{len(legs)}: ({to[0]}, {to[1]})，'
@@ -173,16 +212,25 @@ def leader_route(sdk, route_xy, inbox=None):
                 sdk.goto(tx, ty, tzz)
 
     stop_yaw()
-    sdk.send_to_teammate(ROUTE_DONE)    # 只有长机知道哪个是最后一个航点
+    stop_disband()
+    if not disband_state['sent']:
+        # 兜底：看门狗没能判出"僚机已过点"（位置读不到/航线太短/提前结束），
+        # 航线都飞完了还是要解散，不然僚机会一直跟着不回家。
+        sdk.send_to_teammate(ROUTE_DONE)
+        print('[长机] 航线已飞完，补发编队解散通知', flush=True)
 
 
-def leader(sdk, route_xy):
-    """长机：起飞 -> 编队航线 -> 返航降落（单独跑这个示例时的完整流程）。"""
+def leader(sdk, route_xy, spacing_m=4.0):
+    """长机：起飞 -> 编队航线(A B C G E G D) -> 回 A 点悬停选题。
+
+    2026-09-29 样题流程：跟僚机不一样，长机**不回起降点、也不降落**——航线
+    跑完之后回到 A 点悬停选题。僚机那边照旧回自己的起降点降落。
+    """
     inbox = listen_standby(sdk)         # 必须在僚机可能发事件之前注册
     # 直接起飞到巡航高度，省掉"起飞到1米再 goto 爬上去"那一次纯垂直规划
     sdk.takeoff(height_m=CRUISE_AGL_M)
-    leader_route(sdk, route_xy, inbox)
-    _land_at_pad(sdk)
+    leader_route(sdk, route_xy, inbox, spacing_m=spacing_m)
+    _select_topic_at_a(sdk, route_xy[0])
     sdk.play_sound_light('侦察机任务完成')
 
 
@@ -382,6 +430,72 @@ def _slow_start(sdk):
     threading.Thread(target=_restore, daemon=True).start()
 
 
+def _start_disband_watch(sdk, pad_xy, spacing_m, state):
+    """后台盯着长机位置，等它飞回自己起飞点上空就发 ROUTE_DONE（解散编队）。
+
+    两阶段判据见 DISBAND_DEPART_M 那段注释——飞机一开始就停在起飞点上，
+    只判"离起飞点近"会在起飞那一刻就误触发。
+
+    state['sent'] 供调用方判断要不要补发（看门狗没等到就兜底）。
+    """
+    import threading
+    px, py = float(pad_xy[0]), float(pad_xy[1])
+    lx, ly, _lz = sdk.world_to_local(px, py, CRUISE_AGL_M)
+
+    def _loop():
+        departed = False
+        while not state['stop'] and not state['sent']:
+            try:
+                cx, cy, _ = sdk.get_local_position()
+            except Exception:
+                time.sleep(DISBAND_POLL_S)
+                continue
+            d = math.hypot(cx - lx, cy - ly)
+            if not departed:
+                if d >= DISBAND_DEPART_M:
+                    departed = True
+            elif d <= DISBAND_NEAR_M:
+                state['sent'] = True
+                try:
+                    sdk.send_to_teammate(ROUTE_DONE)
+                except Exception as exc:
+                    print(f'[长机] 解散通知没送到僚机（{exc}）', flush=True)
+                print(f'[长机] 已飞回自己起飞点上空（离 {d:.1f} m），编队解散'
+                      f'——此时僚机正好在自己起降点上方', flush=True)
+                return
+            time.sleep(DISBAND_POLL_S)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+
+    def _stop():
+        state['stop'] = True
+        t.join(timeout=2.0)
+    return _stop
+
+
+def _select_topic_at_a(sdk, point_a):
+    """长机在 A 点"选题"。
+
+    2026-09-29 用户明确：长机回 A 点之后**悬停**，不降落（上一版我自作主张
+    加了"就地降落"，撤掉）。
+
+    ⚠️ **选题动作本身还没实现**——样题里"选题"具体要做什么（读标志物？
+    等地面站指令？）目前没有定义，这里只做到"飞到 A 点、悬停、把状态打出来"。
+    等选题的具体动作定了再把这个函数填上，调用点和飞行剖面都不用动。
+    """
+    ax, ay = float(point_a[0]), float(point_a[1])
+    lx, ly, lz = sdk.world_to_local(ax, ay, CRUISE_AGL_M)
+    print(f'[长机] 航线跑完，回 A 点 ({ax:.1f}, {ay:.1f}) 选题', flush=True)
+    with sdk.fixed_altitude(lz):
+        sdk.goto(lx, ly, lz)
+    print(f'[长机] 已到 A 点，悬停等待选题'
+          f'（选题动作待实现；示例在此悬停 {SELECT_TOPIC_HOVER_S:.0f} 秒后结束，不降落）',
+          flush=True)
+    time.sleep(SELECT_TOPIC_HOVER_S)
+    print('[长机] 选题段结束，保持在 A 点悬停', flush=True)
+
+
 def _land_at_pad(sdk):
     """回自己起飞点降落。goto_direct 直线飞、不经过规划器，落点精度高一个
     量级，但**没有避障**——只用在这种"已在起降点附近、确定无障碍"的收尾。"""
@@ -442,7 +556,7 @@ def main():
                    teammate_namespace=args.teammate)
     try:
         if args.role == 'leader':
-            leader(sdk, _parse_route(args.route))
+            leader(sdk, _parse_route(args.route), spacing_m=args.spacing)
         else:
             follower(sdk, args.spacing)
         print(f'[{args.namespace}] 编队飞行结束', flush=True)

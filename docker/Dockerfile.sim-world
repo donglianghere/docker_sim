@@ -541,6 +541,16 @@ ENV http_proxy= \
 # ============================================================
 COPY docker/scripts/gen_iris_mid360_sdf.py /opt/docker_scripts/gen_iris_mid360_sdf.py
 
+# 2026-09-29 样题版场景。world 不是手写的，由 gen_sample_room_world.py 从
+# src/contest_mission/config/sample_room_layout.yaml 渲染（立柱翻倍+每根 5 圈
+# 楼层线，手工同步必错），生成好的成品直接进镜像；生成脚本也一并装进去，
+# 方便在容器里改完 yaml 就地重新生成、不必重 build。
+# 放进 mighty 的 worlds 目录即可被 WORLD_ENV=sample_room 选中（跟其它 world
+# 同一套查找规则）。
+COPY docker/scripts/gen_sample_room_world.py /opt/docker_scripts/gen_sample_room_world.py
+COPY docker/worlds/sample_room.world /opt/mighty_ws/install/mighty/share/mighty/worlds/sample_room.world
+COPY src/contest_mission/config/sample_room_layout.yaml /opt/docker_scripts/sample_room_layout.yaml
+
 COPY docker/entrypoints/sim-world-entrypoint.sh /opt/entrypoint.sh
 RUN chmod +x /opt/entrypoint.sh
 

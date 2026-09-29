@@ -99,11 +99,21 @@ class ScenarioResetNode(Node):
         self.declare_parameter('set_entity_state_service', '/plug/set_entity_state')
 
         layout = load_layout()
+        self.layout = layout       # 重置回调里还要读（贴 tag 的柱子/面）
         # 2026-09-09用户明确要求道具位置不随机、固定用这份yaml里指定的
         # 坐标——每次reset都把下面6个模型摆回各自yaml里写的(x,y)，不
         # 再做随机撒点（min_separation/wall_margin那套随机布局逻辑已
         # 整体移除，不是这里可以顺手保留的死代码）。
-        self.fixed_positions = {p['id']: (p['x'], p['y']) for p in layout['pillars']}
+        # 样题版每根立柱正东紧挨一根同样的（yaml 里 twin_east: true，孪生柱
+        # id = 本柱 id + '_e'，中心在 x+pillar_size 处）。这里要展开，不然
+        # 重置时那 3 根孪生柱不在名单里、永远不会被摆正。
+        _psize = float(layout['pillar_size'])
+        _pillars = []
+        for _p in layout['pillars']:
+            _pillars.append((_p['id'], _p['x'], _p['y']))
+            if _p.get('twin_east'):
+                _pillars.append((_p['id'] + '_e', _p['x'] + _psize, _p['y']))
+        self.fixed_positions = {pid: (px, py) for pid, px, py in _pillars}
         self.fixed_positions['obstacle_cylinder'] = (
             layout['obstacle_cylinder']['x'], layout['obstacle_cylinder']['y'],
         )
@@ -113,7 +123,7 @@ class ScenarioResetNode(Node):
         self.fixed_positions['fire_point_marker'] = (
             layout['ground_fire_point']['x'], layout['ground_fire_point']['y'],
         )
-        self.pillar_names = [p['id'] for p in layout['pillars']]
+        self.pillar_names = [pid for pid, _x, _y in _pillars]
         self.fixed_z = {name: 3.0 for name in self.pillar_names}  # 立柱高6米，中心z=3
         self.fixed_z.update({
             'obstacle_cylinder': 3.0,
@@ -239,8 +249,17 @@ class ScenarioResetNode(Node):
         # 新布局里 1# 在 (4.5,7)、2# 在 (-4.5,7)，同一条 y=7 上、1# 在 2# 的
         # 正东，所以"朝向1#"就是贴在 2# 的 +X 面（立柱 yaw 固定 0，局部 +X
         # 就是世界 +X）。原来是 +Y 面（朝北）。
-        chosen_pillar = 'pillar_2'
-        chosen_face = '+X'
+        # 2026-09-29：贴哪根柱子、贴哪个面改成从 layout yaml 读
+        # （fire_apriltag_marker.pillar_id / .face），不再写死在代码里——
+        # 样题版要求贴 2# 的**南面**（朝 Y 轴负方向），跟 fire_drill_room 的
+        # +X 面不是一个值，写死就得靠改代码切场景。
+        # yaml 里用小写 '-y' 这种写法，这里统一成查表用的 '-Y'。
+        _fam = self.layout.get('fire_apriltag_marker', {})
+        chosen_pillar = _fam.get('pillar_id', 'pillar_2')
+        chosen_face = str(_fam.get('face', '+X')).upper()
+        if chosen_face not in FIRE_TAG_FACE_LOCAL_OFFSETS:
+            raise KeyError(f"fire_apriltag_marker.face='{chosen_face}' 不认识，"
+                           f"可选：{sorted(FIRE_TAG_FACE_LOCAL_OFFSETS)}")
         px, py, pyaw = pillar_poses[chosen_pillar]
         unit_dx, unit_dy, extra_yaw = FIRE_TAG_FACE_LOCAL_OFFSETS[chosen_face]
         standoff = self.fire_apriltag_mount_standoff_m

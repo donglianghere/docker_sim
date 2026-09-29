@@ -230,13 +230,13 @@ for i in $(seq 1 "${NUM_AGENTS}"); do
     # 方向指示，染了反而看不出机头朝向），雷达整流罩也不动。
     # 材质名取自容器里 /usr/share/gazebo-11/media/materials/scripts/gazebo.material，
     # 可以用BODY_COLOR_${NS}覆盖；设成空字符串就是保持PX4原版的DarkGrey。
-    # 2026-09-29再调：NX01从黄改成橙（用户："NX01使用现在立柱的颜色"——
-    # 立柱原来就是Gazebo/Orange，同一次把立柱换成了褐色，见
-    # patches/mighty_fire_drill_room_world.patch里pillar_1/2/3）。
+    # 配色沿革：黄/红 -> 橙/红（NX01跟当时的立柱同色）-> 红/青（本次）。
+    # 2026-09-29用户定稿：NX01红、NX02青。Gazebo/Turquoise 的 ambient 就是
+    # `0 1 1`，标准青色；gazebo.material 里没有叫 Cyan 的材质，别去找。
     if [ "${NS}" = "NX01" ]; then
-        BODY_COLOR_DEFAULT="Gazebo/Orange"
-    else
         BODY_COLOR_DEFAULT="Gazebo/Red"
+    else
+        BODY_COLOR_DEFAULT="Gazebo/Turquoise"
     fi
     _body_color_var="BODY_COLOR_${NS}"
     BODY_COLOR="${!_body_color_var-${BODY_COLOR_DEFAULT}}"
@@ -276,7 +276,21 @@ for i in $(seq 1 "${NUM_AGENTS}"); do
     # WORLD_ENV（尤其是simple_room用到的下面SPAWN_YAW_DEG_<NS>那套
     # SE(2)标定论文专用的偏航角全域扫描机制，两者是完全独立的模块，
     # 不能因为这次场景重新设计就动了那套机制的默认行为）。
-    if [ "${WORLD_ENV}" = "fire_drill_room" ]; then
+    # 2026-09-29 样题版场景（WORLD_ENV=sample_room）：坐标系原点在房间**西南角**，
+    # 所以起降点是全正坐标 (8,3)/(12,3)，跟 fire_drill_room 的 (±2,-9.5) 不是一套
+    # 数。权威定义在 src/contest_mission/config/sample_room_layout.yaml 的
+    # takeoff_landing_pads，这里同样是那份数字的 shell 字面量副本，改布局两处都要改。
+    if [ "${WORLD_ENV}" = "sample_room" ]; then
+        if [ "${NS}" = "NX01" ]; then
+            SPAWN_X="8.0"
+        else
+            SPAWN_X="12.0"
+        fi
+        SPAWN_Y="3.0"
+        SPAWN_Z="0.1"
+        SPAWN_YAW_DEG="90"
+        SPAWN_YAW=$(awk -v d="${SPAWN_YAW_DEG}" 'BEGIN{printf "%.16f", d*atan2(0,-1)/180}')
+    elif [ "${WORLD_ENV}" = "fire_drill_room" ]; then
         if [ "${NS}" = "NX01" ]; then
             SPAWN_X="2.0"
         else
