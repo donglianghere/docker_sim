@@ -318,10 +318,10 @@ index 0000000..b845baf
 +        <visual name='visual'>
 +          <geometry><box><size>1.0 1.0 6</size></box></geometry>
 +          <material>
-+            <script>
-+              <uri>file://media/materials/scripts/gazebo.material</uri>
-+              <name>Gazebo/Orange</name>
-+            </script>
++            <!-- 2026-09-29用户要求：立柱改褐色。gazebo.material里没有
++                 Brown这个脚本材质，所以直接给RGBA，不走<script>。 -->
++            <ambient>0.40 0.26 0.13 1</ambient>
++            <diffuse>0.40 0.26 0.13 1</diffuse>
 +          </material>
 +        </visual>
 +      </link>
@@ -342,10 +342,10 @@ index 0000000..b845baf
 +        <visual name='visual'>
 +          <geometry><box><size>1.0 1.0 6</size></box></geometry>
 +          <material>
-+            <script>
-+              <uri>file://media/materials/scripts/gazebo.material</uri>
-+              <name>Gazebo/Orange</name>
-+            </script>
++            <!-- 2026-09-29用户要求：立柱改褐色。gazebo.material里没有
++                 Brown这个脚本材质，所以直接给RGBA，不走<script>。 -->
++            <ambient>0.40 0.26 0.13 1</ambient>
++            <diffuse>0.40 0.26 0.13 1</diffuse>
 +          </material>
 +        </visual>
 +      </link>
@@ -360,10 +360,10 @@ index 0000000..b845baf
 +        <visual name='visual'>
 +          <geometry><box><size>1.0 1.0 6</size></box></geometry>
 +          <material>
-+            <script>
-+              <uri>file://media/materials/scripts/gazebo.material</uri>
-+              <name>Gazebo/Orange</name>
-+            </script>
++            <!-- 2026-09-29用户要求：立柱改褐色。gazebo.material里没有
++                 Brown这个脚本材质，所以直接给RGBA，不走<script>。 -->
++            <ambient>0.40 0.26 0.13 1</ambient>
++            <diffuse>0.40 0.26 0.13 1</diffuse>
 +          </material>
 +        </visual>
 +      </link>

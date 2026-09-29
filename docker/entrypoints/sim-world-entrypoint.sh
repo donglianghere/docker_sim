@@ -225,10 +225,26 @@ for i in $(seq 1 "${NUM_AGENTS}"); do
     fi
     _camera_initial_view_var="CAMERA_INITIAL_VIEW_${NS}"
     CAMERA_INITIAL_VIEW="${!_camera_initial_view_var-${CAMERA_INITIAL_VIEW_DEFAULT}}"
+    # 2026-09-29用户要求：两架飞机在Gazebo里一眼要能分清——NX01黄、NX02红。
+    # 只染机身，四个旋翼保持iris原版的Blue/DarkGrey交替（那是"哪两个是前桨"的
+    # 方向指示，染了反而看不出机头朝向），雷达整流罩也不动。
+    # 材质名取自容器里 /usr/share/gazebo-11/media/materials/scripts/gazebo.material，
+    # 可以用BODY_COLOR_${NS}覆盖；设成空字符串就是保持PX4原版的DarkGrey。
+    # 2026-09-29再调：NX01从黄改成橙（用户："NX01使用现在立柱的颜色"——
+    # 立柱原来就是Gazebo/Orange，同一次把立柱换成了褐色，见
+    # patches/mighty_fire_drill_room_world.patch里pillar_1/2/3）。
+    if [ "${NS}" = "NX01" ]; then
+        BODY_COLOR_DEFAULT="Gazebo/Orange"
+    else
+        BODY_COLOR_DEFAULT="Gazebo/Red"
+    fi
+    _body_color_var="BODY_COLOR_${NS}"
+    BODY_COLOR="${!_body_color_var-${BODY_COLOR_DEFAULT}}"
     python3 /opt/docker_scripts/gen_iris_mid360_sdf.py \
         --namespace "${NS}" --instance $((i-1)) --output "${IRIS_MID360_SDF}" \
         --cameras "${CAMERAS}" --camera-type "${CAMERA_TYPE}" \
-        --camera-initial-view "${CAMERA_INITIAL_VIEW}"
+        --camera-initial-view "${CAMERA_INITIAL_VIEW}" \
+        --body-color "${BODY_COLOR}"
     # z=0.1：之前这里写的是z=3（3米悬空），配合mighty_enable_gravity.patch打开的
     # 重力，飞机在没解锁（电机不转）的情况下直接自由落体砸到地面——实测确认过
     # （mavros/local_position/pose里z从3掉到了-0.09，armed:false）。第一次改成了

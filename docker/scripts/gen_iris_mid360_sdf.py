@@ -642,6 +642,48 @@ CAMERA_MOUNTS = {
 }
 
 
+def merge_body_color(sdf_path: str, namespace: str, material: str) -> None:
+    """把机身（iris 的 base_link_inertia_visual）换成指定的 Gazebo 材质。
+
+    2026-09-29 用户要求：两架飞机在 Gazebo 里要能一眼分清——NX01 黄、NX02 红。
+
+    只改**机身**那一个 visual，不动四个旋翼（它们在 iris.sdf.jinja 里是
+    Blue/DarkGrey 交替，那是"哪两个是前桨"的方向指示，改了反而看不出机头朝向），
+    也不动雷达整流罩（`{ns}_mid360_visual`，本文件自己加的）。
+
+    ⚠️ 不能对整份 SDF 做全局替换：机身用的是 `Gazebo/DarkGrey`，而 rotor_1/
+    rotor_3 用的也是 `Gazebo/DarkGrey`，全局替换会把两个尾桨一起染掉。所以
+    先定位到 base_link_inertia_visual，只改它后面第一个 <material> 里的名字。
+
+    material 传 Gazebo 材质脚本名（`Gazebo/Yellow`、`Gazebo/Red` 之类，
+    完整列表见容器里 /usr/share/gazebo-11/media/materials/scripts/gazebo.material）。
+    空字符串 = 不改，保持 PX4 原版的 DarkGrey。
+    """
+    if not material:
+        return
+    with open(sdf_path) as f:
+        content = f.read()
+
+    anchor = "<visual name='base_link_inertia_visual'>"
+    i = content.find(anchor)
+    if i < 0:
+        raise RuntimeError(f"{sdf_path} 里找不到 {anchor}，iris 模型结构变了？")
+    j = content.find("</visual>", i)
+    head, body, tail = content[:i], content[i:j], content[j:]
+
+    old_name = "<name>Gazebo/DarkGrey</name>"
+    if body.count(old_name) != 1:
+        raise RuntimeError(
+            f"base_link_inertia_visual 里期望恰好一个 {old_name}，"
+            f"实际 {body.count(old_name)} 个"
+        )
+    body = body.replace(old_name, f"<name>{material}</name>")
+
+    with open(sdf_path, "w") as f:
+        f.write(head + body + tail)
+    print(f"[gen_iris_mid360_sdf] {namespace} 机身材质 -> {material}")
+
+
 def render_iris(instance: int, output_file: str) -> None:
     subprocess.run(
         [
@@ -743,12 +785,19 @@ def main() -> None:
              "由调用方（sim-world-entrypoint.sh的CAMERA_INITIAL_VIEW_${NS}）"
              "覆盖。",
     )
+    parser.add_argument(
+        "--body-color", default="",
+        help="机身（不含旋翼/雷达罩）的 Gazebo 材质脚本名，例 'Gazebo/Yellow'。"
+             "空=保持 PX4 原版 DarkGrey。调用方按机号指定，见 "
+             "sim-world-entrypoint.sh 的 BODY_COLOR_${NS}。",
+    )
     args = parser.parse_args()
 
     iris_tmp = f"/tmp/iris_{args.namespace}.sdf"
     render_iris(args.instance, iris_tmp)
     merge_mid360(iris_tmp, args.namespace, args.output)
     merge_rangefinder(args.output, args.namespace)
+    merge_body_color(args.output, args.namespace, args.body_color)
     if args.camera_type == "switchable":
         merge_switchable_camera(args.output, args.namespace, initial_view=args.camera_initial_view)
         print(
