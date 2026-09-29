@@ -230,13 +230,12 @@ for i in $(seq 1 "${NUM_AGENTS}"); do
     # 方向指示，染了反而看不出机头朝向），雷达整流罩也不动。
     # 材质名取自容器里 /usr/share/gazebo-11/media/materials/scripts/gazebo.material，
     # 可以用BODY_COLOR_${NS}覆盖；设成空字符串就是保持PX4原版的DarkGrey。
-    # 配色沿革：黄/红 -> 橙/红（NX01跟当时的立柱同色）-> 红/青（本次）。
-    # 2026-09-29用户定稿：NX01红、NX02青。Gazebo/Turquoise 的 ambient 就是
-    # `0 1 1`，标准青色；gazebo.material 里没有叫 Cyan 的材质，别去找。
+    # 配色沿革：黄/红 -> 橙/红（NX01跟当时的立柱同色）-> 红/青 -> 红/黑（本次）。
+    # 2026-09-29用户定稿：NX01红、NX02黑。
     if [ "${NS}" = "NX01" ]; then
         BODY_COLOR_DEFAULT="Gazebo/Red"
     else
-        BODY_COLOR_DEFAULT="Gazebo/Turquoise"
+        BODY_COLOR_DEFAULT="Gazebo/Black"
     fi
     _body_color_var="BODY_COLOR_${NS}"
     BODY_COLOR="${!_body_color_var-${BODY_COLOR_DEFAULT}}"

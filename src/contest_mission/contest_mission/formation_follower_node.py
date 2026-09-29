@@ -64,6 +64,7 @@
 `VirtualStructureStrategy`两个占位子类，以后要换队形/换策略只需要
 新增子类，不用碰节点主循环逻辑。
 """
+import bisect
 import math
 import time
 from abc import ABC, abstractmethod
@@ -431,6 +432,90 @@ class LeaderPathBuffer:
         x, y, z, _yaw, _speed = self._point_at_arc(arc, s_clamped)
         return (x, y, z)
 
+def _de_boor(knots, ctrl, degree, u):
+    """标准 de Boor 求值。ctrl 是 [(x,y,z), ...]，返回 (x, y, z)。
+
+    ego_planner 的 UniformBspline.evaluateDeBoorT(t) 等价于
+    evaluateDeBoor(t + u_[p])，所以调用方传进来的 u 要先加过 knots[degree]。
+    """
+    n = len(ctrl) - 1
+    u = min(max(u, knots[degree]), knots[n + 1])
+    k = bisect.bisect_right(knots, u) - 1
+    k = min(max(k, degree), n)
+    d = [list(ctrl[j + k - degree]) for j in range(degree + 1)]
+    for r in range(1, degree + 1):
+        for j in range(degree, r - 1, -1):
+            i = j + k - degree
+            den = knots[i + degree + 1 - r] - knots[i]
+            a = 0.0 if den <= 1e-12 else (u - knots[i]) / den
+            for c in range(3):
+                d[j][c] = (1.0 - a) * d[j - 1][c] + a * d[j][c]
+    return d[degree]
+
+
+class LeaderPlannedTraj:
+    """长机广播的规划轨迹（traj_utils/Bspline），用来取它**未来**的速度。
+
+    2026-09-29 新增。在这之前，僚机的速度前馈来自"长机已经飞过的轨迹长度
+    每拍增长了多少"——那是长机的**过去**速度，天然滞后一个缓冲区。长机减速
+    拐弯、绕障碍，僚机都要等它飞过去了才知道。本会话一路在补的前馈/偏置积分/
+    长机照顾模式，补的都是这一个滞后。
+    而长机的 ego_planner 本来就在发 `planning/bspline`（它未来几秒要飞的
+    B 样条，含速度剖面），一直没人用。
+
+    只取**速度大小**，不取位置——这一点很关键：bspline 发在长机自己的 odom 系，
+    跟僚机工作的 UWB 共享系差一个平移（各机 odom 原点锁在自己起降点）。
+    速度大小对平移和旋转都不变，所以**不需要任何坐标变换**，方向仍然用轨迹
+    切线（那个本来就在共享系里算好的）。这是这条路子能小改动落地的原因。
+
+    实测（scripts/长机轨迹前馈验证.py，877 条轨迹/11000+ 样本）：
+      提前 0.5 s，样条预测误差中位 0.18 m，而"匀速外推"基线是 0.62 m；
+      提前 1.0 s，0.63 m vs 1.24 m。所以这条信息是真有增量的。
+    """
+
+    def __init__(self):
+        self._start = None      # 轨迹起点时刻（秒）
+        self._deg = 0
+        self._knots = []
+        self._vctrl = []        # 速度样条的控制点
+        self._stamp = 0.0       # 收到这条轨迹的本地时刻（判过期用）
+
+    def update(self, msg, now_s: float) -> bool:
+        pos = [(q.x, q.y, q.z) for q in msg.pos_pts]
+        knots = list(msg.knots)
+        p = int(msg.order)
+        if p < 1 or len(pos) <= p or len(knots) < len(pos) + p + 1:
+            return False
+        # 位置样条求导 -> 速度样条：控制点 V_i = p*(P_{i+1}-P_i)/(u_{i+p+1}-u_{i+1})，
+        # 次数降一阶，节点向量掐掉首尾各一个。
+        v = []
+        for i in range(len(pos) - 1):
+            den = knots[i + p + 1] - knots[i + 1]
+            if den <= 1e-9:
+                v.append((0.0, 0.0, 0.0))
+            else:
+                v.append(tuple(p * (pos[i + 1][c] - pos[i][c]) / den for c in range(3)))
+        self._start = msg.start_time.sec + msg.start_time.nanosec * 1e-9
+        self._deg = p - 1
+        self._knots = knots[1:-1]
+        self._vctrl = v
+        self._stamp = now_s
+        return True
+
+    def speed_at(self, t_abs: float, now_s: float, stale_s: float):
+        """绝对时刻 t_abs 的规划速度大小（m/s）；没有可用轨迹返回 None。"""
+        if self._start is None or (now_s - self._stamp) > stale_s:
+            return None
+        if self._deg < 1 or len(self._vctrl) <= self._deg:
+            return None
+        try:
+            vx, vy, _vz = _de_boor(self._knots, self._vctrl, self._deg,
+                                   (t_abs - self._start) + self._knots[self._deg])
+        except Exception:
+            return None
+        return math.hypot(vx, vy)
+
+
 class RouteRuler:
     """把**规划航线**当一把里程尺：只量进度，不决定飞哪儿。
 
@@ -789,6 +874,13 @@ class FormationFollowerNode(Node):
         # 现在：前馈取 (Δs_cmd/dt) 的低通值。长机轨迹是按里程计一帧帧长出来的，
         # s_limit_gap 呈台阶式增长，瞬时速率抖得厉害，所以要滤。
         self.declare_parameter('ff_rate_tau_s', 0.5)
+        # ---- 长机规划轨迹前馈（2026-09-29，方法 A）----
+        # 订长机的 planning/bspline，拿它**未来**的速度当前馈，替掉原来那个
+        # 由"长机已飞过的轨迹长度"反推的过去速度。详见 LeaderPlannedTraj。
+        # 收不到/过期就自动退回原来的算法，不会把飞行搞停。
+        self.declare_parameter('leader_traj_ff_enabled', True)
+        self.declare_parameter('leader_traj_ff_lead_s', 0.5)   # 取未来多久的速度
+        self.declare_parameter('leader_traj_ff_stale_s', 1.0)  # 轨迹多久没更新就算过期
         # ---- 2026-09-28：航线里程尺只用来**清洗长机轨迹**，不当间距基准 ----
         # 试过让间距也按航线里程算（route_basis），实测更差：run37 间距
         # -2.55~14.49，对照 run36 的 1.51~6.96。机理是僚机**飞**的是长机实飞
@@ -924,6 +1016,9 @@ class FormationFollowerNode(Node):
         self._last_s_proj: Optional[float] = None   # 上一次的投影弧长，消歧义用
         self._s_rate: Optional[float] = None        # 参考点当前推进速率，限加速度用
         self._s_rate_ff: Optional[float] = None     # 参考点**达成**推进速率（低通），速度前馈用
+        self._leader_traj = LeaderPlannedTraj()     # 长机规划轨迹（方法 A 前馈）
+        self._leader_traj_sub = None
+        self._leader_traj_ff_used = 0               # 用上/退回的计数，只为日志
         self._fd_trim: float = 0.0                  # 跟随距离的偏置补偿量（慢积分）
         # ---- 航线里程尺（2026-09-28）----
         self._route_ruler: Optional[RouteRuler] = None
@@ -1113,9 +1208,25 @@ class FormationFollowerNode(Node):
         self._leader_latest_z = 0.0
         self._current_leader_ns = desired_ns
 
+        if self._leader_traj_sub is not None:
+            self.destroy_subscription(self._leader_traj_sub)
+            self._leader_traj_sub = None
+        self._leader_traj = LeaderPlannedTraj()
+
         if desired_ns:
             topic = f'/{desired_ns}/' + str(self.get_parameter('uwb_topic').value)
             self._leader_sub = self.create_subscription(PoseStamped, topic, self._on_leader_uwb, 10)
+            # 长机的规划轨迹（方法 A）。traj_utils 来自 ego_planner_ws，按理一定在，
+            # 但订不上也不能把编队搞挂——退回原来的前馈就是了。
+            try:
+                from traj_utils.msg import Bspline
+                self._leader_traj_sub = self.create_subscription(
+                    Bspline, f'/{desired_ns}/planning/bspline', self._on_leader_traj, 10)
+                self.get_logger().info(f'已订阅长机规划轨迹 /{desired_ns}/planning/bspline（前馈用未来速度）')
+            except Exception as exc:
+                self.get_logger().warn(
+                    f'订不上 /{desired_ns}/planning/bspline（{exc}），'
+                    f'速度前馈退回"由长机已飞轨迹反推"的旧算法')
             self.get_logger().info(f'开始订阅长机UWB绝对位置：{topic}（跨机共享系）')
         else:
             self.get_logger().info('已停止跟随（不再订阅任何长机里程计）')
@@ -1229,6 +1340,13 @@ class FormationFollowerNode(Node):
                 f'航线里程尺已建立：{len(pts)} 个航点，总长 {self._route_ruler.total():.1f} m'
                 f'（向后延伸 {back:.1f} m）。进度与间距按航线量，飞行路径仍是长机实飞轨迹')
         return self._route_ruler if (self._route_ruler and self._route_ruler.ok()) else None
+
+    def _on_leader_traj(self, msg) -> None:
+        self._leader_traj.update(msg, self._now_sec())
+
+    def _now_sec(self) -> float:
+        t = self.get_clock().now().to_msg()
+        return t.sec + t.nanosec * 1e-9
 
     def _leg_route_points(self) -> List[Tuple[float, float]]:
         """把 leg_route_xy 这个拉平的 double 数组还原成 [(x, y), ...]。"""
@@ -1395,7 +1513,8 @@ class FormationFollowerNode(Node):
                          float(self._leader_path.total_length()),
                          float(gap_now),
                          float(self._fd_trim),
-                         float(self._s_rate_ff if self._s_rate_ff is not None else 0.0)]
+                         float(self._s_rate_ff if self._s_rate_ff is not None else 0.0),
+                         float(self._leader_traj_ff_used)]
             self.diag_pub.publish(diag)
 
             # 步长限幅：设定点最多领先当前位置 max_lead_m。参考点已经落在
@@ -1504,10 +1623,35 @@ class FormationFollowerNode(Node):
             # 前馈速度：参考点**实际**推进的速率（见 ff_rate_tau_s 处说明）。
             # cruise 只是上限，发它会多喂 50%。
             v_ff = self._s_rate_ff if self._s_rate_ff is not None else 0.0
+            # ---- 方法 A：有长机规划轨迹就用它的**未来**速度当前馈 ----
+            # 只取速度大小，方向仍用轨迹切线 tdir（那个已经在共享系里算好）。
+            # 速度大小对平移/旋转都不变，所以不需要 odom->UWB 的坐标变换。
+            if bool(self.get_parameter('leader_traj_ff_enabled').value):
+                lead = float(self.get_parameter('leader_traj_ff_lead_s').value)
+                now_s = self._now_sec()
+                v_lead = self._leader_traj.speed_at(
+                    now_s + lead, now_s,
+                    float(self.get_parameter('leader_traj_ff_stale_s').value))
+                if v_lead is not None:
+                    v_ff = v_lead
+                    self._leader_traj_ff_used += 1
+                elif self._leader_traj_ff_used:
+                    self.get_logger().warn(
+                        '长机规划轨迹过期/缺失，速度前馈退回旧算法',
+                        throttle_duration_sec=5.0)
             v_ff = max(0.0, min(v_ff, cruise))
+            # 2026-09-29 订正：前馈**不再**拿 moving 去硬砍成 0。
+            # 原来是 `v_ff if moving else 0.0`，而 moving = 参考点还没顶到间距线。
+            # 后果是僚机一追上、参考点贴上间距线，前馈瞬间归零、飞机只剩位置误差
+            # 驱动，迅速减速；掉队之后前馈又满血恢复——一个 bang-bang，表现就是
+            # 走走停停。实测 run58 全程十几次连续低速(<0.3 m/s) 5~8 秒，**直道
+            # 中段也停**（t=92~99 在 B->C 中段、t=162~170 在 D 段中段），跟拐点无关。
+            # v_ff 本身就是"参考点推进速率"的低通值：长机停了它自然趋零，不需要
+            # 额外的开关。真正要钉住的只有"原地转向悬停"那一种情况。
+            hold = self._yaw_turning
             cmd.position.x, cmd.position.y = float(sx), float(sy)
-            cmd.velocity.x = float(v_ff * math.cos(tdir)) if moving else 0.0
-            cmd.velocity.y = float(v_ff * math.sin(tdir)) if moving else 0.0
+            cmd.velocity.x = 0.0 if hold else float(v_ff * math.cos(tdir))
+            cmd.velocity.y = 0.0 if hold else float(v_ff * math.sin(tdir))
             cmd.velocity.z = 0.0
             cmd.yaw = float(self._yaw_ref if self._yaw_ref is not None else 0.0)
             cmd.trajectory_id = 1

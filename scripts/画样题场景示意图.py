@@ -47,11 +47,10 @@ def main():
 
     # ---- 房间 ----
     ax.add_patch(Rectangle((0, 0), sx, sy, fill=False, ec=C_WALL, lw=3))
-    ax.text(sx / 2, -1.1, f"房间 {sx:.0f} × {sy:.0f} m，墙高 {R['height']:.0f} m"
-                          f"（天花板 z={R['height']:.0f}，隐形）",
+    ax.text(sx / 2, -1.1, f"大小 {sx:.0f} × {sy:.0f} × {R['height']:.0f} m",
             ha="center", va="top", fontsize=10, color=C_WALL)
     ax.plot(0, 0, marker="o", ms=7, color="k", zorder=5)
-    ax.annotate("原点 (0,0)\n房间西南角", (0, 0), textcoords="offset points",
+    ax.annotate("原点 (0,0)", (0, 0), textcoords="offset points",
                 xytext=(8, 8), fontsize=9, fontweight="bold")
 
     # ---- 航线 ----
@@ -59,8 +58,15 @@ def main():
     xs = [w["x"] for w in wps] + [wps[0]["x"]]
     ys = [w["y"] for w in wps] + [wps[0]["y"]]
     ax.plot(xs, ys, "--", color=C_ROUTE, lw=2, zorder=2, label="巡检航线")
+    # 同一个点可能在航线里出现两次（G 去一次回一次），标注只画一次，
+    # 否则两行字会叠在一起糊成一团
+    _seen = set()
     for w in wps:
         ax.plot(w["x"], w["y"], "o", color=C_ROUTE, ms=9, zorder=6)
+        key = (round(w["x"], 3), round(w["y"], 3))
+        if key in _seen:
+            continue
+        _seen.add(key)
         ax.annotate(f"航点{w['id']}\n({w['x']:.0f},{w['y']:.0f})",
                     (w["x"], w["y"]), textcoords="offset points", xytext=(9, 6),
                     fontsize=9, color=C_ROUTE, fontweight="bold")
@@ -135,12 +141,12 @@ def main():
     ax.set_xlim(-3.5, sx + 3.5)
     ax.set_ylim(-3.0, sy + 2.5)
     ax.set_aspect("equal")
-    ax.set_xlabel("x (m)  →东")
-    ax.set_ylabel("y (m)  →北")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
     ax.set_xticks(range(0, int(sx) + 1, 2))
     ax.set_yticks(range(0, int(sy) + 1, 2))
     ax.grid(alpha=0.25, ls=":")
-    ax.set_title("大赛样题场景俯视示意图（原点=房间西南角）", fontsize=13, fontweight="bold")
+    ax.set_title("大赛样题场景俯视示意图", fontsize=13, fontweight="bold")
     ax.legend(loc="lower right", fontsize=9)
     fig.tight_layout()
     fig.savefig(args.out, dpi=150)
