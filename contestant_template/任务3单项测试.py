@@ -510,9 +510,12 @@ def recon(sdk):
         at_station = None       # 前移过了，不再在观察位上
         print(f'[{sdk.namespace}] {bldg} 楼有火情，发射点 '
               f'({fire_pos[0]:.2f}, {fire_pos[1]:.2f})，通报任务机并原地等待', flush=True)
+        # **先播报再发事件**（用户 2026-09-30）：任务机一收到 EV_FIRE 就起飞并
+        # 播报"任务机起飞"，两条播报会抢在一起、顺序不定。把"侦察机通报高层
+        # 火情"提到发事件之前，时间上就必然排在"任务机起飞"前面。
+        sdk.play_sound_light('侦察机通报高层火情')
         sdk.send_to_teammate(EV_FIRE, x=fire_pos[0], y=fire_pos[1],
                              z=fire_pos[2], at=bldg)
-        sdk.play_sound_light('侦察机通报高层火情')
 
         at_e.wait(AT_E_WAIT_S)          # 原地等任务机到 E 点待命
         print(f'[{sdk.namespace}] 任务机已到 E 点，发射破窗弹', flush=True)
@@ -650,6 +653,13 @@ def supply(sdk):
         sdk.send_to_teammate(EV_EXTINGUISHED)
         print(f'[{sdk.namespace}] {EXTINGUISHER_SHOTS} 发灭火弹发射完毕，已通知侦察机',
               flush=True)
+        # 灭火完毕把高度拉回编队巡航高度（用户 2026-09-30）：对准火情时飞机被
+        # 挪到了着火点的高度（1.5 或 2.5 m），跟编队巡航的 2.0 m 不一样，带着
+        # 这个高度直接入列会让队形在竖直方向上错开。
+        cx, cy, _ = sdk.get_local_position()
+        _, _, cruise_z = sdk.world_to_local(0.0, 0.0, CRUISE_AGL_M)
+        print(f'[{sdk.namespace}] 回到编队巡航高度 {CRUISE_AGL_M:.1f} m', flush=True)
+        sdk.goto_direct(cx, cy, cruise_z)
         # 回到循环开头：要么还有下一栋楼的火情通报，要么侦察机巡检完毕。
 
     if not airborne:
