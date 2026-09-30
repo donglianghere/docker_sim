@@ -111,10 +111,20 @@ HOVER_AFTER_TAKEOFF_S = 2.0
 # 走前视相机，所以它永远收敛不了，实测一直是 40 秒超时后走兜底。
 # 改成自己按画面偏差转机头，跟《高楼火情绕飞版示例》的 aim_at_fire 同一套算法。
 IMAGE_W = 640
+IMAGE_H = 480
 FOCAL_PX = 381.35             # = (IMAGE_W/2)/tan(HFOV/2)，HFOV=80°，跟 camera_info 一致
+TAG_SIZE_M = 0.5              # 火情标志实际边长，用来按框宽估距离
 AIM_TOL_DEG = 3.0             # 画面水平偏差小于这个角度算居中
+AIM_TOL_Z_M = 0.12            # 垂直方向差这么多以内算居中
 AIM_MAX_TRIES = 5
 AIM_SETTLE_S = 1.5            # 转完等画面稳定
+# 垂直为什么要靠改高度而不是俯仰相机：这架飞机全局只有一个相机，挂在一个可动
+# 关节上、只有"前视/下视"两个预设角度（见 SDK set_camera_view），没有连续俯仰。
+# 火情随机化之后可能在二楼(1.5m)或三楼(2.5m)，而飞机巡航在 2.0 m——差 0.5 m、
+# 3 米距离上约 9.5°，检测得到（垂直视场约 64°）但画面里不居中，发射也偏。
+# 所以按框宽估出距离，再把这个垂直角换算成高度差，飞机自己升降过去。
+AIM_Z_MIN_M = 0.8             # 再低就贴地了，别往下钻
+AIM_Z_MAX_M = 4.0
 
 # 跨机事件
 EV_FIRE = 'high_fire_found'           # NX01 -> NX02：火情位置 + 侦察机发射点
@@ -326,17 +336,15 @@ def _supply_point_action(sdk, pwm, label, sound=None):
     time.sleep(HOVER_AFTER_TAKEOFF_S)
 
 
-def _pixel_offset_rad(det):
-    """标志中心相对画面中心的水平角（右正）。画面右 = 机体右 = yaw 要减小
-    （FLU 里 yaw 逆时针为正）。"""
-    return math.atan2(det.bbox_x - IMAGE_W / 2.0, FOCAL_PX)
-
-
 def center_fire_in_view(sdk, tag='火情'):
-    """转机头，把火情标志**居中到前视画面**。返回是否对上了。
+    """把火情标志**居中到前视画面**：左右靠转机头，上下靠改高度。返回是否对上了。
 
     为什么不用 `sdk.center_on_target()`：见 IMAGE_W 上面那段注释——它只认下视
-    相机。这里直接读前视检测的 bbox 水平偏移，换算成角度去修 yaw，收敛就停。
+    相机。这里直接读前视检测框的偏移：
+      · 水平：`atan2(bbox_x - W/2, f)` -> 修 yaw（画面右 = yaw 要减小）
+      · 垂直：按框宽估距离（tag 实际 0.5 m），把 `atan2(bbox_y - H/2, f)` 这个
+        垂直角换算成高度差 -> 飞机升降过去（相机不能俯仰，只能整机动）
+    两轴都进容差才算居中。
     """
     for i in range(1, AIM_MAX_TRIES + 1):
         try:
@@ -345,17 +353,34 @@ def center_fire_in_view(sdk, tag='火情'):
             print(f'[{sdk.namespace}] 第{i}轮对准：前视相机看不到{tag}', flush=True)
             time.sleep(AIM_SETTLE_S)
             continue
-        delta = _pixel_offset_rad(det)
-        print(f'[{sdk.namespace}] 第{i}轮对准：{tag}在画面 x={det.bbox_x:.0f}'
-              f'（偏差 {math.degrees(delta):+.1f}°，框宽 {det.bbox_width:.0f}px）', flush=True)
-        if abs(delta) <= math.radians(AIM_TOL_DEG):
-            print(f'[{sdk.namespace}] {tag}已居中（偏差 {math.degrees(delta):+.1f}°）', flush=True)
+        dx_rad = math.atan2(det.bbox_x - IMAGE_W / 2.0, FOCAL_PX)
+        dy_rad = math.atan2(det.bbox_y - IMAGE_H / 2.0, FOCAL_PX)   # 画面 y 向下为正
+        dist = FOCAL_PX * TAG_SIZE_M / max(1.0, det.bbox_width)
+        dz = -dist * math.tan(dy_rad)        # 目标在画面下方 -> 要降高度
+        print(f'[{sdk.namespace}] 第{i}轮对准：{tag}在画面 ({det.bbox_x:.0f},{det.bbox_y:.0f})，'
+              f'水平 {math.degrees(dx_rad):+.1f}°，垂直 {math.degrees(dy_rad):+.1f}°，'
+              f'框宽 {det.bbox_width:.0f}px -> 距离约 {dist:.2f} m，高度差 {dz:+.2f} m',
+              flush=True)
+        if abs(dx_rad) <= math.radians(AIM_TOL_DEG) and abs(dz) <= AIM_TOL_Z_M:
+            print(f'[{sdk.namespace}] {tag}已居中（水平 {math.degrees(dx_rad):+.1f}°，'
+                  f'垂直 {dz:+.2f} m）', flush=True)
             return True
-        # 画面右 -> yaw 要减小
-        sdk.face_yaw(sdk.get_current_yaw() - delta,
-                     timeout=编队.TURN_TIMEOUT_S, tolerance_deg=1.5)
-        time.sleep(AIM_SETTLE_S)
-    print(f'[{sdk.namespace}] {AIM_MAX_TRIES} 轮仍没把{tag}居中，按当前朝向继续', flush=True)
+        moved = False
+        if abs(dx_rad) > math.radians(AIM_TOL_DEG):
+            sdk.face_yaw(sdk.get_current_yaw() - dx_rad,
+                         timeout=编队.TURN_TIMEOUT_S, tolerance_deg=1.5)
+            moved = True
+        if abs(dz) > AIM_TOL_Z_M:
+            cx, cy, cz = sdk.get_local_position()
+            _, _, z_lo = sdk.world_to_local(0.0, 0.0, AIM_Z_MIN_M)
+            _, _, z_hi = sdk.world_to_local(0.0, 0.0, AIM_Z_MAX_M)
+            tz = min(max(cz + dz, z_lo), z_hi)
+            print(f'[{sdk.namespace}] 调高度 {cz:.2f} -> {tz:.2f}（局部系）', flush=True)
+            sdk.goto_direct(cx, cy, tz)      # 直线升降，不经规划器
+            moved = True
+        if moved:
+            time.sleep(AIM_SETTLE_S)
+    print(f'[{sdk.namespace}] {AIM_MAX_TRIES} 轮仍没把{tag}居中，按当前状态继续', flush=True)
     return False
 
 

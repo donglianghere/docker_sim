@@ -144,6 +144,14 @@ class ScenarioResetNode(Node):
         # fixed_positions"这条通用路径。
         self.fire_apriltag_height_m = float(layout['fire_apriltag_height_m'])
         self.fire_apriltag_mount_standoff_m = float(layout['fire_apriltag_marker']['mount_standoff_m'])
+        # 高层着火点随机化（2026-09-30 用户要求）。候选是"楼 x 层 x 单元"：
+        # 先挑楼（1#/2#），再从那栋楼朝 -Y 面的 4 个窗户里挑一个。
+        # 窗户中心 x = 本柱中心 或 孪生柱中心（竖直单元分隔线压在两柱缝上）；
+        # 窗户中心 z = 层高正中（楼层线每 spacing_m 一圈，二楼 z∈[1,2] -> 1.5）。
+        self.fire_random = dict(layout.get('fire_apriltag_random') or {})
+        self.pillar_size_m = _psize
+        self.floor_spacing_m = float(
+            (layout.get('floor_rings') or {}).get('spacing_m', 1.0))
 
         # ⚠️ 2026-09-08 build后实测踩到的真实死锁：`~/reset_scenario`这个
         # service回调内部要顺序调好几个别的service（SetEntityState x N +
@@ -254,9 +262,29 @@ class ScenarioResetNode(Node):
         # 样题版要求贴 2# 的**南面**（朝 Y 轴负方向），跟 fire_drill_room 的
         # +X 面不是一个值，写死就得靠改代码切场景。
         # yaml 里用小写 '-y' 这种写法，这里统一成查表用的 '-Y'。
+        # 2026-09-30：高层着火点改成**每次重置随机**（用户要求）。
+        # 随机的是"哪栋楼 x 哪层 x 哪个单元"，面固定朝 -Y（南面）。
+        # 关掉 fire_apriltag_random.enabled 就退回 fire_apriltag_marker 那组固定值。
         _fam = self.layout.get('fire_apriltag_marker', {})
-        chosen_pillar = _fam.get('pillar_id', 'pillar_2')
-        chosen_face = str(_fam.get('face', '+X')).upper()
+        _fr = self.fire_random
+        fire_note = ''
+        if _fr.get('enabled'):
+            bldgs = list(_fr.get('buildings') or ['pillar_1', 'pillar_2'])
+            floors = [int(v) for v in (_fr.get('floors') or [2, 3])]
+            bldg = random.choice(bldgs)
+            floor = random.choice(floors)
+            # 一栋楼两个单元：本柱（西）和它的正东孪生柱（东）
+            unit_idx = random.randrange(2)
+            chosen_pillar = bldg if unit_idx == 0 else f'{bldg}_e'
+            chosen_face = str(_fr.get('face', '-y')).upper()
+            # 层高正中：二楼 -> (2-1)*1.0 + 0.5 = 1.5
+            self.fire_apriltag_height_m = (floor - 1) * self.floor_spacing_m \
+                + self.floor_spacing_m / 2.0
+            fire_note = (f'[随机] {bldg.replace("pillar_", "")}# 楼 {floor} 层 '
+                         f'{"西" if unit_idx == 0 else "东"}单元 ')
+        else:
+            chosen_pillar = _fam.get('pillar_id', 'pillar_2')
+            chosen_face = str(_fam.get('face', '+X')).upper()
         if chosen_face not in FIRE_TAG_FACE_LOCAL_OFFSETS:
             raise KeyError(f"fire_apriltag_marker.face='{chosen_face}' 不认识，"
                            f"可选：{sorted(FIRE_TAG_FACE_LOCAL_OFFSETS)}")
@@ -271,10 +299,14 @@ class ScenarioResetNode(Node):
         ok = self._set_model_pose('fire_apriltag_marker', tag_x, tag_y, self.fire_apriltag_height_m, tag_yaw)
         all_ok = all_ok and ok
         summary.append(
-            f'fire_apriltag_marker->{chosen_pillar}({chosen_face}面) '
+            f'fire_apriltag_marker->{fire_note}{chosen_pillar}({chosen_face}面) '
             f'({tag_x:.2f},{tag_y:.2f},{self.fire_apriltag_height_m:.1f}) '
             f'yaw={math.degrees(tag_yaw):.0f}°' + ('' if ok else 'FAIL')
         )
+        # 真值单独打一行，方便测试脚本 grep（别跟一长串 summary 混在一起）
+        self.get_logger().info(
+            f'[高层火情真值] {fire_note}位置 ({tag_x:.2f}, {tag_y:.2f}, '
+            f'{self.fire_apriltag_height_m:.2f})，面={chosen_face}')
 
         if self.judge_reset_cli.service_is_ready():
             future = self.judge_reset_cli.call_async(Trigger.Request())
