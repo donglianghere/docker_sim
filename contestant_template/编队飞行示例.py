@@ -275,6 +275,13 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
     # 相应地 WAYPOINT_FLYTHROUGH_M 要设回 0：现在是**要**真正飞到航点的。
     for i, (frm, to) in enumerate(legs, start=1):
         (fx, fy), (tx, ty) = legs_local[i - 1]
+        # 零长度航段直接跳过：start_xy 跟第一个航点重合时（任务2/任务3 都是从
+        # G 起编队、首航点也是 G）会凑出一条 G->G 的段，atan2(0,0) 给出 0°，
+        # 长机会先朝正东白转一次再去真正的下一个点（2026-09-30 实测多花十几秒）。
+        if math.hypot(tx - fx, ty - fy) < 0.05:
+            print(f'[长机] 航点 {i}/{len(legs)}: ({to[0]}, {to[1]}) 跟上一个点重合，跳过',
+                  flush=True)
+            continue
         heading = math.atan2(ty - fy, tx - fx)
         print(f'[长机] 航点 {i}/{len(legs)}: ({to[0]}, {to[1]})，'
               f'航向 {math.degrees(heading):.0f}°（停 {WAYPOINT_HOLD_S:.0f} 秒转向）',

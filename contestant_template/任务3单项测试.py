@@ -89,7 +89,12 @@ DETECT_TIMEOUT_S = 6.0                # 在一个朝向/高度上等检测多久
 AT_E_WAIT_S = 300.0
 BREACH_WAIT_S = 300.0
 EXTINGUISH_WAIT_S = 420.0
-SPOT_CLEAR_M = 3.0                    # 侦察机离发射点这么远就算"让开了"
+# 侦察机离发射点多远算"让开了"。这个门限只是**提前放行**用的——真正保证放行的
+# 是"侦察机已经飞到下一个落脚点"那一路（见 _start_spot_clear_watch 的 notify）。
+# 2026-09-30 从 3.0 降到 2.0：火情随机到 1# 东单元时发射点 (14.40,17.33)，而
+# 侦察机的下一个落脚点是 G(17,16)，两点只差 2.92 m，3.0 的门限永远满足不了，
+# watchdog 耗满 120 秒超时才放行，任务机白等两分钟。
+SPOT_CLEAR_M = 2.0
 SPOT_CLEAR_WAIT_S = 120.0
 SPOT_POLL_S = 0.2
 # 任务机飞到发射点时的容忍：规划器把终点推到边缘、停在这个距离以内就认了，
@@ -225,10 +230,21 @@ def _start_spot_clear_watch(sdk, spot_world):
     """
     import threading
     sx, sy = float(spot_world[0]), float(spot_world[1])
+    state = {'sent': False}
+
+    def _send(why):
+        if state['sent']:
+            return
+        state['sent'] = True
+        try:
+            sdk.send_to_teammate(EV_SPOT_CLEAR)
+            print(f'[{sdk.namespace}] {why}，通知任务机进场', flush=True)
+        except Exception as exc:
+            print(f'[{sdk.namespace}] "已让开"没送到任务机（{exc}）', flush=True)
 
     def _loop():
         t0 = time.time()
-        while time.time() - t0 < SPOT_CLEAR_WAIT_S:
+        while time.time() - t0 < SPOT_CLEAR_WAIT_S and not state['sent']:
             try:
                 cx, cy, _ = sdk.get_local_position()
                 wx, wy = sdk.local_to_world(cx, cy, 0.0)[:2]
@@ -237,23 +253,25 @@ def _start_spot_clear_watch(sdk, spot_world):
                 continue
             d = math.hypot(wx - sx, wy - sy)
             if d >= SPOT_CLEAR_M:
-                try:
-                    sdk.send_to_teammate(EV_SPOT_CLEAR)
-                    print(f'[{sdk.namespace}] 已离开发射点（{d:.1f} m），通知任务机进场',
-                          flush=True)
-                except Exception as exc:
-                    print(f'[{sdk.namespace}] "已让开"没送到任务机（{exc}）', flush=True)
+                _send(f'已离开发射点（{d:.1f} m ≥ {SPOT_CLEAR_M:.1f} m）')
                 return
             time.sleep(SPOT_POLL_S)
-        # 超时也要放行，不然任务机会一直等
-        try:
-            sdk.send_to_teammate(EV_SPOT_CLEAR)
-        except Exception:
-            pass
-        print(f'[{sdk.namespace}] 等了 {SPOT_CLEAR_WAIT_S:.0f} 秒仍没离开发射点，'
-              f'仍通知任务机进场', flush=True)
+        if not state['sent']:
+            # 超时也要放行，不然任务机会一直等。走到这儿说明两条路都没触发，
+            # 属于异常，要在日志里说清楚。
+            _send(f'等了 {SPOT_CLEAR_WAIT_S:.0f} 秒仍没离开发射点（超时兜底）')
 
     threading.Thread(target=_loop, daemon=True).start()
+
+    def _notify_arrived(where):
+        """侦察机已经飞到下一个落脚点了——不管离发射点多远，位置都已经腾出来。
+
+        这是**主放行路径**：距离门限只是提前放行。下一个落脚点有可能离发射点
+        很近（火情在 1# 东单元时发射点到 G 只有 2.92 m），光靠门限会一直等不到。
+        """
+        _send(f'已飞到{where}，发射点已腾出')
+
+    return _notify_arrived
 
 
 def _fly_route(sdk, legs, z_agl=CRUISE_AGL_M):
@@ -428,10 +446,14 @@ def recon(sdk):
     # 识别到就当场插入一轮协同灭火（过程②），灭完继续巡检下一栋。
     at_station = None          # 当前停在哪个观察位，同一个位就不重复飞
     fired_any = False
+    pending_spot_clear = None  # 破窗后待发的"发射点已腾出"通知，见 _start_spot_clear_watch
     for idx, (bldg, pt, pt_name, yaw_deg, detect) in enumerate(INSPECT_STATIONS):
         if at_station != pt_name:
             _fly_route(sdk, [(pt_name, pt)], z_agl=OBSERVE_AGL_M)
             at_station = pt_name
+            if pending_spot_clear is not None:
+                pending_spot_clear(f'下一个巡检点 {pt_name}')
+                pending_spot_clear = None
         print(f'[{sdk.namespace}] 在 {pt_name} 点转到 {yaw_deg:.0f}° 巡检 {bldg} 楼', flush=True)
         sdk.face_yaw(math.radians(yaw_deg), timeout=编队.TURN_TIMEOUT_S,
                      tolerance_deg=编队.TURN_TOL_DEG)
@@ -469,8 +491,9 @@ def recon(sdk):
         高楼.fire_launcher(sdk, '发射破窗弹')
         sdk.send_to_teammate(EV_BREACHED)
         sdk.play_sound_light('侦察机破窗完成')
-        # 发射点马上就要让给任务机了，盯着自己什么时候离开、离开了就通知它
-        _start_spot_clear_watch(sdk, (fire_pos[0], fire_pos[1]))
+        # 发射点马上要让给任务机了。两条放行路径：离得够远（watchdog 线程），
+        # 或者已经飞到下一个落脚点（下面显式调 spot_clear_notify）。
+        spot_clear_notify = _start_spot_clear_watch(sdk, (fire_pos[0], fire_pos[1]))
         at_e.clear()                    # 复位，下一栋楼要是也有火情还能再收一次
         done.clear()
         fired_any = True
@@ -478,11 +501,19 @@ def recon(sdk):
         # 不在这里等 EV_EXTINGUISHED——那是任务机的活，侦察机的巡检不该被它挡住。
         if idx + 1 < len(INSPECT_STATIONS):
             print(f'[{sdk.namespace}] 还有下一个巡检点，先去巡检', flush=True)
+        # 巡检循环的下一轮（或循环结束后的"飞 G 点"）会把飞机挪走；到位之后
+        # 由 _fly_route 的调用点负责通知。这里只把回调存下来。
+        pending_spot_clear = spot_clear_notify
 
     # ---- 巡检完毕 ----
     print(f'[{sdk.namespace}] 三栋楼巡检拍照完毕', flush=True)
     sdk.send_to_teammate(EV_INSPECT_DONE)
     _fly_route(sdk, [('G', ROUTE_G)])
+    if pending_spot_clear is not None:
+        # 火情在最后一站（1#）时走这一支：飞到 G 就算把发射点腾出来了。
+        # G(17,16) 离 1# 东单元的发射点只有 2.9 m，光靠距离门限放不了行。
+        pending_spot_clear('G 点')
+        pending_spot_clear = None
     if fired_any:
         print(f'[{sdk.namespace}] 在 G 点等任务机灭火完成…', flush=True)
         done.wait(EXTINGUISH_WAIT_S)
