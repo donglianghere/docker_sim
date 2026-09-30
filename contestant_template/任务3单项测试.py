@@ -82,12 +82,19 @@ INSPECT_STATIONS = (
     ('1#', POINT_N, 'N',  90.0, True),
 )
 PHOTO_DIR = '/logs/任务3照片'          # 拍照存这儿（/logs 是挂给地面站的目录）
-FIRE_HEIGHTS_M = (1.5, 2.5)           # 火情只可能在这两个高度
+# 火情只可能在这两个高度（二楼/三楼层高正中）。2026-09-30 起**不再**用它做
+# 升降扫描——两个高度从 2.0 m 观察位上本来就都在前视画面里，见 _inspect_here。
+# 留着是因为它说明了随机化的取值范围，也跟 layout 的 fire_apriltag_random 对应。
+FIRE_HEIGHTS_M = (1.5, 2.5)
 FORWARD_BEFORE_FIRE_M = 1.5           # 对准后沿机头前移这么多再发射
 EXTINGUISHER_SHOTS = 4                # 任务机连发几发灭火弹
 SHOT_INTERVAL_S = 1.0
 
-DETECT_TIMEOUT_S = 6.0                # 在一个朝向/高度上等检测多久
+DETECT_TIMEOUT_S = 3.0                # 等一次检测多久。检测节点约 7 Hz，标志在
+                                      # 画面里的话一两帧就出结果；等 6 秒纯属在
+                                      # 没火情的楼前白耗（2026-09-30 从 6.0 降下来）
+DETECT_TRIES = 2                      # 试几次（转向刚到位时画面可能还没稳）
+DETECT_SETTLE_S = 1.0                 # 两次之间缓一下
 AT_E_WAIT_S = 300.0
 BREACH_WAIT_S = 300.0
 EXTINGUISH_WAIT_S = 420.0
@@ -303,115 +310,27 @@ def _fly_route(sdk, legs, z_agl=CRUISE_AGL_M):
 
 
 def _inspect_here(sdk):
-    """在当前位置、当前朝向找高层火情。两个可能高度各看一遍。
+    """在当前位置、当前朝向找高层火情。找到返回 Detection，没有返回 None。
 
-    火情贴在楼的立面上，高度 1.5 或 2.5——飞机悬停在 2.0 m，两个高度都在
-    前视相机的视场里，所以先原地看；看不到再逐个高度升降过去看一眼。
-    返回检测到的 Detection，没找到返回 None。
+    2026-09-30 去掉了原来"逐个候选高度升降过去再看一遍"的扫描（用户：没有
+    火情就拍个照赶紧去下一个点，别在楼前等半天）。两条理由：
+      · 几何上不需要——飞机悬停在 2.0 m、距楼约 3 m，候选高度 1.5/2.5 只偏
+        ±9.5°，而前视相机垂直视场 64°，两个高度本来就都在画面里；
+      · 实测也没用过——五轮下来每次都是"原地看到"（最快 1.4 秒），扫描分支
+        一次都没有找到过火情，却在没有火情的楼前白白花掉 23 秒
+        （实测 2# 站共 33.3 秒，其中升降两趟占 23 秒）。
+    保留一次短重试：转向刚到位时画面可能还在稳，给一帧缓冲。
     """
-    try:
-        det = sdk.wait_for_detection(HIGH_FIRE, timeout=DETECT_TIMEOUT_S, camera='front')
-        print(f'[{sdk.namespace}] 原地看到高层火情', flush=True)
-        return det
-    except Exception:
-        pass
-    cx, cy, _ = sdk.get_local_position()
-    for h in FIRE_HEIGHTS_M:
-        _, _, lz = sdk.world_to_local(0.0, 0.0, h)
-        print(f'[{sdk.namespace}] 升到 {h:.1f} m 再看一遍', flush=True)
-        sdk.goto_direct(cx, cy, lz)
-        time.sleep(1.0)
+    for i in range(1, DETECT_TRIES + 1):
         try:
-            det = sdk.wait_for_detection(HIGH_FIRE, timeout=DETECT_TIMEOUT_S, camera='front')
-            print(f'[{sdk.namespace}] 在 {h:.1f} m 高度看到高层火情', flush=True)
+            det = sdk.wait_for_detection(HIGH_FIRE, timeout=DETECT_TIMEOUT_S,
+                                         camera='front')
+            print(f'[{sdk.namespace}] 原地看到高层火情', flush=True)
             return det
         except Exception:
-            continue
+            if i < DETECT_TRIES:
+                time.sleep(DETECT_SETTLE_S)
     return None
-
-
-def _drive_servos(sdk, pwm, label):
-    """抓取/释放机构。仿真里飞控不一定配了舵机输出，动不了就打印、继续飞完流程。"""
-    try:
-        sdk.set_servos({sv: pwm for sv in sorted(sdk.servos)})
-    except Exception as exc:
-        print(f'[{sdk.namespace}] {label}：舵机没动（{exc}）'
-              f'——真机需要飞控配好 MAIN7/MAIN9', flush=True)
-        return
-    time.sleep(SERVO_TRAVEL_S)
-    print(f'[{sdk.namespace}] {label}完成', flush=True)
-
-
-def _supply_point_action(sdk, pwm, label, sound=None):
-    """飞到物资点 -> 边瞄准边降落到底 -> 驱动机械抓 -> 起飞回巡航高度。
-
-    降落复用《地面火情搜索示例》的 `descend_onto()`：**不要用
-    `precision_land_and_confirm()`**，那是"对准一点、下降一点"的分级下降，
-    从 2.5 m 下来要 40 秒以上、30 秒时限内走不完，每次都走超时兜底
-    （2026-09-23 实测）。descend_onto 是连续修正，同一时间既对准也下降。
-    """
-    _goto_world(sdk, SUPPLY_XY[0], SUPPLY_XY[1], '物资点')
-    地面.descend_onto(sdk, SUPPLY_TAG, '灭火器材')
-    print(f'[{sdk.namespace}] 已降落在物资点，开始{label}', flush=True)
-    if sound:
-        sdk.play_sound_light(sound)
-    _drive_servos(sdk, pwm, label)
-    sdk.takeoff(height_m=CRUISE_AGL_M)
-    time.sleep(HOVER_AFTER_TAKEOFF_S)
-
-
-def center_fire_in_view(sdk, tag='火情'):
-    """把飞机挪到**正对火情窗口**的位置：机头垂直于楼面不动，横向平移 + 升降。
-    返回是否对上了。
-
-    2026-09-30 订正：上一版只转机头让 tag 在画面里居中——那是**斜着瞄准**，
-    不是对准。飞机停在观察位 M(6,16)，而火情随机到东单元时 tag 在 x=6.5，
-    横向差 0.5 m；转机头能把它转到画面中心，但飞机仍然斜对着墙，沿机头前移
-    之后落点离窗口正前方还差近 0.5 m。弹丸要穿窗，得正对。
-
-    所以改成**机头锁死在垂直于楼面的方向**（调用方进来之前已经 face_yaw 到位），
-    两个误差都用平移消除：
-      · 横向：按框宽估距离（tag 实际 0.5 m），`dist * tan(atan2(bbox_x-W/2, f))`
-        就是飞机相对窗口中心的横向偏移，沿机头**右手方向**平移这么多；
-      · 垂直：同样的距离乘垂直角，整机升降（相机固定安装、不能俯仰）。
-    两轴都进容差才算对准。
-
-    为什么不用 `sdk.center_on_target()`：见 IMAGE_W 上面那段注释——它只认下视相机。
-    """
-    yaw0 = sdk.get_current_yaw()            # 垂直于楼面的朝向，全程不动
-    for i in range(1, AIM_MAX_TRIES + 1):
-        try:
-            det = sdk.wait_for_detection(HIGH_FIRE, timeout=4.0, camera='front')
-        except Exception:
-            print(f'[{sdk.namespace}] 第{i}轮对准：前视相机看不到{tag}', flush=True)
-            time.sleep(AIM_SETTLE_S)
-            continue
-        dx_rad = math.atan2(det.bbox_x - IMAGE_W / 2.0, FOCAL_PX)
-        dy_rad = math.atan2(det.bbox_y - IMAGE_H / 2.0, FOCAL_PX)   # 画面 y 向下为正
-        dist = FOCAL_PX * TAG_SIZE_M / max(1.0, det.bbox_width)
-        lat = dist * math.tan(dx_rad)        # >0：窗口在飞机右侧，要往右挪
-        dz = -dist * math.tan(dy_rad)        # 目标在画面下方 -> 要降高度
-        print(f'[{sdk.namespace}] 第{i}轮对准：{tag}在画面 ({det.bbox_x:.0f},{det.bbox_y:.0f})，'
-              f'框宽 {det.bbox_width:.0f}px -> 距离约 {dist:.2f} m，'
-              f'横向 {lat:+.2f} m，高度 {dz:+.2f} m', flush=True)
-        if abs(lat) <= AIM_TOL_XY_M and abs(dz) <= AIM_TOL_Z_M:
-            print(f'[{sdk.namespace}] {tag}已对准（横向 {lat:+.2f} m，垂直 {dz:+.2f} m）',
-                  flush=True)
-            return True
-        cx, cy, cz = sdk.get_local_position()
-        # 机头右手方向（ENU/yaw 逆时针为正时，right = (sin yaw, -cos yaw)）
-        rx, ry = math.sin(yaw0), -math.cos(yaw0)
-        _, _, z_lo = sdk.world_to_local(0.0, 0.0, AIM_Z_MIN_M)
-        _, _, z_hi = sdk.world_to_local(0.0, 0.0, AIM_Z_MAX_M)
-        tx, ty = cx + rx * lat, cy + ry * lat
-        tz = min(max(cz + dz, z_lo), z_hi)
-        print(f'[{sdk.namespace}] 平移到 ({tx:.2f}, {ty:.2f}, {tz:.2f})（局部系）', flush=True)
-        sdk.goto_direct(tx, ty, tz)          # 直线平移/升降，不经规划器
-        # 平移不改朝向，但 goto_direct 之后朝向可能被带偏，复位一次
-        sdk.face_yaw(yaw0, timeout=编队.TURN_TIMEOUT_S, tolerance_deg=2.0)
-        time.sleep(AIM_SETTLE_S)
-    print(f'[{sdk.namespace}] {AIM_MAX_TRIES} 轮仍没对准{tag}，按当前状态继续', flush=True)
-    return False
 
 
 def _back_to_observe_alt(sdk):
