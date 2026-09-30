@@ -347,6 +347,48 @@ def helipads(layout):
     return "".join(out)
 
 
+def resolve_random_fire(layout, rng=None):
+    """把"高层着火点随机化"在**生成 world 之前**就抽定，并写回 layout（内存里）。
+
+    为什么必须在这一步抽、而不是等 scenario_reset_node 运行时抽（2026-09-30）：
+    reset 节点是在 Gazebo 起来 5 秒后用 SetEntityState 把 tag **热移**过去的，
+    而 gzclient 对运行中被热改位姿的模型**不会重绘**（DEBUG_JOURNAL 2026-09-15
+    记过一次）——界面上 tag 还停在 world 文件写死的那个位置，跟飞机相机实际
+    看到的不是一回事。用户据此判断"火情在 2#"，而 Gazebo 查出来的真值是 1#。
+    界面骗人比少一点随机性危险得多，所以改成：**生成 world 时就抽定**，静态
+    world 里就是随机结果，界面所见即真值；同时把抽中的值写回 yaml 并关掉
+    随机开关，reset 节点照着同一份 yaml 摆回同一个位置，两边不会再分叉。
+
+    返回 (说明文字, tag 世界坐标 (x,y,z))；没开随机就返回 (None, None)。
+    """
+    import random as _random
+    fr = layout.get("fire_apriltag_random") or {}
+    if not fr.get("enabled"):
+        return None, None
+    rng = rng or _random
+    psize = float(layout["pillar_size"])
+    spacing = float((layout.get("floor_rings") or {}).get("spacing_m", 1.0))
+    bldg = rng.choice(list(fr.get("buildings") or ["pillar_1", "pillar_2"]))
+    floor = int(rng.choice([int(v) for v in (fr.get("floors") or [2, 3])]))
+    unit = rng.randrange(2)                       # 0=本柱(西单元) 1=孪生柱(东单元)
+    pid = bldg if unit == 0 else f"{bldg}_e"
+    z = (floor - 1) * spacing + spacing / 2.0
+
+    # 孪生柱不在 layout['pillars'] 里（由 twin_east 展开）。**不要**为了查坐标
+    # 往那个列表里补一条——pillars() 会照着再生成一个模型，等于凭空多一根柱子
+    # （还跟已展开的孪生柱重名/重叠）。改成让 fire_apriltag() 自己解析 '_e' 后缀。
+    base = next(q for q in layout["pillars"] if q["id"] == bldg)
+    layout["fire_apriltag_marker"]["pillar_id"] = pid
+    layout["fire_apriltag_marker"]["face"] = fr.get("face", "-y")
+    layout["fire_apriltag_height_m"] = z
+    layout["fire_apriltag_random"]["enabled"] = False   # 已抽定，reset 节点别再抽
+    x = base["x"] + (psize if unit == 1 else 0.0)
+    d = float(layout["fire_apriltag_marker"]["mount_standoff_m"])
+    note = (f'{bldg.replace("pillar_", "")}# 楼 {floor} 层 '
+            f'{"西" if unit == 0 else "东"}单元')
+    return note, (x, base["y"] - d, z)
+
+
 def fire_apriltag(layout):
     """高层着火点标识：贴在指定立柱的指定面上，法线朝外。
 
@@ -355,15 +397,25 @@ def fire_apriltag(layout):
     """
     m = layout["fire_apriltag_marker"]
     pid = m["pillar_id"]
-    p = next(q for q in layout["pillars"] if q["id"] == pid)
+    # pillar_id 可能指的是**孪生柱**（id 以 '_e' 结尾），它不在 pillars 列表里、
+    # 是由 twin_east 展开出来的，中心在本柱 +pillar_size 处。
+    if pid.endswith("_e"):
+        base = next(q for q in layout["pillars"] if q["id"] == pid[:-2])
+        p = {"x": base["x"] + float(layout["pillar_size"]), "y": base["y"]}
+    else:
+        p = next(q for q in layout["pillars"] if q["id"] == pid)
     d = m["mount_standoff_m"]
     face = m["face"]
     # 这张表必须跟 scenario_reset_node.FIRE_TAG_FACE_LOCAL_OFFSETS 一致：
-    # 容器起来 5 秒后那个节点会把 tag 重新摆一次，两边不一致的话静态 world
-    # 和重置后的位姿对不上。**yaw 不是可有可无的**——薄片本身左右对称，转
-    # 180° 看着一样，但贴图会镜像，AprilTag 镜像了就识别不出来。
-    # 约定：'+Y' 面对应 yaw=0（贴图正面朝 +Y），所以 '-Y' 面要转 π。
-    dx, dy, yaw = {"-y": (0.0, -d, math.pi), "+y": (0.0, d, 0.0),
+    # 那个节点会在容器起来 5 秒后把 tag 重新摆一次，两边不一致的话静态 world
+    # 和重置后的位姿对不上。
+    # 2026-09-30 订正：这里原来给 '-y' 写的是 yaw=π，依据是"'+Y' 面对应 yaw=0，
+    # 贴图镜像了 AprilTag 就认不出来"这个**推理**；而 scenario_reset_node 的表
+    # 里 '-Y' 一直是 yaw=0。以前这个矛盾不显形——重置总会覆盖静态位姿，实际
+    # 飞的永远是 yaw=0 那一版，而历次飞行**检测都成功**。也就是说实测否定了
+    # 那条推理，yaw=0 在 '-Y' 面上是可识别的。现在随机化提到生成阶段、静态
+    # world 就是最终位置，两边必须对齐，所以按**实测站得住的那一版**统一成 0。
+    dx, dy, yaw = {"-y": (0.0, -d, 0.0), "+y": (0.0, d, 0.0),
                    "-x": (-d, 0.0, math.pi / 2), "+x": (d, 0.0, -math.pi / 2)}[face]
     z = layout["fire_apriltag_height_m"]
     return (f"\n    <model name='fire_apriltag_marker'>\n"
@@ -438,11 +490,23 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--layout", required=True)
     ap.add_argument("--output", required=True)
+    ap.add_argument("--randomize-fire", action="store_true",
+                    help="按 fire_apriltag_random 抽定高层着火点（见 resolve_random_fire）")
+    ap.add_argument("--write-resolved-layout", default="",
+                    help="把抽定后的 layout 写到这里（一般就写回 --layout 那份，"
+                         "让 scenario_reset_node 读到同一个结果）")
+    ap.add_argument("--seed", type=int, default=None, help="复现用；不给就每次都随机")
     args = ap.parse_args()
 
     with open(args.layout, encoding="utf-8") as f:
         L = yaml.safe_load(f)
     room = L["room"]
+
+    fire_note = fire_xyz = None
+    if args.randomize_fire:
+        import random
+        rng = random.Random(args.seed) if args.seed is not None else random
+        fire_note, fire_xyz = resolve_random_fire(L, rng)
 
     parts = [HEADER, ground_plane(room), walls_and_ceiling(room),
              cylinder_model(L), pillars(L),
@@ -454,6 +518,13 @@ def main():
     with open(args.output, "w", encoding="utf-8") as f:
         f.write("".join(parts))
 
+    if args.write_resolved_layout:
+        with open(args.write_resolved_layout, "w", encoding="utf-8") as f:
+            yaml.safe_dump(L, f, allow_unicode=True, sort_keys=False)
+
+    if fire_note:
+        print(f"  [高层火情真值] {fire_note} tag=({fire_xyz[0]:.2f}, "
+              f"{fire_xyz[1]:.2f}, {fire_xyz[2]:.2f})")
     n_pillars = sum(2 if p.get("twin_east") else 1 for p in L["pillars"])
     print(f"[gen_sample_room_world] wrote {args.output}")
     print(f"  房间 {room['size_x']}x{room['size_y']}x{room['height']} m，原点在西南角")

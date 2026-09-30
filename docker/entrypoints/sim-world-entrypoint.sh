@@ -125,6 +125,32 @@ else
     RVIZ_CONFIG="multi_mighty.rviz"
 fi
 
+# ---- 样题场景：起 Gazebo 之前先把高层着火点抽定、重新生成 world ----
+# 为什么在这里抽、而不是等 scenario_reset_node 运行时抽（2026-09-30）：
+# 那个节点是在 Gazebo 起来 5 秒后用 SetEntityState 把 tag **热移**过去的，而
+# gzclient 对运行中被热改位姿的模型**不会重绘**（DEBUG_JOURNAL 2026-09-15 记过）
+# ——界面上 tag 还停在 world 写死的位置，跟飞机相机实际看到的不是一回事。
+# 用户据此判断"火情在 2#"，而 Gazebo 查出来的真值是 1#。界面骗人比少一点随机性
+# 危险得多，所以改成生成 world 时就抽定：静态 world 里就是随机结果，界面所见
+# 即真值；抽中的值同时写回 layout yaml 并关掉随机开关，scenario_reset_node
+# 照着同一份 yaml 摆回同一个位置，两边不会再分叉。
+# 注意写回的是**容器内**那份（镜像里的副本），每次 compose up 都是新容器、
+# 从镜像重新展开，所以下一轮照样会重新抽；只有 `docker compose restart`
+# 复用同一个容器文件系统时位置才会保持不变。
+if [ "${WORLD_ENV}" = "sample_room" ]; then
+    _LAYOUT="$(ros2 pkg prefix contest_mission 2>/dev/null)/share/contest_mission/config/sample_room_layout.yaml"
+    _WORLD="/opt/mighty_ws/install/mighty/share/mighty/worlds/sample_room.world"
+    if [ -f "${_LAYOUT}" ] && [ -f /opt/docker_scripts/gen_sample_room_world.py ]; then
+        echo "== [sim-world] 抽定高层着火点并重新生成 sample_room.world =="
+        python3 /opt/docker_scripts/gen_sample_room_world.py \
+            --layout "${_LAYOUT}" --output "${_WORLD}" \
+            --randomize-fire --write-resolved-layout "${_LAYOUT}" \
+            || echo "!! 重新生成 sample_room.world 失败，沿用镜像里那份（火情位置固定） !!" >&2
+    else
+        echo "!! 找不到 layout 或生成脚本，沿用镜像里的 sample_room.world !!" >&2
+    fi
+fi
+
 echo "== [sim-world] 启动Gazebo世界 env=${WORLD_ENV} rviz_config=${RVIZ_CONFIG} =="
 ros2 launch mighty base_mighty.launch.py \
     env:="${WORLD_ENV}" use_gazebo_gui:="${USE_GAZEBO_GUI}" \

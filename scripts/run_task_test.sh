@@ -31,6 +31,7 @@ done
 
 LEADER=NX01
 FOLLOWER=NX02
+FSNX01=docker_sim-flight-stack-nx01-1
 IMAGE=contestant-sdk:latest
 WORKDIR="$PWD/contestant_template"
 # 照片/日志目录：capture_photo() 默认往 /logs 写，不挂的话照片落在容器里，
@@ -82,6 +83,22 @@ docker run -d --name tk_follower --network host -v "$WORKDIR:/workspace" -v "$LO
     python3 -u "/workspace/$SCRIPT" --namespace "$FOLLOWER" --role follower \
     --teammate "$LEADER" --spacing "$SPACING" >/dev/null
 
+# ---- 实时监视：跟测试同时开（用户 2026-09-30 要求"任务3 也要监控"）----
+# 起在 flight-stack-nx01 容器里——那边的 DDS 环境是验证过的；显式传 DISPLAY，
+# `docker exec` 起的新 shell 不一定继承得到（不给的话脚本会退回无窗口模式）。
+MON_OUT="/logs/${SCRIPT%.py}_formation.png"
+MON_LOG="/logs/${SCRIPT%.py}_monitor.log"
+log "启动实时监视（窗口 + 报告 ${MON_OUT}）"
+docker exec -d -e DISPLAY="${DISPLAY:-:1}" "$FSNX01" bash -lc "
+    source /opt/ros/humble/setup.bash
+    export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
+           RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+           CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
+    python3 -u /opt/host_scripts/编队监视.py \
+        --layout /opt/contest_mission_ws/src/contest_mission/config/sample_room_layout.yaml \
+        --out '${MON_OUT}' --spacing ${SPACING} > '${MON_LOG}' 2>&1
+" >/dev/null 2>&1 || echo "（监视没起来，不影响飞行测试）" >&2
+
 DL=$(( $(date +%s) + TIMEOUT_S ))
 while :; do
     live=0
@@ -94,6 +111,12 @@ while :; do
     fi
     sleep 5
 done
+
+# 选手程序都退了，让监视收尾出图：它自己的"任务结束"判据是给编队飞行写的
+# （两机都落地/悬停够久），任务流程里不一定成立；这里直接发 SIGINT，脚本
+# 收到就存 PNG+CSV 再退。给几秒让它写完。
+docker exec "$FSNX01" pkill -INT -f 编队监视 >/dev/null 2>&1 || true
+sleep 6
 
 # 属主修正：选手容器以 root 身份往 /logs 写（照片、日志），宿主机这边属主就是
 # root，普通用户删不掉也改不了。跑完借一个一次性容器把属主改回来——宿主机不需要
