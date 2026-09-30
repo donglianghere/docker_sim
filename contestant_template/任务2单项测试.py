@@ -118,7 +118,9 @@ def recon(sdk):
     dropped = _Inbox(sdk, EV_DROPPED)      # 先注册，后面才可能收到
 
     sdk.takeoff(height_m=CRUISE_AGL_M)
-    sdk.play_sound_light('侦察机起飞')
+    # 不用显式播'起飞'：SDK 的 takeoff() 自己会按角色播一次
+    # （capabilities.py 的 _play_role_sound_light），再播就是第二遍——
+    # 2026-09-30 用户发现"侦查机起飞发了两遍"，间隔 22 秒正是起飞时长。
 
     # ---- 航点飞行 A B C G，到 G 开始下视搜索 ----
     for wp, name in ((ROUTE_A, 'A'), (ROUTE_B, 'B'), (ROUTE_C, 'C'), (ROUTE_G, 'G')):
@@ -213,7 +215,9 @@ def supply(sdk):
     print(f'[{sdk.namespace}] 收到火情坐标 ({fx:.2f}, {fy:.2f})', flush=True)
 
     sdk.takeoff(height_m=CRUISE_AGL_M)
-    sdk.play_sound_light('任务机起飞')
+    # 不用显式播'起飞'：SDK 的 takeoff() 自己会按角色播一次
+    # （capabilities.py 的 _play_role_sound_light），再播就是第二遍——
+    # 2026-09-30 用户发现"侦查机起飞发了两遍"，间隔 22 秒正是起飞时长。
     time.sleep(HOVER_AFTER_TAKEOFF_S)
 
     # ---- 物资点：边瞄准边降落到底，抓取 ----

@@ -456,7 +456,9 @@ def recon(sdk):
     landed_home = _Inbox(sdk, EV_LANDED_HOME)
 
     sdk.takeoff(height_m=CRUISE_AGL_M)
-    sdk.play_sound_light('侦察机起飞')
+    # 不用显式播'起飞'：SDK 的 takeoff() 自己会按角色播一次
+    # （capabilities.py 的 _play_role_sound_light），再播就是第二遍——
+    # 2026-09-30 用户发现"侦查机起飞发了两遍"，间隔 22 秒正是起飞时长。
     # 巡检航点：每个点先转向下一个点再走，航段内航向恒定
     _fly_route(sdk, [('A', ROUTE_A), ('B', ROUTE_B), ('C', ROUTE_C),
                      ('G', ROUTE_G), ('E', ROUTE_E)])
@@ -607,7 +609,9 @@ def supply(sdk):
 
         if not airborne:
             sdk.takeoff(height_m=CRUISE_AGL_M)
-            sdk.play_sound_light('任务机起飞')
+            # 不用显式播'起飞'：SDK 的 takeoff() 自己会按角色播一次
+            # （capabilities.py 的 _play_role_sound_light），再播就是第二遍——
+            # 2026-09-30 用户发现"侦查机起飞发了两遍"，间隔 22 秒正是起飞时长。
             time.sleep(HOVER_AFTER_TAKEOFF_S)
             # 用户 2026-09-30 要求：参与灭火之前先到物资点降落抓取灭火器材
             _supply_point_action(sdk, GRAB_PWM, '抓取灭火器材',
@@ -665,7 +669,9 @@ def supply(sdk):
     if not airborne:
         # 一次火情都没有（两栋楼都没着火）——照样要起飞入列跟着返航
         sdk.takeoff(height_m=CRUISE_AGL_M)
-        sdk.play_sound_light('任务机起飞')
+        # 不用显式播'起飞'：SDK 的 takeoff() 自己会按角色播一次
+        # （capabilities.py 的 _play_role_sound_light），再播就是第二遍——
+        # 2026-09-30 用户发现"侦查机起飞发了两遍"，间隔 22 秒正是起飞时长。
 
     # ================= 过程③ 编队返回 =================
     # goto_station=False = **就近入列**：任务机这会儿就在侦察机附近，再飞一趟
