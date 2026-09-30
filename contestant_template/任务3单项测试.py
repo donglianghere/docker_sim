@@ -26,8 +26,18 @@
                                         侦察机已巡检完毕 -> 就近入列│
                                         没完 -> 等它完 -> 就近入列 ┘
 
+   火情在 2# 时：侦察机灭火协同完就去 N 拍 1#，拍完直接去 G；
+   火情在 1# 时：1# 是最后一站，协同完直接去 G。两种情况任务机都是灭完火就近入列。
+
 ③ 编队返回
-   从 G 开始编队（规则同《编队飞行示例》），NX01 悬停 A 点、NX02 降落自己起降点。
+   从 G 开始编队 G -> D -> A，**任务机过 D 点就解散**（不是默认的"长机回自己
+   起飞点上空"）。解散后：
+       NX01 -> 飞回 A 点待命（悬停，不降落）
+       NX02 -> 先飞物资点降落、松开机械抓释放灭火器材 -> 起飞 -> 回自己起降点降落
+
+物资点 (10,8) 的两次动作：任务机**起飞后**先去抓取灭火器材再去待命点参与灭火；
+**编队解散后**再去释放器材。都是"飞过去 -> descend_onto 边瞄边降到底 -> 驱动
+机械抓 -> 起飞"。
 
 两栋楼都可能有火情，所以灭火周期两边都写成**可重入**的：事件信箱收完复位，
 任务机每轮结束后等"下一次火情通报"或"侦察机巡检完毕"，先到哪个走哪个。
@@ -40,8 +50,10 @@ import math
 import time
 
 import 编队飞行示例 as 编队
+import 地面火情搜索示例 as 地面
 import 高楼火情绕飞版示例 as 高楼
 from contest_sdk import DroneSDK
+from contest_sdk.exceptions import GotoUnreachableError
 
 CRUISE_AGL_M = 编队.CRUISE_AGL_M
 SPACING_M = 4.0
@@ -77,6 +89,32 @@ DETECT_TIMEOUT_S = 6.0                # 在一个朝向/高度上等检测多久
 AT_E_WAIT_S = 300.0
 BREACH_WAIT_S = 300.0
 EXTINGUISH_WAIT_S = 420.0
+SPOT_CLEAR_M = 3.0                    # 侦察机离发射点这么远就算"让开了"
+SPOT_CLEAR_WAIT_S = 120.0
+SPOT_POLL_S = 0.2
+# 任务机飞到发射点时的容忍：规划器把终点推到边缘、停在这个距离以内就认了，
+# 反正接下来还要把火情居中到前视画面，差一两米不影响发射。
+ARRIVE_ACCEPT_M = 2.0
+# ---- 物资点取放（2026-09-30 用户要求）----
+# 任务机起飞后先到物资点降落抓取灭火器材，再去待命点参与灭火；编队解散后再回
+# 物资点降落、松开机械抓，模拟释放器材，然后才回自己起降点降落。
+SUPPLY_XY = (10.0, 8.0)               # 物资点，AprilTag ID0
+SUPPLY_TAG = 'apriltag:0'
+GRAB_PWM = 800                        # 抓紧（真机实测值，见 project_nx02_servos 记录）
+RELEASE_PWM = 2000                    # 松开
+SERVO_TRAVEL_S = 2.0                  # 舵机没有位置反馈，只能等
+HOVER_AFTER_TAKEOFF_S = 2.0
+# ---- 前视居中对准（2026-09-30 用户要求"火情点要在前视相机中居中"）----
+# **不能用 sdk.center_on_target()**：那条路走 precision_servo_node，而它
+# 第 536 行明写着 `if '_camera_down_' not in msg.header.frame_id: return`
+# ——只认**下视**相机的检测，是给地面标靶精准降落用的。高层火情贴在楼立面上、
+# 走前视相机，所以它永远收敛不了，实测一直是 40 秒超时后走兜底。
+# 改成自己按画面偏差转机头，跟《高楼火情绕飞版示例》的 aim_at_fire 同一套算法。
+IMAGE_W = 640
+FOCAL_PX = 381.35             # = (IMAGE_W/2)/tan(HFOV/2)，HFOV=80°，跟 camera_info 一致
+AIM_TOL_DEG = 3.0             # 画面水平偏差小于这个角度算居中
+AIM_MAX_TRIES = 5
+AIM_SETTLE_S = 1.5            # 转完等画面稳定
 
 # 跨机事件
 EV_FIRE = 'high_fire_found'           # NX01 -> NX02：火情位置 + 侦察机发射点
@@ -84,6 +122,7 @@ EV_AT_E = 'supply_at_standby'         # NX02 -> NX01：我到 E 点待命了
 EV_BREACHED = 'breach_done'           # NX01 -> NX02：破窗完成
 EV_EXTINGUISHED = 'extinguish_done'   # NX02 -> NX01：灭火弹发射完毕
 EV_INSPECT_DONE = 'inspect_done'      # NX01 -> NX02：三栋楼都巡检拍照完了
+EV_SPOT_CLEAR = 'spot_clear'          # NX01 -> NX02：我已离开发射点，位置让给你了
 
 
 class _Inbox:
@@ -159,6 +198,50 @@ def _goto_world(sdk, wx, wy, what, z_agl=CRUISE_AGL_M):
         sdk.goto(lx, ly, lz)
 
 
+def _start_spot_clear_watch(sdk, spot_world):
+    """后台盯着侦察机什么时候离开发射点，离开了就通知任务机。
+
+    为什么需要：任务机被要求"前往侦察机位置"，但那个点上此刻**正杵着侦察机**。
+    ego_planner 看到目标点被占，会把轨迹终点推到障碍边缘，飞机原地不动，5 秒后
+    被 goto() 判成不可达——2026-09-30 实测任务机收到破窗通知立刻出发（07:26:51.74），
+    侦察机同一瞬间才开始离开（07:26:51.94），6 秒后任务机就挂了。
+
+    侦察机照常"发射完就走"（用户要求的顺序不变），只是多发一条"我让开了"，
+    任务机收到这条才真的飞进去。
+    """
+    import threading
+    sx, sy = float(spot_world[0]), float(spot_world[1])
+
+    def _loop():
+        t0 = time.time()
+        while time.time() - t0 < SPOT_CLEAR_WAIT_S:
+            try:
+                cx, cy, _ = sdk.get_local_position()
+                wx, wy = sdk.local_to_world(cx, cy, 0.0)[:2]
+            except Exception:
+                time.sleep(SPOT_POLL_S)
+                continue
+            d = math.hypot(wx - sx, wy - sy)
+            if d >= SPOT_CLEAR_M:
+                try:
+                    sdk.send_to_teammate(EV_SPOT_CLEAR)
+                    print(f'[{sdk.namespace}] 已离开发射点（{d:.1f} m），通知任务机进场',
+                          flush=True)
+                except Exception as exc:
+                    print(f'[{sdk.namespace}] "已让开"没送到任务机（{exc}）', flush=True)
+                return
+            time.sleep(SPOT_POLL_S)
+        # 超时也要放行，不然任务机会一直等
+        try:
+            sdk.send_to_teammate(EV_SPOT_CLEAR)
+        except Exception:
+            pass
+        print(f'[{sdk.namespace}] 等了 {SPOT_CLEAR_WAIT_S:.0f} 秒仍没离开发射点，'
+              f'仍通知任务机进场', flush=True)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def _fly_route(sdk, legs, z_agl=CRUISE_AGL_M):
     """按航点序列飞，**每个航点先把机头转到下一段的方向、停住，再走**，
     航段之间航向不再变化（2026-09-30 用户要求，跟编队飞行同一条规则）。
@@ -213,14 +296,73 @@ def _inspect_here(sdk):
     return None
 
 
-def _aim_and_step_in(sdk):
-    """对准火情，然后沿机头方向前移 FORWARD_BEFORE_FIRE_M，返回发射点世界坐标。"""
+def _drive_servos(sdk, pwm, label):
+    """抓取/释放机构。仿真里飞控不一定配了舵机输出，动不了就打印、继续飞完流程。"""
     try:
-        sdk.center_on_target(HIGH_FIRE, timeout=40.0)
-        print(f'[{sdk.namespace}] 已对准高层火情', flush=True)
+        sdk.set_servos({sv: pwm for sv in sorted(sdk.servos)})
     except Exception as exc:
-        print(f'[{sdk.namespace}] center_on_target 没收敛（{exc}），按当前朝向继续',
-              flush=True)
+        print(f'[{sdk.namespace}] {label}：舵机没动（{exc}）'
+              f'——真机需要飞控配好 MAIN7/MAIN9', flush=True)
+        return
+    time.sleep(SERVO_TRAVEL_S)
+    print(f'[{sdk.namespace}] {label}完成', flush=True)
+
+
+def _supply_point_action(sdk, pwm, label, sound=None):
+    """飞到物资点 -> 边瞄准边降落到底 -> 驱动机械抓 -> 起飞回巡航高度。
+
+    降落复用《地面火情搜索示例》的 `descend_onto()`：**不要用
+    `precision_land_and_confirm()`**，那是"对准一点、下降一点"的分级下降，
+    从 2.5 m 下来要 40 秒以上、30 秒时限内走不完，每次都走超时兜底
+    （2026-09-23 实测）。descend_onto 是连续修正，同一时间既对准也下降。
+    """
+    _goto_world(sdk, SUPPLY_XY[0], SUPPLY_XY[1], '物资点')
+    地面.descend_onto(sdk, SUPPLY_TAG, '灭火器材')
+    print(f'[{sdk.namespace}] 已降落在物资点，开始{label}', flush=True)
+    if sound:
+        sdk.play_sound_light(sound)
+    _drive_servos(sdk, pwm, label)
+    sdk.takeoff(height_m=CRUISE_AGL_M)
+    time.sleep(HOVER_AFTER_TAKEOFF_S)
+
+
+def _pixel_offset_rad(det):
+    """标志中心相对画面中心的水平角（右正）。画面右 = 机体右 = yaw 要减小
+    （FLU 里 yaw 逆时针为正）。"""
+    return math.atan2(det.bbox_x - IMAGE_W / 2.0, FOCAL_PX)
+
+
+def center_fire_in_view(sdk, tag='火情'):
+    """转机头，把火情标志**居中到前视画面**。返回是否对上了。
+
+    为什么不用 `sdk.center_on_target()`：见 IMAGE_W 上面那段注释——它只认下视
+    相机。这里直接读前视检测的 bbox 水平偏移，换算成角度去修 yaw，收敛就停。
+    """
+    for i in range(1, AIM_MAX_TRIES + 1):
+        try:
+            det = sdk.wait_for_detection(HIGH_FIRE, timeout=4.0, camera='front')
+        except Exception:
+            print(f'[{sdk.namespace}] 第{i}轮对准：前视相机看不到{tag}', flush=True)
+            time.sleep(AIM_SETTLE_S)
+            continue
+        delta = _pixel_offset_rad(det)
+        print(f'[{sdk.namespace}] 第{i}轮对准：{tag}在画面 x={det.bbox_x:.0f}'
+              f'（偏差 {math.degrees(delta):+.1f}°，框宽 {det.bbox_width:.0f}px）', flush=True)
+        if abs(delta) <= math.radians(AIM_TOL_DEG):
+            print(f'[{sdk.namespace}] {tag}已居中（偏差 {math.degrees(delta):+.1f}°）', flush=True)
+            return True
+        # 画面右 -> yaw 要减小
+        sdk.face_yaw(sdk.get_current_yaw() - delta,
+                     timeout=编队.TURN_TIMEOUT_S, tolerance_deg=1.5)
+        time.sleep(AIM_SETTLE_S)
+    print(f'[{sdk.namespace}] {AIM_MAX_TRIES} 轮仍没把{tag}居中，按当前朝向继续', flush=True)
+    return False
+
+
+def _aim_and_step_in(sdk):
+    """把火情居中到前视画面，然后沿机头方向前移 FORWARD_BEFORE_FIRE_M，
+    返回发射点世界坐标。"""
+    center_fire_in_view(sdk, '高层火情')
     cx, cy, cz = sdk.get_local_position()
     yaw = sdk.get_current_yaw()
     tx = cx + FORWARD_BEFORE_FIRE_M * math.cos(yaw)
@@ -285,6 +427,8 @@ def recon(sdk):
         高楼.fire_launcher(sdk, '发射破窗弹')
         sdk.send_to_teammate(EV_BREACHED)
         sdk.play_sound_light('侦察机破窗完成')
+        # 发射点马上就要让给任务机了，盯着自己什么时候离开、离开了就通知它
+        _start_spot_clear_watch(sdk, (fire_pos[0], fire_pos[1]))
         at_e.clear()                    # 复位，下一栋楼要是也有火情还能再收一次
         done.clear()
         fired_any = True
@@ -305,8 +449,12 @@ def recon(sdk):
     # start_xy 要的是**世界坐标**（航线本身就是世界系）。这里飞机刚飞到 G，
     # 直接用 ROUTE_G——早先传 get_local_position() 的局部坐标，被当成世界坐标
     # 用，站位点算到了 3# 楼那一片、飞不过去（2026-09-29 实测）。
+    # 解散判据：**任务机过 D 点**就解散（用户 2026-09-30 要求），不是默认的
+    # "长机飞回自己起飞点上空"。解散后长机继续飞到 A 点待命，任务机去物资点
+    # 释放器材再回自己起降点。
     编队.leader_route(sdk, [ROUTE_G, ROUTE_D], spacing_m=SPACING_M,
-                      start_xy=ROUTE_G, final_xy=ROUTE_A)
+                      start_xy=ROUTE_G, final_xy=ROUTE_A,
+                      disband_after_follower_passes=ROUTE_D)
     编队._select_topic_at_a(sdk, ROUTE_A)
     sdk.play_sound_light('侦察机任务完成')
 
@@ -323,6 +471,7 @@ def supply(sdk):
     """
     fire = _Inbox(sdk, EV_FIRE)
     breached = _Inbox(sdk, EV_BREACHED)
+    spot_clear = _Inbox(sdk, EV_SPOT_CLEAR)
     inspect_done = _Inbox(sdk, EV_INSPECT_DONE)
     route_done = 编队._Inbox(sdk, 编队.ROUTE_DONE)
     route_plan = 编队._Inbox(sdk, 编队.ROUTE_PLAN)
@@ -344,6 +493,10 @@ def supply(sdk):
         if not airborne:
             sdk.takeoff(height_m=CRUISE_AGL_M)
             sdk.play_sound_light('任务机起飞')
+            time.sleep(HOVER_AFTER_TAKEOFF_S)
+            # 用户 2026-09-30 要求：参与灭火之前先到物资点降落抓取灭火器材
+            _supply_point_action(sdk, GRAB_PWM, '抓取灭火器材',
+                                 sound='任务机抓取灭火弹')
             airborne = True
 
         # ---- 到 E 点待命，通报到位，等破窗 ----
@@ -353,18 +506,29 @@ def supply(sdk):
         print(f'[{sdk.namespace}] 已在 E 点待命，等侦察机破窗', flush=True)
         breached.wait(BREACH_WAIT_S)
         breached.clear()
+        # 发射点上这会儿还杵着侦察机，直接飞过去规划器会把终点推到障碍边缘、
+        # 飞机原地不动然后被判不可达（2026-09-30 实测）。等它让开再进场。
+        print(f'[{sdk.namespace}] 已破窗，等侦察机让开发射点…', flush=True)
+        spot_clear.wait(SPOT_CLEAR_WAIT_S + 30.0)
+        spot_clear.clear()
 
         # ---- 到侦察机的发射点，连发 4 发灭火弹 ----
         lx, ly, _lz = sdk.world_to_local(fx, fy, CRUISE_AGL_M)
         print(f'[{sdk.namespace}] 飞往侦察机位置 ({fx:.2f}, {fy:.2f})', flush=True)
-        with sdk.fixed_altitude(fz):
-            sdk.goto(lx, ly, fz)
-        sdk.play_sound_light('任务机到达瞄准点')
         try:
-            sdk.center_on_target(HIGH_FIRE, timeout=30.0)
-            print(f'[{sdk.namespace}] 已对准高层火情', flush=True)
-        except Exception as exc:
-            print(f'[{sdk.namespace}] 没对上火情标识（{exc}），按通报坐标发射', flush=True)
+            with sdk.fixed_altitude(fz):
+                sdk.goto(lx, ly, fz)
+        except GotoUnreachableError as exc:
+            d = float(getattr(exc, 'distance_m', 1e9))
+            if d > ARRIVE_ACCEPT_M:
+                raise
+            # 规划器把终点推到了膨胀区边缘。接下来还要把火情居中到前视画面，
+            # 差一两米不影响发射，不值得让整个任务失败。
+            print(f'[{sdk.namespace}] 没能精确到点（还差 {d:.2f} m ≤{ARRIVE_ACCEPT_M:.0f} m），'
+                  f'就地发射', flush=True)
+        sdk.play_sound_light('任务机到达瞄准点')
+        # 同样走前视居中，不用 center_on_target（只认下视相机，见 IMAGE_W 注释）
+        center_fire_in_view(sdk, '高层火情')
 
         sdk.play_sound_light('任务机发射灭火弹')
         for i in range(1, EXTINGUISHER_SHOTS + 1):
@@ -386,6 +550,10 @@ def supply(sdk):
     # "航线起点后方 spacing 米"的站位点纯属绕路。起降由本脚本自己管，编队只管空中。
     编队.follow_formation(sdk, SPACING_M, inbox=route_done, plan=route_plan,
                           goto_station=False)
+
+    # 解散在**任务机过 D 点**之后（用户 2026-09-30 要求）。解散后先回物资点
+    # 降落、松开机械抓模拟释放器材，再回自己起降点降落。
+    _supply_point_action(sdk, RELEASE_PWM, '释放灭火器材')
     编队._land_at_pad(sdk)
     sdk.play_sound_light('任务机已降落')
 

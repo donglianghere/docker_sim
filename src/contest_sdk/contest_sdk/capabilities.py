@@ -1471,6 +1471,62 @@ class DroneSDK:
 
         self._image_subs[camera] = self._node.create_subscription(_Image, topic, _on, 1)
 
+    #: 5x7 点阵字模，只覆盖时间戳要用的字符（数字、'-'、':'、空格）。
+    #: 镜像里没有 PIL/cv2，画一行字不值得为此装一套图形库；时间戳只有这几个
+    #: 字符，手写字模三十行就够，还不用担心字体文件在不在。
+    _GLYPHS_5X7 = {
+        '0': ('01110', '10001', '10011', '10101', '11001', '10001', '01110'),
+        '1': ('00100', '01100', '00100', '00100', '00100', '00100', '01110'),
+        '2': ('01110', '10001', '00001', '00010', '00100', '01000', '11111'),
+        '3': ('01110', '10001', '00001', '00110', '00001', '10001', '01110'),
+        '4': ('00010', '00110', '01010', '10010', '11111', '00010', '00010'),
+        '5': ('11111', '10000', '11110', '00001', '00001', '10001', '01110'),
+        '6': ('00110', '01000', '10000', '11110', '10001', '10001', '01110'),
+        '7': ('11111', '00001', '00010', '00100', '01000', '01000', '01000'),
+        '8': ('01110', '10001', '10001', '01110', '10001', '10001', '01110'),
+        '9': ('01110', '10001', '10001', '01111', '00001', '00010', '01100'),
+        '-': ('00000', '00000', '00000', '11111', '00000', '00000', '00000'),
+        ':': ('00000', '00100', '00100', '00000', '00100', '00100', '00000'),
+        '.': ('00000', '00000', '00000', '00000', '00000', '01100', '01100'),
+        ' ': ('00000', '00000', '00000', '00000', '00000', '00000', '00000'),
+    }
+
+    @classmethod
+    def _stamp_image(cls, arr: Any, text: str, scale: int = 3) -> None:
+        """把 text 画在图像**右下角**（白字 + 黑描边，亮暗背景上都看得见）。原地改 arr。"""
+        gw, gh, gap = 5, 7, 1
+        cw = (gw + gap) * scale
+        tw, th = cw * len(text), gh * scale
+        pad = 6 * scale // 3 + 4
+        h, w, _ = arr.shape
+        x0, y0 = w - tw - pad, h - th - pad
+        if x0 < 0 or y0 < 0:
+            return
+        for i, ch in enumerate(text):
+            rows = cls._GLYPHS_5X7.get(ch)
+            if rows is None:
+                continue
+            for ry, row in enumerate(rows):
+                for rx, bit in enumerate(row):
+                    if bit != '1':
+                        continue
+                    px = x0 + i * cw + rx * scale
+                    py = y0 + ry * scale
+                    # 先描一圈黑边再填白，浅色背景上也不会糊掉
+                    arr[max(0, py - 1):py + scale + 1,
+                        max(0, px - 1):px + scale + 1] = 0
+        for i, ch in enumerate(text):
+            rows = cls._GLYPHS_5X7.get(ch)
+            if rows is None:
+                continue
+            for ry, row in enumerate(rows):
+                for rx, bit in enumerate(row):
+                    if bit != '1':
+                        continue
+                    px = x0 + i * cw + rx * scale
+                    py = y0 + ry * scale
+                    arr[py:py + scale, px:px + scale] = 255
+
     @staticmethod
     def _encode_png(arr: Any) -> bytes:
         """把 HxWx3 的 uint8 RGB 数组编成 PNG 字节流。
@@ -1497,7 +1553,8 @@ class DroneSDK:
                 + chunk(b'IEND', b''))
 
     def capture_photo(self, path: str, camera: str = 'front',
-                      timeout: float = 8.0, fresh: bool = True) -> str:
+                      timeout: float = 8.0, fresh: bool = True,
+                      timestamp: bool = True) -> str:
         """抓当前相机的一帧存成 PNG，返回实际写入的路径。
 
         Args:
@@ -1509,6 +1566,8 @@ class DroneSDK:
             timeout: 等一帧图最多等多久。
             fresh: True（默认）只接受**调用之后**新到的帧，避免拿到切视角前
                 的旧画面；False 则有缓存就直接用。
+            timestamp: True（默认）在**右下角**烧上拍摄时刻
+                （`YYYY-MM-DD HH:MM:SS`，白字黑描边）。
 
         Raises:
             DetectionTimeoutError: 超时没等到图（相机没开、视角没切过去、
@@ -1557,6 +1616,8 @@ class DroneSDK:
         elif enc == 'mono8':
             img = _np.repeat(img, 3, axis=2)
         img = _np.ascontiguousarray(img)
+        if timestamp:
+            self._stamp_image(img, time.strftime('%Y-%m-%d %H:%M:%S'))
 
         d = os.path.dirname(path)
         if d:

@@ -33,6 +33,9 @@ LEADER=NX01
 FOLLOWER=NX02
 IMAGE=contestant-sdk:latest
 WORKDIR="$PWD/contestant_template"
+# 照片/日志目录：capture_photo() 默认往 /logs 写，不挂的话照片落在容器里，
+# 容器一删就没了（"回传"至少要落到宿主机能看到的地方）。
+LOGDIR="$PWD/runtime_logs"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 cleanup() { [ "$KEEP" = "1" ] && return 0; docker rm -f tk_leader tk_follower >/dev/null 2>&1 || true; }
@@ -72,10 +75,10 @@ done
 log "两机就绪"
 
 log "启动选手程序：$SCRIPT（长机=$LEADER 僚机=$FOLLOWER 间距=${SPACING}米）"
-docker run -d --name tk_leader --network host -v "$WORKDIR:/workspace" "$IMAGE" \
+docker run -d --name tk_leader --network host -v "$WORKDIR:/workspace" -v "$LOGDIR:/logs" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" --namespace "$LEADER" --role leader \
     --teammate "$FOLLOWER" --spacing "$SPACING" >/dev/null
-docker run -d --name tk_follower --network host -v "$WORKDIR:/workspace" "$IMAGE" \
+docker run -d --name tk_follower --network host -v "$WORKDIR:/workspace" -v "$LOGDIR:/logs" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" --namespace "$FOLLOWER" --role follower \
     --teammate "$LEADER" --spacing "$SPACING" >/dev/null
 
@@ -91,6 +94,13 @@ while :; do
     fi
     sleep 5
 done
+
+# 属主修正：选手容器以 root 身份往 /logs 写（照片、日志），宿主机这边属主就是
+# root，普通用户删不掉也改不了。跑完借一个一次性容器把属主改回来——宿主机不需要
+# sudo，改的是同一个挂载点。
+docker run --rm -v "$LOGDIR:/logs" --entrypoint chown "$IMAGE" \
+    -R "$(id -u):$(id -g)" /logs >/dev/null 2>&1 || \
+    echo "（属主修正没做成，$LOGDIR 下的新文件属主可能是 root）" >&2
 
 echo ""
 echo "================ $SCRIPT 结果 ================"

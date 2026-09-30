@@ -185,7 +185,7 @@ def listen_standby(sdk):
 
 
 def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
-                 start_xy=None, final_xy=None):
+                 start_xy=None, final_xy=None, disband_after_follower_passes=None):
     """长机的编队任务段：等僚机就位 -> 按航线飞一圈 -> 通知僚机航线已完成。
 
     **不起飞、不降落**，留给调用方决定，这样《双机全流程示例.py》能把编队接在
@@ -252,9 +252,16 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
         legs_local.append(((fx, fy), (tx, ty)))
     _, _, tz = sdk.world_to_local(legs[0][1][0], legs[0][1][1], CRUISE_AGL_M)
 
-    # 解散看门狗：盯着长机什么时候飞回**自己的起飞点**上空，到了就发 ROUTE_DONE
+    # 解散看门狗。两种判据二选一：
+    #   · 默认：长机飞回**自己的起飞点**上空就解散（本示例的规则）；
+    #   · disband_after_follower_passes=(wx,wy)：**僚机过了这个航点**就解散
+    #     （任务3 用，用户 2026-09-30 要求"待任务机过 D 点后就解散编队"）。
     disband_state = {'stop': False, 'sent': False}
-    stop_disband = _start_disband_watch(sdk, pad, spacing_m, disband_state)
+    if disband_after_follower_passes is not None:
+        stop_disband = _start_disband_watch_follower_passed(
+            sdk, tuple(disband_after_follower_passes), spacing_m, disband_state)
+    else:
+        stop_disband = _start_disband_watch(sdk, pad, spacing_m, disband_state)
     sync_wait_s = 0.0       # 航点握手总共等了多久（见 _wait_follower_settled）
 
     # ---- 逐段飞：每个航点停 WAYPOINT_HOLD_S 秒、同时把机头转到下一段航向 ----
@@ -587,6 +594,58 @@ def _slow_leg_start(sdk, corner_local, end_local, spacing_m, tag):
             print(f'[长机] {tag}：限速没恢复（{exc}）', flush=True)
 
     threading.Thread(target=_restore, daemon=True).start()
+
+
+def _start_disband_watch_follower_passed(sdk, wp_xy, spacing_m, state):
+    """盯着**僚机**什么时候过了 wp_xy 这个航点，过了就发 ROUTE_DONE 解散编队。
+
+    长机拿不到僚机的位置，但拿得到它自报的落后量：僚机沿长机轨迹落在长机后方
+    `spacing + lag` 米。本段是直线，所以"长机离这个航点的直线距离 ≥ spacing + lag"
+    就等价于僚机已经走过它——跟 `_slow_leg_start` 的判据同一套几何。
+
+    前提是长机**已经过了**这个航点（先判长机自己过点，再判僚机跟上），不然
+    刚起步时离航点也很远，会当场误触发。
+    """
+    import threading
+    wx, wy = float(wp_xy[0]), float(wp_xy[1])
+    lx, ly, _lz = sdk.world_to_local(wx, wy, CRUISE_AGL_M)
+
+    def _loop():
+        leader_passed = False
+        while not state['stop'] and not state['sent']:
+            try:
+                cx, cy, _ = sdk.get_local_position()
+            except Exception:
+                time.sleep(DISBAND_POLL_S)
+                continue
+            d = math.hypot(cx - lx, cy - ly)
+            if not leader_passed:
+                if d <= DISBAND_NEAR_M:
+                    leader_passed = True
+                    print(f'[长机] 已过航点 ({wx:.1f}, {wy:.1f})，开始等僚机过点', flush=True)
+                time.sleep(DISBAND_POLL_S)
+                continue
+            lag = (sdk.teammate_formation_lag()
+                   if hasattr(sdk, 'teammate_formation_lag') else None)
+            need = spacing_m + max(0.0, lag or 0.0)
+            if d >= need:
+                state['sent'] = True
+                try:
+                    sdk.send_to_teammate(ROUTE_DONE)
+                except Exception as exc:
+                    print(f'[长机] 解散通知没送到僚机（{exc}）', flush=True)
+                print(f'[长机] 僚机已过航点 ({wx:.1f}, {wy:.1f})'
+                      f'（长机离该点 {d:.1f} m ≥ {need:.1f} m），编队解散', flush=True)
+                return
+            time.sleep(DISBAND_POLL_S)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+
+    def _stop():
+        state['stop'] = True
+        t.join(timeout=2.0)
+    return _stop
 
 
 def _start_disband_watch(sdk, pad_xy, spacing_m, state):
