@@ -35,6 +35,7 @@ done
 
 LEADER=NX01
 FOLLOWER=NX02
+FSNX01=docker_sim-flight-stack-nx01-1
 IMAGE=contestant-sdk:latest
 WORKDIR="$PWD/contestant_template"
 SCRIPT="编队飞行示例.py"
@@ -142,6 +143,25 @@ docker run -d --name fm_follower --network host -v /etc/localtime:/etc/localtime
     --namespace "$FOLLOWER" --role follower --teammate "$LEADER" \
     --spacing "$SPACING" >/dev/null
 
+# ---- 实时监视：跟测试同时开 ----
+# 2026-09-30 用户定的规则："只要测试，就启动监控"。做成运行器的一部分而不是
+# 靠人（包括我）每次记得手动起——这个会话里已经漏起过两次，一次误以为在跑
+# （pgrep 匹配到了自己的 shell），一次干脆忘了。
+# 起在 flight-stack-nx01 容器里：那边的 DDS 环境是验证过的。显式传 DISPLAY，
+# `docker exec` 起的新 shell 不一定继承得到，不给的话会退回无窗口模式。
+MON_OUT="/logs/${SCRIPT%.py}_formation.png"
+MON_LOG="/logs/${SCRIPT%.py}_monitor.log"
+MON_LAYOUT=/opt/contest_mission_ws/src/contest_mission/config/sample_room_layout.yaml
+log "启动实时监视（窗口 + 报告 ${MON_OUT}）"
+docker exec -d -e DISPLAY="${DISPLAY:-:1}" "$FSNX01" bash -lc "
+    source /opt/ros/humble/setup.bash
+    export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
+           RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+           CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
+    python3 -u /opt/host_scripts/编队监视.py --layout '${MON_LAYOUT}' \
+        --route '${ROUTE}' --out '${MON_OUT}' --spacing ${SPACING} > '${MON_LOG}' 2>&1
+" >/dev/null 2>&1 || echo "（监视没起来，不影响飞行测试）" >&2
+
 # ---- 4. 等两边都报"编队飞行结束"；任一容器异常退出就停下来报错 ----
 DEADLINE=$(( $(date +%s) + TIMEOUT_S ))
 while :; do
@@ -149,7 +169,14 @@ while :; do
     for c in fm_leader fm_follower; do
         log_has "$c" '编队飞行结束' && done_cnt=$((done_cnt + 1))
     done
-    [ "$done_cnt" = "2" ] && { log "两机都已完成"; break; }
+    if [ "$done_cnt" = "2" ]; then
+        log "两机都已完成"
+        # 让监视收尾出图：它自带的"任务结束"判据不一定在所有流程里成立，
+        # 直接发 SIGINT，脚本收到就存 PNG+CSV 再退。给几秒让它写完。
+        docker exec "$FSNX01" pkill -INT -f 编队监视 >/dev/null 2>&1 || true
+        sleep 6
+        break
+    fi
 
     # 容器退了但没打印"编队飞行结束"=异常终止
     for c in fm_leader fm_follower; do
