@@ -494,6 +494,9 @@ class DroneSDK:
             raise ValueError('teammate_namespace不能为空——必须显式传入队友那架飞机的命名空间（方案1.5节/2.1节第3条）。')
 
         self.namespace = namespace.strip('/')
+        # takeoff()/land() 自动播的角色声光，每种动作只播第一次——见
+        # _play_role_sound_light()。任务流程里一趟要起降三次，重复播是噪声。
+        self._role_sound_light_done: set = set()
         self.role = role
         self.teammate_namespace = teammate_namespace.strip('/')
 
@@ -2963,10 +2966,20 @@ class DroneSDK:
     def _play_role_sound_light(self, action: str) -> None:
         """`takeoff()`/`land()`用：按角色播"侦察机起飞"/"任务机降落"这类
         事件。角色不是recon/supply时表格里没有对应语音，跳过。
+
+        **每种动作只播第一次**（2026-09-30 用户要求："任务机起飞降落播报只保留
+        第一次"）。任务流程里任务机一趟要起降三次——初次起飞、物资点取器材、
+        物资点放器材——`takeoff()`/`land()` 每次都自动播一遍，实测"任务机起飞"
+        播了 3 遍、"任务机降落"同理。评分/裁判如果按播报识别流程节点，重复的
+        那两遍就是噪声。所以同一个 DroneSDK 实例内，'起飞'和'降落'各只播一次。
         """
         prefix = _SOUND_LIGHT_ROLE_PREFIX.get(self.role)
         if prefix is None:
             return
+        if action in self._role_sound_light_done:
+            self._progress(f"{prefix}{action}已播过，不再重复")
+            return
+        self._role_sound_light_done.add(action)
         try:
             self.play_sound_light(f'{prefix}{action}')
         except SoundLightError as exc:
