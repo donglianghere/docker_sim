@@ -18,7 +18,7 @@
 就地（G 点）开始编队                   （在原地等长机发航线）
   ↓ 从 G 开始编队，NX01 在前 NX02 在后，规则跟《编队飞行示例》完全一样
   G -> D -> A，长机飞回自己起飞点上空时解散
-NX01 悬停在 A 点                      NX02 降落在自己起降点
+NX01 悬停在 A 点待命                      NX02 降落在自己起降点
 
 两个要点：
 
@@ -194,7 +194,7 @@ def recon(sdk):
     # 用，站位点算到了 3# 楼那一片、飞不过去（2026-09-29 实测）。
     编队.leader_route(sdk, [ROUTE_G, ROUTE_D], spacing_m=SPACING_M,
                       start_xy=ROUTE_G, final_xy=ROUTE_A)
-    编队._select_topic_at_a(sdk, ROUTE_A)
+    编队._hold_at_point_a(sdk, ROUTE_A)
     sdk.play_sound_light('侦察机任务完成')
 
 

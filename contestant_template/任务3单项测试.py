@@ -468,7 +468,7 @@ def recon(sdk):
     编队.leader_route(sdk, [ROUTE_G, ROUTE_D], spacing_m=SPACING_M,
                       start_xy=ROUTE_G, final_xy=ROUTE_A,
                       disband_after_follower_passes=ROUTE_D)
-    编队._select_topic_at_a(sdk, ROUTE_A)
+    编队._hold_at_point_a(sdk, ROUTE_A)
     # 任务完成的播报时机：**任务机确实落在自己的起降点上**（用户 2026-09-30）。
     # 不能拿"降落动作结束"当判据——任务机全程要降落三次（取器材、放器材、回家），
     # 前两次都不是任务结束。所以由任务机自己核对落点坐标后发事件，这边等它。

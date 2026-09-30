@@ -55,7 +55,7 @@ ROUTE_DONE_WAIT_S = 600.0     # 僚机等航线飞完的上限
 DISBAND_DEPART_M = 5.0        # 离起飞点超过这么远才算"已经出发"
 DISBAND_NEAR_M = 1.2          # 回到起飞点这么近 = 解散
 DISBAND_POLL_S = 0.2
-SELECT_TOPIC_HOVER_S = 15.0   # 长机到 A 点后悬停多久（选题占位，见 _select_topic_at_a）
+HOLD_AT_A_S = 15.0            # 长机回 A 点后悬停多久示例脚本才收尾（不降落）
                               # 悬停结束示例就返回，飞机留在空中不降落
 TURN_TIMEOUT_S = 15.0         # 每个航点转到航向角的上限（转 180° 实测十几秒）
 TURN_TOL_DEG = 5.0            # 差这么多度以内算转到位
@@ -202,7 +202,7 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
     start = tuple(start_xy) if start_xy is not None else pad
     tail = tuple(final_xy) if final_xy is not None else tuple(route_xy[0])
     waypoints = list(route_xy)
-    # 2026-09-29 样题流程：A->B->C->D 跑完之后**长机回到 A 点选题**，不是回起飞点。
+    # 2026-09-29 样题流程：A->B->C->D 跑完之后**长机回到 A 点待命**，不是回起飞点。
     # 所以收尾航点是 route_xy[0]（A），不是 pad。僚机那边不受影响——它收到
     # ROUTE_DONE 之后各回各的起降点降落（见 follower()）。
     if tuple(waypoints[-1]) != tail:
@@ -315,7 +315,7 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
 
     stop_disband()
     # 最后一段可能是"保持 LEG_SLOW_VEL_MPS 飞完"收尾的，限速还压着。编队段结束
-    # 后面还有别的飞行（长机回 A 点选题、任务2/3 的后续动作），把巡航限速还回去。
+    # 后面还有别的飞行（长机回 A 点待命、任务2/3 的后续动作），把巡航限速还回去。
     # 此刻长机已经到点停住，改限速是安全的。
     cruise = _LEG_SLOW.get('cruise')
     if cruise is not None and hasattr(sdk, 'set_max_vel'):
@@ -333,16 +333,16 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
 
 
 def leader(sdk, route_xy, spacing_m=4.0):
-    """长机：起飞 -> 编队航线(A B C G E G D) -> 回 A 点悬停选题。
+    """长机：起飞 -> 编队航线(A B C G E G D) -> 回 A 点悬停待命。
 
     2026-09-29 样题流程：跟僚机不一样，长机**不回起降点、也不降落**——航线
-    跑完之后回到 A 点悬停选题。僚机那边照旧回自己的起降点降落。
+    跑完之后回到 A 点悬停待命。僚机那边照旧回自己的起降点降落。
     """
     inbox = listen_standby(sdk)         # 必须在僚机可能发事件之前注册
     # 直接起飞到巡航高度，省掉"起飞到1米再 goto 爬上去"那一次纯垂直规划
     sdk.takeoff(height_m=CRUISE_AGL_M)
     leader_route(sdk, route_xy, inbox, spacing_m=spacing_m)
-    _select_topic_at_a(sdk, route_xy[0])
+    _hold_at_point_a(sdk, route_xy[0])
     sdk.play_sound_light('侦察机任务完成')
 
 
@@ -699,26 +699,26 @@ def _start_disband_watch(sdk, pad_xy, spacing_m, state):
     return _stop
 
 
-def _select_topic_at_a(sdk, point_a):
-    """长机在 A 点"选题"。
+def _hold_at_point_a(sdk, point_a):
+    """长机飞回 A 点悬停待命，**不降落**。
 
-    2026-09-29 用户明确：长机回 A 点之后**悬停**，不降落（上一版我自作主张
-    加了"就地降落"，撤掉）。
+    2026-09-30 订正：这个函数原来叫 `_select_topic_at_a`，满篇"选题动作待实现"
+    的警告，看着像还欠一块功能。跟用户确认过——"选题"就是**回 A 点等待**
+    而已，是个流程节点，飞机本身不需要做任何额外动作。所以没有待实现的东西，
+    改个名字、去掉那些误导人的警告。
 
-    ⚠️ **选题动作本身还没实现**——样题里"选题"具体要做什么（读标志物？
-    等地面站指令？）目前没有定义，这里只做到"飞到 A 点、悬停、把状态打出来"。
-    等选题的具体动作定了再把这个函数填上，调用点和飞行剖面都不用动。
+    示例脚本总得有个收尾，所以悬停 HOLD_AT_A_S 秒就返回；返回之后脚本不发
+    降落指令，飞机保持在 A 点悬停。
     """
     ax, ay = float(point_a[0]), float(point_a[1])
     lx, ly, lz = sdk.world_to_local(ax, ay, CRUISE_AGL_M)
-    print(f'[长机] 航线跑完，回 A 点 ({ax:.1f}, {ay:.1f}) 选题', flush=True)
+    print(f'[长机] 航线跑完，回 A 点 ({ax:.1f}, {ay:.1f}) 待命', flush=True)
     with sdk.fixed_altitude(lz):
         sdk.goto(lx, ly, lz)
-    print(f'[长机] 已到 A 点，悬停等待选题'
-          f'（选题动作待实现；示例在此悬停 {SELECT_TOPIC_HOVER_S:.0f} 秒后结束，不降落）',
-          flush=True)
-    time.sleep(SELECT_TOPIC_HOVER_S)
-    print('[长机] 选题段结束，保持在 A 点悬停', flush=True)
+    print(f'[长机] 已到 A 点，悬停待命'
+          f'（示例在此悬停 {HOLD_AT_A_S:.0f} 秒后结束，不降落）', flush=True)
+    time.sleep(HOLD_AT_A_S)
+    print('[长机] 保持在 A 点悬停', flush=True)
 
 
 #: 离起降点超过这么远，先用规划器飞过去，最后一段才交给 goto_direct。
