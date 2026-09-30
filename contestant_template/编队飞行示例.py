@@ -721,12 +721,42 @@ def _select_topic_at_a(sdk, point_a):
     print('[长机] 选题段结束，保持在 A 点悬停', flush=True)
 
 
+#: 离起降点超过这么远，先用规划器飞过去，最后一段才交给 goto_direct。
+#: goto_direct 走 precision_servo_node 的 coordinate_goto，限速参数
+#: `coordinate_max_speed_mps` 默认 **0.3 m/s**——它本来就是给"已经在起降点
+#: 附近、做最后一段精修"设计的（自己的 docstring 就写着"长距离时可能很慢"）。
+#: 编队场景下僚机解散时正好在自己起降点上方，距离短，没暴露问题；任务3 里
+#: 它要从物资点 (10,8) 飞回起降点 (12,3)，5.4 米全程 0.3 m/s，实测起飞到落地
+#: 花了 45 秒（2026-09-30 用户指出"速度怎么那么慢"）。
+LAND_APPROACH_FAR_M = 2.0
+
+
 def _land_at_pad(sdk):
-    """回自己起飞点降落。goto_direct 直线飞、不经过规划器，落点精度高一个
-    量级，但**没有避障**——只用在这种"已在起降点附近、确定无障碍"的收尾。"""
+    """回自己起飞点降落。
+
+    分两段：远距离用 `goto()`（走规划器、有避障、巡航速度）飞到起降点上空，
+    最后一段用 `goto_direct`（直线、不经规划器，落点精度高一个量级，但
+    **没有避障**）精修。只用 goto_direct 跑全程的话长距离会慢到不能看，
+    见 LAND_APPROACH_FAR_M 的说明。
+    """
     pad = _own_pad(sdk)
-    print(f'[{sdk.namespace}] 回起飞点 {pad} 降落', flush=True)
-    sdk.goto_direct(*sdk.world_to_local(pad[0], pad[1], CRUISE_AGL_M))
+    lx, ly, lz = sdk.world_to_local(pad[0], pad[1], CRUISE_AGL_M)
+    try:
+        cx, cy, _ = sdk.get_local_position()
+        far = math.hypot(cx - lx, cy - ly)
+    except Exception:
+        far = 0.0
+    if far > LAND_APPROACH_FAR_M:
+        print(f'[{sdk.namespace}] 回起飞点 {pad} 降落（还有 {far:.1f} m，'
+              f'先走规划器飞过去）', flush=True)
+        try:
+            with sdk.fixed_altitude(lz):
+                sdk.goto(lx, ly, lz)
+        except Exception as exc:
+            print(f'[{sdk.namespace}] 规划器飞不过去（{exc}），改用直线飞', flush=True)
+    else:
+        print(f'[{sdk.namespace}] 回起飞点 {pad} 降落', flush=True)
+    sdk.goto_direct(lx, ly, lz)          # 最后一段精修，落点精度靠它
     工具.land_or_confirm(sdk)
 
 
