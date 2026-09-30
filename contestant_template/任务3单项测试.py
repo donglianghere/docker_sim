@@ -114,8 +114,8 @@ IMAGE_W = 640
 IMAGE_H = 480
 FOCAL_PX = 381.35             # = (IMAGE_W/2)/tan(HFOV/2)，HFOV=80°，跟 camera_info 一致
 TAG_SIZE_M = 0.5              # 火情标志实际边长，用来按框宽估距离
-AIM_TOL_DEG = 3.0             # 画面水平偏差小于这个角度算居中
-AIM_TOL_Z_M = 0.12            # 垂直方向差这么多以内算居中
+AIM_TOL_XY_M = 0.12           # 横向（平行楼面）差这么多以内算对准
+AIM_TOL_Z_M = 0.12            # 垂直方向差这么多以内算对准
 AIM_MAX_TRIES = 5
 AIM_SETTLE_S = 1.5            # 转完等画面稳定
 # 垂直为什么要靠改高度而不是俯仰相机：前视/下视是两个**独立的固定安装**相机
@@ -133,6 +133,9 @@ EV_BREACHED = 'breach_done'           # NX01 -> NX02：破窗完成
 EV_EXTINGUISHED = 'extinguish_done'   # NX02 -> NX01：灭火弹发射完毕
 EV_INSPECT_DONE = 'inspect_done'      # NX01 -> NX02：三栋楼都巡检拍照完了
 EV_SPOT_CLEAR = 'spot_clear'          # NX01 -> NX02：我已离开发射点，位置让给你了
+EV_LANDED_HOME = 'supply_landed_home' # NX02 -> NX01：我已降落在**自己的起降点**上
+LANDED_HOME_TOL_M = 1.0               # 离自己起降点这么近才算"落在起降点上"
+LANDED_HOME_WAIT_S = 300.0
 
 
 class _Inbox:
@@ -338,15 +341,24 @@ def _supply_point_action(sdk, pwm, label, sound=None):
 
 
 def center_fire_in_view(sdk, tag='火情'):
-    """把火情标志**居中到前视画面**：左右靠转机头，上下靠改高度。返回是否对上了。
+    """把飞机挪到**正对火情窗口**的位置：机头垂直于楼面不动，横向平移 + 升降。
+    返回是否对上了。
 
-    为什么不用 `sdk.center_on_target()`：见 IMAGE_W 上面那段注释——它只认下视
-    相机。这里直接读前视检测框的偏移：
-      · 水平：`atan2(bbox_x - W/2, f)` -> 修 yaw（画面右 = yaw 要减小）
-      · 垂直：按框宽估距离（tag 实际 0.5 m），把 `atan2(bbox_y - H/2, f)` 这个
-        垂直角换算成高度差 -> 飞机升降过去（相机固定安装、不能俯仰，只能整机动）
-    两轴都进容差才算居中。
+    2026-09-30 订正：上一版只转机头让 tag 在画面里居中——那是**斜着瞄准**，
+    不是对准。飞机停在观察位 M(6,16)，而火情随机到东单元时 tag 在 x=6.5，
+    横向差 0.5 m；转机头能把它转到画面中心，但飞机仍然斜对着墙，沿机头前移
+    之后落点离窗口正前方还差近 0.5 m。弹丸要穿窗，得正对。
+
+    所以改成**机头锁死在垂直于楼面的方向**（调用方进来之前已经 face_yaw 到位），
+    两个误差都用平移消除：
+      · 横向：按框宽估距离（tag 实际 0.5 m），`dist * tan(atan2(bbox_x-W/2, f))`
+        就是飞机相对窗口中心的横向偏移，沿机头**右手方向**平移这么多；
+      · 垂直：同样的距离乘垂直角，整机升降（相机固定安装、不能俯仰）。
+    两轴都进容差才算对准。
+
+    为什么不用 `sdk.center_on_target()`：见 IMAGE_W 上面那段注释——它只认下视相机。
     """
+    yaw0 = sdk.get_current_yaw()            # 垂直于楼面的朝向，全程不动
     for i in range(1, AIM_MAX_TRIES + 1):
         try:
             det = sdk.wait_for_detection(HIGH_FIRE, timeout=4.0, camera='front')
@@ -357,31 +369,28 @@ def center_fire_in_view(sdk, tag='火情'):
         dx_rad = math.atan2(det.bbox_x - IMAGE_W / 2.0, FOCAL_PX)
         dy_rad = math.atan2(det.bbox_y - IMAGE_H / 2.0, FOCAL_PX)   # 画面 y 向下为正
         dist = FOCAL_PX * TAG_SIZE_M / max(1.0, det.bbox_width)
+        lat = dist * math.tan(dx_rad)        # >0：窗口在飞机右侧，要往右挪
         dz = -dist * math.tan(dy_rad)        # 目标在画面下方 -> 要降高度
         print(f'[{sdk.namespace}] 第{i}轮对准：{tag}在画面 ({det.bbox_x:.0f},{det.bbox_y:.0f})，'
-              f'水平 {math.degrees(dx_rad):+.1f}°，垂直 {math.degrees(dy_rad):+.1f}°，'
-              f'框宽 {det.bbox_width:.0f}px -> 距离约 {dist:.2f} m，高度差 {dz:+.2f} m',
-              flush=True)
-        if abs(dx_rad) <= math.radians(AIM_TOL_DEG) and abs(dz) <= AIM_TOL_Z_M:
-            print(f'[{sdk.namespace}] {tag}已居中（水平 {math.degrees(dx_rad):+.1f}°，'
-                  f'垂直 {dz:+.2f} m）', flush=True)
+              f'框宽 {det.bbox_width:.0f}px -> 距离约 {dist:.2f} m，'
+              f'横向 {lat:+.2f} m，高度 {dz:+.2f} m', flush=True)
+        if abs(lat) <= AIM_TOL_XY_M and abs(dz) <= AIM_TOL_Z_M:
+            print(f'[{sdk.namespace}] {tag}已对准（横向 {lat:+.2f} m，垂直 {dz:+.2f} m）',
+                  flush=True)
             return True
-        moved = False
-        if abs(dx_rad) > math.radians(AIM_TOL_DEG):
-            sdk.face_yaw(sdk.get_current_yaw() - dx_rad,
-                         timeout=编队.TURN_TIMEOUT_S, tolerance_deg=1.5)
-            moved = True
-        if abs(dz) > AIM_TOL_Z_M:
-            cx, cy, cz = sdk.get_local_position()
-            _, _, z_lo = sdk.world_to_local(0.0, 0.0, AIM_Z_MIN_M)
-            _, _, z_hi = sdk.world_to_local(0.0, 0.0, AIM_Z_MAX_M)
-            tz = min(max(cz + dz, z_lo), z_hi)
-            print(f'[{sdk.namespace}] 调高度 {cz:.2f} -> {tz:.2f}（局部系）', flush=True)
-            sdk.goto_direct(cx, cy, tz)      # 直线升降，不经规划器
-            moved = True
-        if moved:
-            time.sleep(AIM_SETTLE_S)
-    print(f'[{sdk.namespace}] {AIM_MAX_TRIES} 轮仍没把{tag}居中，按当前状态继续', flush=True)
+        cx, cy, cz = sdk.get_local_position()
+        # 机头右手方向（ENU/yaw 逆时针为正时，right = (sin yaw, -cos yaw)）
+        rx, ry = math.sin(yaw0), -math.cos(yaw0)
+        _, _, z_lo = sdk.world_to_local(0.0, 0.0, AIM_Z_MIN_M)
+        _, _, z_hi = sdk.world_to_local(0.0, 0.0, AIM_Z_MAX_M)
+        tx, ty = cx + rx * lat, cy + ry * lat
+        tz = min(max(cz + dz, z_lo), z_hi)
+        print(f'[{sdk.namespace}] 平移到 ({tx:.2f}, {ty:.2f}, {tz:.2f})（局部系）', flush=True)
+        sdk.goto_direct(tx, ty, tz)          # 直线平移/升降，不经规划器
+        # 平移不改朝向，但 goto_direct 之后朝向可能被带偏，复位一次
+        sdk.face_yaw(yaw0, timeout=编队.TURN_TIMEOUT_S, tolerance_deg=2.0)
+        time.sleep(AIM_SETTLE_S)
+    print(f'[{sdk.namespace}] {AIM_MAX_TRIES} 轮仍没对准{tag}，按当前状态继续', flush=True)
     return False
 
 
@@ -406,6 +415,7 @@ def recon(sdk):
     """侦察机：巡检拍照 -> （遇火情就走一轮协同灭火）-> 巡检完毕 -> 编队返回。"""
     at_e = _Inbox(sdk, EV_AT_E)
     done = _Inbox(sdk, EV_EXTINGUISHED)
+    landed_home = _Inbox(sdk, EV_LANDED_HOME)
 
     sdk.takeoff(height_m=CRUISE_AGL_M)
     sdk.play_sound_light('侦察机起飞')
@@ -429,6 +439,12 @@ def recon(sdk):
         # 识别/灭火失败把它带掉。
         _capture_photo(sdk, f'{bldg}楼')
         if not detect:
+            continue
+        if fired_any:
+            # 火情只可能有一处（premise：1#/2# 其中一栋）。已经协同灭过火了，
+            # 后面的楼只补拍那张必交的照片就走，不必再跑一遍识别+升降扫高度
+            # ——用户 2026-09-30："侦查机到 1# 楼，拍摄完即可前往 G 点等待"。
+            print(f'[{sdk.namespace}] 火情已处置，{bldg} 楼只拍照不再查', flush=True)
             continue
 
         sdk.play_sound_light('侦察机排查高层火情')
@@ -482,6 +498,16 @@ def recon(sdk):
                       start_xy=ROUTE_G, final_xy=ROUTE_A,
                       disband_after_follower_passes=ROUTE_D)
     编队._select_topic_at_a(sdk, ROUTE_A)
+    # 任务完成的播报时机：**任务机确实落在自己的起降点上**（用户 2026-09-30）。
+    # 不能拿"降落动作结束"当判据——任务机全程要降落三次（取器材、放器材、回家），
+    # 前两次都不是任务结束。所以由任务机自己核对落点坐标后发事件，这边等它。
+    try:
+        d = landed_home.wait(LANDED_HOME_WAIT_S)
+        print(f'[{sdk.namespace}] 任务机已降落在自己起降点 '
+              f'({float(d.get("x", 0)):.2f}, {float(d.get("y", 0)):.2f})', flush=True)
+    except TimeoutError:
+        print(f'[{sdk.namespace}] 等任务机回起降点超过 {LANDED_HOME_WAIT_S:.0f} 秒，仍播报完成',
+              flush=True)
     sdk.play_sound_light('侦察机任务完成')
 
 
@@ -581,7 +607,21 @@ def supply(sdk):
     # 降落、松开机械抓模拟释放器材，再回自己起降点降落。
     _supply_point_action(sdk, RELEASE_PWM, '释放灭火器材')
     编队._land_at_pad(sdk)
-    sdk.play_sound_light('任务机已降落')
+    # 核对**真的落在自己的起降点上**再播报（用户 2026-09-30）：全程要降落三次
+    # （取器材、放器材、回家），"降落动作完成"本身说明不了任务结束。
+    pad = 编队._own_pad(sdk)
+    px, py, _ = sdk.get_local_position()
+    wx, wy = sdk.local_to_world(px, py, 0.0)[:2]
+    d = math.hypot(wx - pad[0], wy - pad[1])
+    if d <= LANDED_HOME_TOL_M:
+        print(f'[{sdk.namespace}] 已降落在自己起降点 ({wx:.2f}, {wy:.2f})，'
+              f'离标称点 {d:.2f} m', flush=True)
+        sdk.play_sound_light('任务机已降落')
+    else:
+        print(f'[{sdk.namespace}] ⚠️ 落点 ({wx:.2f}, {wy:.2f}) 离自己起降点 {d:.2f} m '
+              f'(>{LANDED_HOME_TOL_M:.1f} m)，不算落在起降点上', flush=True)
+    # 无论落点准不准都要通知侦察机，否则它会一直等到超时
+    sdk.send_to_teammate(EV_LANDED_HOME, x=wx, y=wy, ok=bool(d <= LANDED_HOME_TOL_M))
 
 
 def main():

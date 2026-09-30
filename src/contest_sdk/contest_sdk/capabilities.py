@@ -1566,7 +1566,11 @@ class DroneSDK:
             img = img[:, :, :3]
         elif enc == 'mono8':
             img = _np.repeat(img, 3, axis=2)
-        img = _np.ascontiguousarray(img)
+        # **必须真拷贝一份**：`np.frombuffer()` 返回的是只读数组，而
+        # `ascontiguousarray()` 在数组本来就连续时直接返回原对象、不拷贝，
+        # 只读标志也就跟着留下来——烧时间戳那一步写进去会抛
+        # "assignment destination is read-only"，2026-09-30 实测三张照片全废。
+        img = _np.array(img, dtype=_np.uint8, order='C', copy=True)
         if timestamp:
             self._stamp_image(img, time.strftime('%Y-%m-%d %H:%M:%S'))
 
