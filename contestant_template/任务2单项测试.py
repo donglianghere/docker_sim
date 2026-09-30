@@ -120,11 +120,13 @@ def recon(sdk):
     sdk.takeoff(height_m=CRUISE_AGL_M)
     sdk.play_sound_light('侦察机起飞')
 
-    # ---- 航点飞行 A B C G，到 G 打开下视相机 ----
+    # ---- 航点飞行 A B C G，到 G 开始下视搜索 ----
     for wp, name in ((ROUTE_A, 'A'), (ROUTE_B, 'B'), (ROUTE_C, 'C'), (ROUTE_G, 'G')):
         _goto_world(sdk, wp[0], wp[1], f'航点{name}')
-    print(f'[{sdk.namespace}] 已到 G 点，打开下视相机，开始搜索地面火情', flush=True)
-    sdk.set_camera_view('down')
+    # 不需要"切相机"：前视/下视是两个独立的固定安装相机，各自一路话题，
+    # 检测时用 camera='down' 选那一路就行（set_camera_view 已于 2026-09-30 删除，
+    # 它发的是给一个当前模型里根本不存在的可动关节的指令，纯空转）。
+    print(f'[{sdk.namespace}] 已到 G 点，开始用下视相机搜索地面火情', flush=True)
 
     # ---- G -> E 边飞边找 ----
     # goto 是阻塞的，所以先把目标发出去，在后台线程里飞，主线程盯检测；

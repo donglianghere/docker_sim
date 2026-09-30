@@ -189,11 +189,9 @@ def _capture_photo(sdk, tag, camera='front'):
     stamp = time.strftime('%H%M%S')
     path = f'{PHOTO_DIR}/{sdk.namespace}_{stamp}_{tag}.png'
     try:
-        # 不调 set_camera_view：前视/下视是**两个独立的固定安装相机**
-        # （模型里 {ns}_front_camera_joint / {ns}_down_camera_joint 都是 type='fixed'），
-        # 不存在"转关节切视角"这回事；set_camera_view 发的是给
-        # {ns}_switchable_camera_joint 的指令，那个关节在当前模型里根本没有，
-        # 调了是空转，还白等 0.6 秒。capture_photo 按名字订阅对应话题就够了。
+        # 前视/下视是两个独立的固定安装相机（模型里两个 camera_joint 都是
+        # type='fixed'），不存在"切视角"这回事，capture_photo 按名字订阅
+        # 对应话题就够了。
         sdk.capture_photo(path, camera=camera)
         print(f'[{sdk.namespace}] 拍照回传 {tag}：{path}'
               f'（位置 ({wx:.2f}, {wy:.2f})，朝向 {math.degrees(sdk.get_current_yaw()):.0f}°）',

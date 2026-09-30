@@ -810,19 +810,12 @@ class DroneSDK:
             _YawParamPoint, 'traj_server/alt_param', 10)
         self._yaw_param_pub = self._node.create_publisher(_YawParamPoint, 'traj_server/yaw_param', 10)
 
-        # ---- set_camera_view() ----
-        # 2026-09-18新增：单相机+可动关节两档预设视角（前视/下视）方案，
-        # 取代已删除的`set_camera_enabled()`（那套"多个相机各自开关"的
-        # 方案排查一整个会话都没能稳定复现可靠性，且今天联网核实确认了
-        # Gazebo Classic多相机共享渲染队列是架构级限制、不是能配置解决的
-        # 问题，见DEBUG_JOURNAL.md 2026-09-17/09-18记录）——这架飞机全局
-        # 只有一个真实相机，通过`libgazebo_ros_joint_pose_trajectory.so`
-        # （官方原生插件，不是自己写的补丁）命令关节转到两个预设角度之一，
-        # 不存在"多个相机同时渲染"这个前提条件，从根上避开那个架构限制。
-        # 话题名`set_joint_trajectory`是这个插件自己写死的接口，不能改。
-        from trajectory_msgs.msg import JointTrajectory as _JointTrajectory
-        self._camera_joint_traj_pub = self._node.create_publisher(
-            _JointTrajectory, 'set_joint_trajectory', 10)
+        # set_camera_view() 已删除（2026-09-30）：它发的是给
+        # `{ns}_switchable_camera_joint` 的 JointTrajectory，而当前相机方案
+        # （docker-compose.yml 里 CAMERA_TYPE_NX01/02=camera）生成的模型里
+        # 是**两个独立的固定安装相机**，两个 camera_joint 都是 type='fixed'，
+        # 那个可动关节根本不存在，调用是空转。选哪一路相机靠订阅对应话题
+        # （见 capture_photo / wait_for_detection 的 camera 参数），不需要切视角。
 
         # ---- wait_for_detection ----
         # 常驻订阅（不是每次wait_for_detection都新建/销毁），最新一帧检测
@@ -1405,48 +1398,6 @@ class DroneSDK:
         self._alt_mode_pub.publish(msg)
         self._progress('定高已关闭（高度按轨迹走）')
 
-    def set_camera_view(self, view: str) -> None:
-        """把这架飞机唯一那个真实相机转到`'front'`（前视）或`'down'`
-        （下视）预设角度。取代已删除的`set_camera_enabled()`——这架飞机
-        全局只有一个真实相机传感器（挂在一个可动关节上，两个预设角度间
-        切换），不是"多个相机各自开关"，从根上避开Gazebo Classic多相机
-        共享渲染队列这个架构级限制（联网核实过、不是能配置调参解决的
-        问题，见DEBUG_JOURNAL.md 2026-09-17/09-18记录）。
-
-        纯发布、不等确认——底层是`libgazebo_ros_joint_pose_trajectory.so`
-        这个官方原生插件（不是自己打的补丁），发一条只含一个目标点的
-        `JointTrajectory`消息，插件在下一个物理步直接把关节角度设到目标
-        值（`Joint::SetPosition()`，物理引擎原生API，不会被关节自身的
-        运动约束"弹回去"，这跟直接对固定关节子link调`SetEntityState()`
-        不是一回事——后者会被物理引擎每步重新按固定约束拽回原位，前者
-        不会）。关节转动本身需要一点时间（物理引擎按目标角度插值到位，
-        不是瞬移），切换后过渡的这一小段时间画面会经过中间角度，不建议
-        紧接着切换指令就假设已经到位，需要用到检测结果的调用方应该等
-        一小段时间（比如零点几秒）再开始依赖检测结果。
-
-        Args:
-            view: `'front'`（前视，机体正前方水平朝向）或`'down'`
-                （下视，绕本地Y轴俯仰90度朝正下方）——跟仿真侧
-                `gen_iris_mid360_sdf.py::CAMERA_VIEW_JOINT_ANGLE`的角度
-                约定完全对应（0弧度=front，1.5707963弧度=down）。
-        """
-        angle_by_view = {'front': 0.0, 'down': 1.5707963}
-        if view not in angle_by_view:
-            raise ValueError(f"view必须是{list(angle_by_view)}之一，收到{view!r}")
-
-        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-        from builtin_interfaces.msg import Duration as _Duration
-
-        msg = JointTrajectory()
-        msg.header.frame_id = 'world'  # 让插件在切关节角度时不去额外挪动整机世界位姿，见其源码说明
-        msg.joint_names = [f'{self.namespace}_switchable_camera_joint']
-        point = JointTrajectoryPoint()
-        point.positions = [angle_by_view[view]]
-        point.time_from_start = _Duration(sec=0, nanosec=0)  # 立刻切换，不是分段插值动画
-        msg.points = [point]
-        self._camera_joint_traj_pub.publish(msg)
-        self._progress(f"相机视角 -> {'前视' if view == 'front' else '下视'}")
-
     # ------------------------------------------------------------------
     # 抓一帧相机图存盘（2026-09-30 新增，任务3"拍照回传"要用）
     # ------------------------------------------------------------------
@@ -1561,8 +1512,8 @@ class DroneSDK:
             path: 存到哪。目录不存在会自动建。
             camera: `'front'` 前视 / `'down'` 下视。前视和下视是**两个独立的
                 固定安装相机**（模型里两个 camera_joint 都是 `type='fixed'`），
-                各自一路话题，这个参数就是选订阅哪一路，**不需要**先调
-                `set_camera_view()`——当前模型里没有可动的相机关节。
+                各自一路话题，这个参数就是选订阅哪一路——不存在"切视角"
+                这回事（相机装死的，2026-09-30 已删掉 set_camera_view）。
             timeout: 等一帧图最多等多久。
             fresh: True（默认）只接受**调用之后**新到的帧，避免拿到切视角前
                 的旧画面；False 则有缓存就直接用。

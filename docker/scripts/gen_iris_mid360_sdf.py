@@ -295,7 +295,7 @@ CAMERA_SDF_TEMPLATE = """
 # 某个朝向被自遮挡，参照CAMERA_MOUNTS的调整方式继续微调
 # SWITCHABLE_CAMERA_MOUNT_XYZ即可，不需要改这份模板结构。
 #
-# 关节角度约定（跟`set_camera_view()`/`gazebo_ros_joint_pose_trajectory`
+# 关节角度约定（跟`gazebo_ros_joint_pose_trajectory`
 # 配合）：0弧度=前视（本地+X轴=机体正前方，跟原来固定的front挂载同一个
 # 朝向约定），1.5707963弧度(90°)=下视（绕本地Y轴转90度，跟原来固定的
 # down挂载pitch=1.5707963是同一个旋转方向，已经反复实测验证过朝向正确）。
@@ -372,7 +372,7 @@ def merge_switchable_camera(sdf_path: str, namespace: str, initial_view: str = "
     """焊接单相机+可动关节（前视/下视两档预设角度）。`initial_view`是这架
     飞机spawn出来那一刻关节的初始角度对应哪个朝向——注意这只决定"关节
     初始角度写几"，不是运行时切换用的（运行时切换靠contest_sdk的
-    `set_camera_view()`发`set_joint_trajectory`消息，两者是完全独立的
+    外部发`set_joint_trajectory`消息切视角，两者是完全独立的
     两条路径，只是复用同一个角度约定表`CAMERA_VIEW_JOINT_ANGLE`）。
 
     SDF本身不支持给revolute关节声明"非零初始角度"这个语义（关节永远从
