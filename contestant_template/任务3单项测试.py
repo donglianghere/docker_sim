@@ -1,41 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""任务3 单项测试：高层火情侦查 -> 破窗 -> 灭火 -> 编队返航。
+"""任务3 单项测试：巡检拍摄 -> 协同灭火 -> 编队返回。
 
-前提（2026-09-29 用户指定）：火情**只可能**在 M(6,16) 或 N(14,16) 朝向 90°
-（正北 +Y）方向的那两座楼上，高度 1.5 m 或 2.5 m。
-  M(6,16) 正北 3.5 m 处是 2# 楼（(5.5,19.5)+(6.5,19.5) 两根合一栋）
-  N(14,16) 正北 3.5 m 处是 1# 楼（(13.5,19.5)+(14.5,19.5)）
-所以 M/N 是**观察位**，不是楼本身。
+任务3 分三个过程：**巡检拍摄 -> 协同灭火 -> 编队返回**（2026-09-30 用户定义）。
 
-流程（2026-09-30 用户重新指定 M 点的动作顺序）：
+① 巡检拍摄（侦察机）
+   三栋楼**每栋都必须拍一张照片并回传**，按楼号 3 -> 2 -> 1 的顺序：
+       3#  在 M(6,16) 朝 -90°（正南）拍      —— 只拍照
+       2#  在 M(6,16) 朝 +90°（正北）拍      —— 拍照 + 开高楼火情识别
+       1#  在 N(14,16) 朝 +90°（正北）拍     —— 拍照 + 开高楼火情识别
+   面朝 2#/1# 时识别到火情就当场对准、插入一轮协同灭火；灭完继续巡检下一栋。
+   三栋走完即"巡检完毕"，进入编队返回。
+   （楼的坐标来自 sample_room_layout.yaml：3#(5.5,12.5) 2#(5.5,19.5) 1#(13.5,19.5)，
+     M/N 是**观察位**不是楼本身，各在对应楼南侧 3.5 m。火情高度 1.5 或 2.5 m。）
 
-侦察机 NX01                                任务机 NX02
-──────────────────────────────────────     ──────────────────────────
-起飞 -> 航点 A B C G E
-  （每个航点先把机头转到下一段方向再走，航段内航向不变）
-飞到 M，2 m 高度
-  ① 朝正南给 3# 楼拍照回传
-  ② 原地转 180° 对准正北的 2# 楼
-  ③ 检测高层火情并拍照
-┌ 情况①：2# 有火情
-│  对准 -> 沿机头前移 1.5 m
-│  通报火情 ─────────────────────────►    起飞 -> 飞 E 点待命
-│  等任务机到 E ◄─────────────────────    到位通报
-│  发射破窗弹 ───────────────────────►    收到"已破窗"
-│  等灭火完成 ◄──────────────────────     飞到侦察机的发射点，连发 4 发灭火弹
-│  ④ 灭完火后飞 N，给 1# 楼拍照
-└  飞回 G
-┌ 情况②：2# 没有火情
-│  转去 N -> 对准 1# 楼 -> 检测并拍照（这一支 1# 当场就拍了，不再补一趟）
-└  之后同情况①：通报 -> 破窗 -> 等灭火 -> 回 G
-从 G 开始编队返回（规则同《编队飞行示例》），NX01 悬停 A、NX02 降落起降点
+② 协同灭火（只可能发生在 2#、1# 两栋楼前）
+   侦察机 NX01                          任务机 NX02
+   ───────────────────────────────      ──────────────────────────────
+   识别到火情 -> 对准 -> 前移 1.5 m
+   通报火情 + 播报，**原地等待** ─────►  起飞 -> 飞 E 点待命
+   等任务机到 E ◄───────────────────     到位通报
+   发射破窗弹 + 播报 ───────────────►   收到"已破窗"
+   有下一个巡检点就去下一个，            飞到侦察机位置 -> 发射 4 发灭火弹
+   没有就去 G 等灭火完成                 发射完毕通报 ────────────┐
+                                        侦察机已巡检完毕 -> 就近入列│
+                                        没完 -> 等它完 -> 就近入列 ┘
 
-三栋楼相对观察位的方位（坐标来自 sample_room_layout.yaml）：
-  3# (5.5,12.5) 在 M(6,16) 正南 3.5 m
-  2# (5.5,19.5) 在 M(6,16) 正北 3.5 m
-  1# (13.5,19.5) 在 N(14,16) 正北 3.5 m
-火情只可能在 1#/2# 其中一栋，高度 1.5 m 或 2.5 m。M/N 是**观察位**，不是楼本身。
+③ 编队返回
+   从 G 开始编队（规则同《编队飞行示例》），NX01 悬停 A 点、NX02 降落自己起降点。
+
+两栋楼都可能有火情，所以灭火周期两边都写成**可重入**的：事件信箱收完复位，
+任务机每轮结束后等"下一次火情通报"或"侦察机巡检完毕"，先到哪个走哪个。
 
 拍照走 SDK 的 `capture_photo()`（2026-09-30 新增），存进 /logs（挂给地面站的
 目录）即视为回传。
@@ -65,9 +60,13 @@ OBSERVE_AGL_M = 2.0                   # 用户指定：在 M 点悬停于 2 米�
 #   3# (5.5,12.5) 在 M(6,16) 的**正南**  -> 机头 -90°
 #   2# (5.5,19.5) 在 M(6,16) 的**正北**  -> 机头 +90°（从 3# 原地转 180° 过来）
 #   1# (13.5,19.5) 在 N(14,16) 的**正北** -> 机头 +90°
-YAW_TO_3F_DEG = -90.0                 # M 点朝 3# 楼
-YAW_TO_2F_DEG = 90.0                  # M 点转 180° 朝 2# 楼
-YAW_TO_1F_DEG = 90.0                  # N 点朝 1# 楼
+# 巡检站点表：(楼号, 观察位, 观察位名字, 机头朝向°, 这栋楼要不要查火情)
+# 按楼号 3 -> 2 -> 1 的顺序走。3# 只拍照不查火情——火情只可能在 1#/2# 两栋。
+INSPECT_STATIONS = (
+    ('3#', POINT_M, 'M', -90.0, False),
+    ('2#', POINT_M, 'M',  90.0, True),
+    ('1#', POINT_N, 'N',  90.0, True),
+)
 PHOTO_DIR = '/logs/任务3照片'          # 拍照存这儿（/logs 是挂给地面站的目录）
 FIRE_HEIGHTS_M = (1.5, 2.5)           # 火情只可能在这两个高度
 FORWARD_BEFORE_FIRE_M = 1.5           # 对准后沿机头前移这么多再发射
@@ -84,6 +83,7 @@ EV_FIRE = 'high_fire_found'           # NX01 -> NX02：火情位置 + 侦察机�
 EV_AT_E = 'supply_at_standby'         # NX02 -> NX01：我到 E 点待命了
 EV_BREACHED = 'breach_done'           # NX01 -> NX02：破窗完成
 EV_EXTINGUISHED = 'extinguish_done'   # NX02 -> NX01：灭火弹发射完毕
+EV_INSPECT_DONE = 'inspect_done'      # NX01 -> NX02：三栋楼都巡检拍照完了
 
 
 class _Inbox:
@@ -104,6 +104,25 @@ class _Inbox:
         if not self._ev.wait(timeout):
             raise TimeoutError(f'等事件 {self.name} 超过 {timeout:.0f} 秒')
         return self.data
+
+    def ready(self):
+        return self._ev.is_set()
+
+    def clear(self):
+        """收完一次复位，好接下一次。1#/2# 两栋楼都可能有火情，灭火周期要能跑第二轮。"""
+        self._ev.clear()
+        self.data = {}
+
+
+def _wait_any(boxes, timeout):
+    """等这几个信箱里**任意一个**来消息，返回先到的那个；都没来就抛超时。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for b in boxes:
+            if b.ready():
+                return b
+        time.sleep(0.1)
+    raise TimeoutError(f'等事件 {[b.name for b in boxes]} 超过 {timeout:.0f} 秒')
 
 
 def _capture_photo(sdk, tag, camera='front'):
@@ -216,6 +235,7 @@ def _aim_and_step_in(sdk):
 # 侦察机 NX01
 # ----------------------------------------------------------------------------
 def recon(sdk):
+    """侦察机：巡检拍照 -> （遇火情就走一轮协同灭火）-> 巡检完毕 -> 编队返回。"""
     at_e = _Inbox(sdk, EV_AT_E)
     done = _Inbox(sdk, EV_EXTINGUISHED)
 
@@ -225,55 +245,63 @@ def recon(sdk):
     _fly_route(sdk, [('A', ROUTE_A), ('B', ROUTE_B), ('C', ROUTE_C),
                      ('G', ROUTE_G), ('E', ROUTE_E)])
 
-    # ---- M 点（2 m 高度）----
-    # 顺序是用户 2026-09-30 定的：① 先给正南的 3# 楼拍照回传；② 原地转 180°
-    # 对准正北的 2# 楼，查火情并拍照；③ 有火就灭；④ 灭完再去 N 给 1# 楼拍照。
-    # 注意 N 点那张照片**在灭火之后**——上一版是在破窗之后、灭火之前去拍的。
-    _fly_route(sdk, [('M', POINT_M)], z_agl=OBSERVE_AGL_M)
-    sdk.face_yaw(math.radians(YAW_TO_3F_DEG))
-    _capture_photo(sdk, '3号楼')
-    print(f'[{sdk.namespace}] 原地转 180° 对准 2# 楼', flush=True)
-    sdk.face_yaw(math.radians(YAW_TO_2F_DEG))
-    det = _inspect_here(sdk)
-    _capture_photo(sdk, '2号楼')
+    # ================= 过程① 巡检拍摄 =================
+    # 三栋楼每栋必须拍一张并回传，按 3 -> 2 -> 1 走。面朝 2#/1# 时开火情识别，
+    # 识别到就当场插入一轮协同灭火（过程②），灭完继续巡检下一栋。
+    at_station = None          # 当前停在哪个观察位，同一个位就不重复飞
+    fired_any = False
+    for idx, (bldg, pt, pt_name, yaw_deg, detect) in enumerate(INSPECT_STATIONS):
+        if at_station != pt_name:
+            _fly_route(sdk, [(pt_name, pt)], z_agl=OBSERVE_AGL_M)
+            at_station = pt_name
+        print(f'[{sdk.namespace}] 在 {pt_name} 点转到 {yaw_deg:.0f}° 巡检 {bldg} 楼', flush=True)
+        sdk.face_yaw(math.radians(yaw_deg), timeout=编队.TURN_TIMEOUT_S,
+                     tolerance_deg=编队.TURN_TOL_DEG)
+        # 先拍照再查火情：照片是硬性交付物（每栋楼必须有一张），不能让后面的
+        # 识别/灭火失败把它带掉。
+        _capture_photo(sdk, f'{bldg}楼')
+        if not detect:
+            continue
 
-    found_at = 'M'
-    if det is None:
-        # 2# 没有火情：按原premise（火情只可能在 1#/2# 其中一栋）转去 N 侧。
-        # 这一支里 1# 的照片就在识别现场拍，不必等灭完火再拍一次。
-        print(f'[{sdk.namespace}] 2# 楼没有火情，转去 N 点看 1# 楼', flush=True)
-        _fly_route(sdk, [('N', POINT_N)], z_agl=OBSERVE_AGL_M)
-        sdk.face_yaw(math.radians(YAW_TO_1F_DEG))
+        sdk.play_sound_light('侦察机排查高层火情')
         det = _inspect_here(sdk)
-        _capture_photo(sdk, '1号楼')
-        found_at = 'N'
         if det is None:
-            raise RuntimeError('2#、1# 两栋楼都没发现高层火情，任务3 中止')
+            print(f'[{sdk.namespace}] {bldg} 楼没有火情，继续巡检', flush=True)
+            continue
 
-    fire_pos = _aim_and_step_in(sdk)
-    print(f'[{sdk.namespace}] 火情在 {found_at} 侧，发射点 ({fire_pos[0]:.2f}, {fire_pos[1]:.2f})',
-          flush=True)
-    sdk.send_to_teammate(EV_FIRE, x=fire_pos[0], y=fire_pos[1], z=fire_pos[2], at=found_at)
+        # ================= 过程② 协同灭火 =================
+        sdk.play_sound_light('侦察机发现高楼火情')
+        fire_pos = _aim_and_step_in(sdk)
+        at_station = None       # 前移过了，不再在观察位上
+        print(f'[{sdk.namespace}] {bldg} 楼有火情，发射点 '
+              f'({fire_pos[0]:.2f}, {fire_pos[1]:.2f})，通报任务机并原地等待', flush=True)
+        sdk.send_to_teammate(EV_FIRE, x=fire_pos[0], y=fire_pos[1],
+                             z=fire_pos[2], at=bldg)
+        sdk.play_sound_light('侦察机通报高层火情')
 
-    # ---- 等任务机到 E 待命，再发射破窗弹 ----
-    print(f'[{sdk.namespace}] 等任务机到 E 点待命…', flush=True)
-    at_e.wait(AT_E_WAIT_S)
-    sdk.play_sound_light('侦察机发射破窗弹')
-    高楼.fire_launcher(sdk, '发射破窗弹')
-    sdk.send_to_teammate(EV_BREACHED)
-    print(f'[{sdk.namespace}] 破窗完成，已通知任务机', flush=True)
+        at_e.wait(AT_E_WAIT_S)          # 原地等任务机到 E 点待命
+        print(f'[{sdk.namespace}] 任务机已到 E 点，发射破窗弹', flush=True)
+        sdk.play_sound_light('侦察机发射破窗弹')
+        高楼.fire_launcher(sdk, '发射破窗弹')
+        sdk.send_to_teammate(EV_BREACHED)
+        sdk.play_sound_light('侦察机破窗完成')
+        at_e.clear()                    # 复位，下一栋楼要是也有火情还能再收一次
+        done.clear()
+        fired_any = True
+        # 发射完就走：还有下一个巡检点就去下一个，没有就到 G 等灭火完成。
+        # 不在这里等 EV_EXTINGUISHED——那是任务机的活，侦察机的巡检不该被它挡住。
+        if idx + 1 < len(INSPECT_STATIONS):
+            print(f'[{sdk.namespace}] 还有下一个巡检点，先去巡检', flush=True)
 
-    # ---- 等灭火完成，从 G 开始编队返航 ----
-    print(f'[{sdk.namespace}] 等任务机灭火完成…', flush=True)
-    done.wait(EXTINGUISH_WAIT_S)
-
-    # 灭完火再去 N 给 1# 楼拍照（用户 2026-09-30 指定的顺序），然后回 G 起编队。
-    # 火情在 N 侧那一支里 1# 已经拍过了，不重复跑一趟。
-    if found_at == 'M':
-        _fly_route(sdk, [('N', POINT_N)], z_agl=OBSERVE_AGL_M)
-        sdk.face_yaw(math.radians(YAW_TO_1F_DEG))
-        _capture_photo(sdk, '1号楼')
+    # ---- 巡检完毕 ----
+    print(f'[{sdk.namespace}] 三栋楼巡检拍照完毕', flush=True)
+    sdk.send_to_teammate(EV_INSPECT_DONE)
     _fly_route(sdk, [('G', ROUTE_G)])
+    if fired_any:
+        print(f'[{sdk.namespace}] 在 G 点等任务机灭火完成…', flush=True)
+        done.wait(EXTINGUISH_WAIT_S)
+
+    # ================= 过程③ 编队返回 =================
     # start_xy 要的是**世界坐标**（航线本身就是世界系）。这里飞机刚飞到 G，
     # 直接用 ROUTE_G——早先传 get_local_position() 的局部坐标，被当成世界坐标
     # 用，站位点算到了 3# 楼那一片、飞不过去（2026-09-29 实测）。
@@ -287,48 +315,77 @@ def recon(sdk):
 # 任务机 NX02
 # ----------------------------------------------------------------------------
 def supply(sdk):
+    """任务机：等火情通报 -> 飞 E 待命 -> 破窗后到侦察机位置发射灭火弹 ->
+    （侦察机巡检完了就）就近入列，编队返回。
+
+    灭火周期写成循环：1#/2# 两栋楼都可能有火情，侦察机可能通报两次。每轮结束
+    后等"下一次火情通报"或"侦察机巡检完毕"，先到哪个走哪个。
+    """
     fire = _Inbox(sdk, EV_FIRE)
     breached = _Inbox(sdk, EV_BREACHED)
+    inspect_done = _Inbox(sdk, EV_INSPECT_DONE)
     route_done = 编队._Inbox(sdk, 编队.ROUTE_DONE)
     route_plan = 编队._Inbox(sdk, 编队.ROUTE_PLAN)
 
+    airborne = False
     print(f'[{sdk.namespace}] 等侦察机通报高层火情…', flush=True)
-    d = fire.wait(AT_E_WAIT_S)
-    fx, fy, fz = float(d['x']), float(d['y']), float(d.get('z', CRUISE_AGL_M))
-    print(f'[{sdk.namespace}] 收到火情：{d.get("at")} 侧，发射点 ({fx:.2f}, {fy:.2f})',
-          flush=True)
+    while True:
+        box = _wait_any([fire, inspect_done], EXTINGUISH_WAIT_S)
+        if box is inspect_done and not fire.ready():
+            print(f'[{sdk.namespace}] 侦察机已巡检完毕，准备入列', flush=True)
+            break
 
-    sdk.takeoff(height_m=CRUISE_AGL_M)
-    sdk.play_sound_light('任务机起飞')
+        d = fire.wait(1.0)
+        fx, fy, fz = float(d['x']), float(d['y']), float(d.get('z', CRUISE_AGL_M))
+        print(f'[{sdk.namespace}] 收到火情：{d.get("at")} 楼，侦察机发射点 '
+              f'({fx:.2f}, {fy:.2f})', flush=True)
+        fire.clear()
 
-    # ---- 到 E 点待命 ----
-    _goto_world(sdk, ROUTE_E[0], ROUTE_E[1], 'E点待命位')
-    sdk.send_to_teammate(EV_AT_E)
-    print(f'[{sdk.namespace}] 已在 E 点待命，等侦察机破窗', flush=True)
-    breached.wait(BREACH_WAIT_S)
+        if not airborne:
+            sdk.takeoff(height_m=CRUISE_AGL_M)
+            sdk.play_sound_light('任务机起飞')
+            airborne = True
 
-    # ---- 到侦察机的发射点，连发 4 发灭火弹 ----
-    lx, ly, _lz = sdk.world_to_local(fx, fy, CRUISE_AGL_M)
-    print(f'[{sdk.namespace}] 飞往发射点 ({fx:.2f}, {fy:.2f})', flush=True)
-    with sdk.fixed_altitude(fz):
-        sdk.goto(lx, ly, fz)
-    try:
-        sdk.center_on_target(HIGH_FIRE, timeout=30.0)
-        print(f'[{sdk.namespace}] 已对准高层火情', flush=True)
-    except Exception as exc:
-        print(f'[{sdk.namespace}] 没对上火情标识（{exc}），按通报坐标发射', flush=True)
+        # ---- 到 E 点待命，通报到位，等破窗 ----
+        _goto_world(sdk, ROUTE_E[0], ROUTE_E[1], 'E点待命位')
+        sdk.send_to_teammate(EV_AT_E)
+        sdk.play_sound_light('任务机高层灭火已就位')
+        print(f'[{sdk.namespace}] 已在 E 点待命，等侦察机破窗', flush=True)
+        breached.wait(BREACH_WAIT_S)
+        breached.clear()
 
-    sdk.play_sound_light('任务机发射灭火弹')
-    for i in range(1, EXTINGUISHER_SHOTS + 1):
-        高楼.fire_launcher(sdk, f'发射灭火弹 {i}/{EXTINGUISHER_SHOTS}')
-        if i < EXTINGUISHER_SHOTS:
-            time.sleep(SHOT_INTERVAL_S)
-    sdk.send_to_teammate(EV_EXTINGUISHED)
-    print(f'[{sdk.namespace}] {EXTINGUISHER_SHOTS} 发灭火弹发射完毕，已通知侦察机',
-          flush=True)
+        # ---- 到侦察机的发射点，连发 4 发灭火弹 ----
+        lx, ly, _lz = sdk.world_to_local(fx, fy, CRUISE_AGL_M)
+        print(f'[{sdk.namespace}] 飞往侦察机位置 ({fx:.2f}, {fy:.2f})', flush=True)
+        with sdk.fixed_altitude(fz):
+            sdk.goto(lx, ly, fz)
+        sdk.play_sound_light('任务机到达瞄准点')
+        try:
+            sdk.center_on_target(HIGH_FIRE, timeout=30.0)
+            print(f'[{sdk.namespace}] 已对准高层火情', flush=True)
+        except Exception as exc:
+            print(f'[{sdk.namespace}] 没对上火情标识（{exc}），按通报坐标发射', flush=True)
 
-    # ---- 编队返航：只调空中段，起降由本脚本自己管 ----
-    编队.follow_formation(sdk, SPACING_M, inbox=route_done, plan=route_plan)
+        sdk.play_sound_light('任务机发射灭火弹')
+        for i in range(1, EXTINGUISHER_SHOTS + 1):
+            高楼.fire_launcher(sdk, f'发射灭火弹 {i}/{EXTINGUISHER_SHOTS}')
+            if i < EXTINGUISHER_SHOTS:
+                time.sleep(SHOT_INTERVAL_S)
+        sdk.send_to_teammate(EV_EXTINGUISHED)
+        print(f'[{sdk.namespace}] {EXTINGUISHER_SHOTS} 发灭火弹发射完毕，已通知侦察机',
+              flush=True)
+        # 回到循环开头：要么还有下一栋楼的火情通报，要么侦察机巡检完毕。
+
+    if not airborne:
+        # 一次火情都没有（两栋楼都没着火）——照样要起飞入列跟着返航
+        sdk.takeoff(height_m=CRUISE_AGL_M)
+        sdk.play_sound_light('任务机起飞')
+
+    # ================= 过程③ 编队返回 =================
+    # goto_station=False = **就近入列**：任务机这会儿就在侦察机附近，再飞一趟
+    # "航线起点后方 spacing 米"的站位点纯属绕路。起降由本脚本自己管，编队只管空中。
+    编队.follow_formation(sdk, SPACING_M, inbox=route_done, plan=route_plan,
+                          goto_station=False)
     编队._land_at_pad(sdk)
     sdk.play_sound_light('任务机已降落')
 
