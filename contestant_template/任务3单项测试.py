@@ -8,33 +8,37 @@
   N(14,16) 正北 3.5 m 处是 1# 楼（(13.5,19.5)+(14.5,19.5)）
 所以 M/N 是**观察位**，不是楼本身。
 
-流程：
+流程（2026-09-30 用户重新指定 M 点的动作顺序）：
 
 侦察机 NX01                                任务机 NX02
 ──────────────────────────────────────     ──────────────────────────
 起飞 -> 航点 A B C G E
-飞到 M，2 m 高度，朝向 -90° 拍照回传
-转朝向 90°，开启高楼火情侦查
-┌ 情况①：M 有火情
+  （每个航点先把机头转到下一段方向再走，航段内航向不变）
+飞到 M，2 m 高度
+  ① 朝正南给 3# 楼拍照回传
+  ② 原地转 180° 对准正北的 2# 楼
+  ③ 检测高层火情并拍照
+┌ 情况①：2# 有火情
 │  对准 -> 沿机头前移 1.5 m
 │  通报火情 ─────────────────────────►    起飞 -> 飞 E 点待命
 │  等任务机到 E ◄─────────────────────    到位通报
 │  发射破窗弹 ───────────────────────►    收到"已破窗"
-│  飞到 N，拍照回传                          飞到侦察机刚才的发射点
-│  飞到 G                                    连发 4 发灭火弹 ──────┐
-└                                                                  │
-┌ 情况②：M 没有火情                                                │
-│  平移到 N -> 识别对准 -> 拍照回传                                 │
-│  通报火情 ─────────────────────────►    起飞 -> 飞 E 点待命       │
-│  等任务机到 E ◄─────────────────────    到位通报                 │
-│  发射破窗弹 ───────────────────────►    收到"已破窗"              │
-│  飞到 G                                    飞到发射点，连发 4 发 ─┤
-└                                                                  │
-收到"已灭火" ◄──────────────────────────────────────────────────────┘
+│  等灭火完成 ◄──────────────────────     飞到侦察机的发射点，连发 4 发灭火弹
+│  ④ 灭完火后飞 N，给 1# 楼拍照
+└  飞回 G
+┌ 情况②：2# 没有火情
+│  转去 N -> 对准 1# 楼 -> 检测并拍照（这一支 1# 当场就拍了，不再补一趟）
+└  之后同情况①：通报 -> 破窗 -> 等灭火 -> 回 G
 从 G 开始编队返回（规则同《编队飞行示例》），NX01 悬停 A、NX02 降落起降点
 
-⚠️ **拍照回传目前是占位**：SDK 里没有"抓一帧图回传"的能力（只有
-   set_camera_view 和检测相关接口），见 _capture_photo() 的说明。
+三栋楼相对观察位的方位（坐标来自 sample_room_layout.yaml）：
+  3# (5.5,12.5) 在 M(6,16) 正南 3.5 m
+  2# (5.5,19.5) 在 M(6,16) 正北 3.5 m
+  1# (13.5,19.5) 在 N(14,16) 正北 3.5 m
+火情只可能在 1#/2# 其中一栋，高度 1.5 m 或 2.5 m。M/N 是**观察位**，不是楼本身。
+
+拍照走 SDK 的 `capture_photo()`（2026-09-30 新增），存进 /logs（挂给地面站的
+目录）即视为回传。
 """
 import argparse
 import math
@@ -55,8 +59,16 @@ POINT_N = (14.0, 16.0)                # 观察位，正北 3.5 m 是 1# 楼
 
 HIGH_FIRE = 'apriltag:1'              # 高层着火点标识
 OBSERVE_AGL_M = 2.0                   # 用户指定：在 M 点悬停于 2 米高度
-PHOTO_YAW_DEG = -90.0                 # 到 M 先朝这个方向拍照
-INSPECT_YAW_DEG = 90.0                # 再转到这个方向找火情
+# 2026-09-30 用户明确了 M 点的动作顺序：先给 3# 楼拍照回传，再原地转 180°
+# 对准 2# 楼查火情并拍照；灭完火之后才去 N 点给 1# 楼拍照，然后编队返航。
+# 三栋楼相对观察位的方位（楼的坐标来自 sample_room_layout.yaml）：
+#   3# (5.5,12.5) 在 M(6,16) 的**正南**  -> 机头 -90°
+#   2# (5.5,19.5) 在 M(6,16) 的**正北**  -> 机头 +90°（从 3# 原地转 180° 过来）
+#   1# (13.5,19.5) 在 N(14,16) 的**正北** -> 机头 +90°
+YAW_TO_3F_DEG = -90.0                 # M 点朝 3# 楼
+YAW_TO_2F_DEG = 90.0                  # M 点转 180° 朝 2# 楼
+YAW_TO_1F_DEG = 90.0                  # N 点朝 1# 楼
+PHOTO_DIR = '/logs/任务3照片'          # 拍照存这儿（/logs 是挂给地面站的目录）
 FIRE_HEIGHTS_M = (1.5, 2.5)           # 火情只可能在这两个高度
 FORWARD_BEFORE_FIRE_M = 1.5           # 对准后沿机头前移这么多再发射
 EXTINGUISHER_SHOTS = 4                # 任务机连发几发灭火弹
@@ -94,21 +106,31 @@ class _Inbox:
         return self.data
 
 
-def _capture_photo(sdk, tag):
-    """拍一张照片回传。
+def _capture_photo(sdk, tag, camera='front'):
+    """拍一张存到 PHOTO_DIR 并打印路径（"回传"= 存进挂给地面站的 /logs）。
 
-    ⚠️ **占位实现**：SDK 目前没有"抓一帧图并回传地面站"的能力——
-    `capabilities.py` 里只有 `set_camera_view()` 和检测相关接口，视觉栈那边
-    虽然有 MJPEG 服务（8080 前视 / 8081 下视），但没有暴露成 SDK 接口，
-    任务脚本也不该自己去起 rclpy 订阅绕过 SDK。
-    所以这里只把"该拍照了"这件事记录下来，流程照常往下走。
-    真要做，缺的是 SDK 一个 `capture_photo(camera, path)`，加完把这里替掉。
+    走 SDK 的 `capture_photo()`（2026-09-30 新增）。**不发声光事件**：声光事件
+    是固定枚举（见 _sound_light_port.py 的 SOUND_LIGHT_EVENTS），表里没有
+    "拍照"这一项，自造事件名会直接抛 ValueError 把整个任务打断——首次跑
+    任务3 就是这么挂的。真要给拍照配声光，得先在事件表里加一项。
+
+    拍不到不让整个任务失败：照片是交付物，不是流程前提。
     """
     x, y, _ = sdk.get_local_position()
     wx, wy = sdk.local_to_world(x, y, 0.0)[:2]
-    print(f'[{sdk.namespace}] 【拍照回传·占位】{tag}：位置 ({wx:.2f}, {wy:.2f})，'
-          f'朝向 {math.degrees(sdk.get_current_yaw()):.0f}°', flush=True)
-    sdk.play_sound_light(f'侦察机拍照：{tag}')
+    stamp = time.strftime('%H%M%S')
+    path = f'{PHOTO_DIR}/{sdk.namespace}_{stamp}_{tag}.png'
+    try:
+        sdk.set_camera_view(camera)
+        time.sleep(0.6)                 # 关节转到位要一点时间，见 set_camera_view 说明
+        sdk.capture_photo(path, camera=camera)
+        print(f'[{sdk.namespace}] 拍照回传 {tag}：{path}'
+              f'（位置 ({wx:.2f}, {wy:.2f})，朝向 {math.degrees(sdk.get_current_yaw()):.0f}°）',
+              flush=True)
+        return path
+    except Exception as exc:
+        print(f'[{sdk.namespace}] 拍照失败 {tag}（{exc}），流程继续', flush=True)
+        return None
 
 
 def _goto_world(sdk, wx, wy, what, z_agl=CRUISE_AGL_M):
@@ -116,6 +138,32 @@ def _goto_world(sdk, wx, wy, what, z_agl=CRUISE_AGL_M):
     print(f'[{sdk.namespace}] 飞往{what} ({wx:.2f}, {wy:.2f})', flush=True)
     with sdk.fixed_altitude(lz):
         sdk.goto(lx, ly, lz)
+
+
+def _fly_route(sdk, legs, z_agl=CRUISE_AGL_M):
+    """按航点序列飞，**每个航点先把机头转到下一段的方向、停住，再走**，
+    航段之间航向不再变化（2026-09-30 用户要求，跟编队飞行同一条规则）。
+
+    legs 是 [(名字, (wx, wy)), ...]，从飞机**当前位置**出发依次飞过去。
+    停顿时长/转向超时/容差都复用《编队飞行示例》的常量，两边保持一致。
+    """
+    cx, cy, _ = sdk.get_local_position()
+    for name, (wx, wy) in legs:
+        tx, ty, tz = sdk.world_to_local(wx, wy, z_agl)
+        heading = math.atan2(ty - cy, tx - cx)
+        print(f'[{sdk.namespace}] 飞往航点{name} ({wx:.2f}, {wy:.2f})，'
+              f'航向 {math.degrees(heading):.0f}°（停 {编队.WAYPOINT_HOLD_S:.0f} 秒转向）',
+              flush=True)
+        t0 = time.time()
+        if not sdk.face_yaw(heading, timeout=编队.TURN_TIMEOUT_S,
+                            tolerance_deg=编队.TURN_TOL_DEG):
+            print(f'[{sdk.namespace}] 航向没转到位，仍继续前飞', flush=True)
+        left = 编队.WAYPOINT_HOLD_S - (time.time() - t0)
+        if left > 0:
+            time.sleep(left)
+        with sdk.fixed_altitude(tz):
+            sdk.goto(tx, ty, tz)
+        cx, cy = tx, ty
 
 
 def _inspect_here(sdk):
@@ -173,33 +221,36 @@ def recon(sdk):
 
     sdk.takeoff(height_m=CRUISE_AGL_M)
     sdk.play_sound_light('侦察机起飞')
-    for wp, nm in ((ROUTE_A, 'A'), (ROUTE_B, 'B'), (ROUTE_C, 'C'),
-                   (ROUTE_G, 'G'), (ROUTE_E, 'E')):
-        _goto_world(sdk, wp[0], wp[1], f'航点{nm}')
+    # 巡检航点：每个点先转向下一个点再走，航段内航向恒定
+    _fly_route(sdk, [('A', ROUTE_A), ('B', ROUTE_B), ('C', ROUTE_C),
+                     ('G', ROUTE_G), ('E', ROUTE_E)])
 
-    # ---- M 点：2 m 高度，先朝 -90° 拍照，再转 90° 侦查 ----
-    _goto_world(sdk, POINT_M[0], POINT_M[1], '观察位M', z_agl=OBSERVE_AGL_M)
-    sdk.face_yaw(math.radians(PHOTO_YAW_DEG))
-    _capture_photo(sdk, 'M点朝向-90°')
-    sdk.face_yaw(math.radians(INSPECT_YAW_DEG))
-    print(f'[{sdk.namespace}] M 点开启高楼火情侦查', flush=True)
+    # ---- M 点（2 m 高度）----
+    # 顺序是用户 2026-09-30 定的：① 先给正南的 3# 楼拍照回传；② 原地转 180°
+    # 对准正北的 2# 楼，查火情并拍照；③ 有火就灭；④ 灭完再去 N 给 1# 楼拍照。
+    # 注意 N 点那张照片**在灭火之后**——上一版是在破窗之后、灭火之前去拍的。
+    _fly_route(sdk, [('M', POINT_M)], z_agl=OBSERVE_AGL_M)
+    sdk.face_yaw(math.radians(YAW_TO_3F_DEG))
+    _capture_photo(sdk, '3号楼')
+    print(f'[{sdk.namespace}] 原地转 180° 对准 2# 楼', flush=True)
+    sdk.face_yaw(math.radians(YAW_TO_2F_DEG))
     det = _inspect_here(sdk)
+    _capture_photo(sdk, '2号楼')
 
     found_at = 'M'
     if det is None:
-        # ---- 情况②：M 没有，平移到 N ----
-        print(f'[{sdk.namespace}] M 点没有火情，平移到 N', flush=True)
-        _goto_world(sdk, POINT_N[0], POINT_N[1], '观察位N', z_agl=OBSERVE_AGL_M)
-        sdk.face_yaw(math.radians(INSPECT_YAW_DEG))
+        # 2# 没有火情：按原premise（火情只可能在 1#/2# 其中一栋）转去 N 侧。
+        # 这一支里 1# 的照片就在识别现场拍，不必等灭完火再拍一次。
+        print(f'[{sdk.namespace}] 2# 楼没有火情，转去 N 点看 1# 楼', flush=True)
+        _fly_route(sdk, [('N', POINT_N)], z_agl=OBSERVE_AGL_M)
+        sdk.face_yaw(math.radians(YAW_TO_1F_DEG))
         det = _inspect_here(sdk)
+        _capture_photo(sdk, '1号楼')
         found_at = 'N'
         if det is None:
-            raise RuntimeError('M、N 两处都没发现高层火情，任务3 中止')
-        fire_pos = _aim_and_step_in(sdk)
-        _capture_photo(sdk, 'N点火情')          # 情况②：对准后拍照
-    else:
-        fire_pos = _aim_and_step_in(sdk)
+            raise RuntimeError('2#、1# 两栋楼都没发现高层火情，任务3 中止')
 
+    fire_pos = _aim_and_step_in(sdk)
     print(f'[{sdk.namespace}] 火情在 {found_at} 侧，发射点 ({fire_pos[0]:.2f}, {fire_pos[1]:.2f})',
           flush=True)
     sdk.send_to_teammate(EV_FIRE, x=fire_pos[0], y=fire_pos[1], z=fire_pos[2], at=found_at)
@@ -212,16 +263,17 @@ def recon(sdk):
     sdk.send_to_teammate(EV_BREACHED)
     print(f'[{sdk.namespace}] 破窗完成，已通知任务机', flush=True)
 
-    # ---- 情况①要去 N 拍一张；情况②直接去 G ----
-    if found_at == 'M':
-        _goto_world(sdk, POINT_N[0], POINT_N[1], '观察位N', z_agl=OBSERVE_AGL_M)
-        sdk.face_yaw(math.radians(INSPECT_YAW_DEG))
-        _capture_photo(sdk, 'N点')
-    _goto_world(sdk, ROUTE_G[0], ROUTE_G[1], '航点G')
-
     # ---- 等灭火完成，从 G 开始编队返航 ----
-    print(f'[{sdk.namespace}] 在 G 点等任务机灭火完成…', flush=True)
+    print(f'[{sdk.namespace}] 等任务机灭火完成…', flush=True)
     done.wait(EXTINGUISH_WAIT_S)
+
+    # 灭完火再去 N 给 1# 楼拍照（用户 2026-09-30 指定的顺序），然后回 G 起编队。
+    # 火情在 N 侧那一支里 1# 已经拍过了，不重复跑一趟。
+    if found_at == 'M':
+        _fly_route(sdk, [('N', POINT_N)], z_agl=OBSERVE_AGL_M)
+        sdk.face_yaw(math.radians(YAW_TO_1F_DEG))
+        _capture_photo(sdk, '1号楼')
+    _fly_route(sdk, [('G', ROUTE_G)])
     # start_xy 要的是**世界坐标**（航线本身就是世界系）。这里飞机刚飞到 G，
     # 直接用 ROUTE_G——早先传 get_local_position() 的局部坐标，被当成世界坐标
     # 用，站位点算到了 3# 楼那一片、飞不过去（2026-09-29 实测）。

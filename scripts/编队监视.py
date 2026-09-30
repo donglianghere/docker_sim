@@ -530,6 +530,10 @@ def main():
                     help='布局 yaml（画俯视底图用：房间/立柱/起降点/障碍/仿地模块）。'
                          '不给就用脚本里写死的 fire_drill_room 那组老坐标。')
     ap.add_argument('--no-gui', action='store_true', help='只出PNG，不弹窗')
+    ap.add_argument('--end-confirm', type=float, default=40.0,
+                    help='结束条件要连续成立多少秒才真的收尾。默认 40 秒——'
+                         '任务流程里"一架落地取物资、另一架悬停等待"会让结束'
+                         '条件短暂成立，撑不满这个窗口就不会误判结束。')
     args = ap.parse_args()
 
     if not args.layout:
@@ -573,6 +577,7 @@ def main():
     print(f'[监视] 订阅 /{args.leader}/uwb/pose_abs 和 /{args.follower}/uwb/pose_abs，'
           f'{"有" if gui else "无"}窗口模式，报告将存到 {args.out}', flush=True)
     try:
+        done_since = None       # 结束条件从什么时候开始连续成立
         while not stop['v'] and time.monotonic() - t_begin < args.timeout:
             rclpy.spin_once(mon, timeout_sec=0.05)
             now = time.monotonic() - t_begin
@@ -581,10 +586,21 @@ def main():
                 draw(fig, axes, mon)
                 if gui:
                     plt.pause(0.001)
+            # 结束判据要**连续成立** END_CONFIRM_S 秒才算数。
+            # 2026-09-30：任务2 里 NX02 是**真的降落**到物资点去抓灭火弹的，
+            # 而那一刻 NX01 正在 G 点悬停等它——"一架已降落、另一架原地悬停"
+            # 当场成立，监视就在任务半道出报告退出了（用户发现窗口自己关了）。
+            # 抓取那十几秒撑不满确认窗口，真正的结束能撑满。
             if mon.mission_done() and now > 20.0:
-                who = '、'.join(n for n in mon.names if mon.landed[n])
-                print(f'[监视] 任务结束（{who} 已降落，其余在原地悬停），出报告', flush=True)
-                break
+                if done_since is None:
+                    done_since = now
+                elif now - done_since >= args.end_confirm:
+                    who = '、'.join(n for n in mon.names if mon.landed[n])
+                    print(f'[监视] 任务结束（{who} 已降落，其余在原地悬停，'
+                          f'条件连续成立 {args.end_confirm:.0f} 秒），出报告', flush=True)
+                    break
+            else:
+                done_since = None
     finally:
         draw(fig, axes, mon)
         os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)

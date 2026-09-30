@@ -1448,6 +1448,125 @@ class DroneSDK:
         self._progress(f"相机视角 -> {'前视' if view == 'front' else '下视'}")
 
     # ------------------------------------------------------------------
+    # 抓一帧相机图存盘（2026-09-30 新增，任务3"拍照回传"要用）
+    # ------------------------------------------------------------------
+
+    #: 图像话题是 640x480x3 @ 7Hz ≈ 6 MB/s，绝大多数任务脚本用不到。所以**不**在
+    #: `_setup_transport()` 里常驻订阅，等第一次调用 `capture_photo()` 再建，
+    #: 建好之后保留（同一次飞行往往要拍好几张）。
+    _CAMERA_TOPIC_SUFFIX = {'front': '_front_camera/image_raw',
+                            'down': '_down_camera/image_raw'}
+
+    def _ensure_image_sub(self, camera: str) -> None:
+        if not hasattr(self, '_image_subs'):
+            self._image_subs: Dict[str, Any] = {}
+            self._latest_image: Dict[str, Any] = {}
+        if camera in self._image_subs:
+            return
+        from sensor_msgs.msg import Image as _Image
+        topic = f'{self.namespace}{self._CAMERA_TOPIC_SUFFIX[camera]}'
+
+        def _on(msg: Any, _c: str = camera) -> None:
+            self._latest_image[_c] = msg
+
+        self._image_subs[camera] = self._node.create_subscription(_Image, topic, _on, 1)
+
+    @staticmethod
+    def _encode_png(arr: Any) -> bytes:
+        """把 HxWx3 的 uint8 RGB 数组编成 PNG 字节流。
+
+        选手镜像里没有 cv2 / PIL / cv_bridge（只有 numpy），为一次存图去装
+        OpenCV 不划算，所以直接按 PNG 规范拼：8 位真彩、每行前面加一个 0
+        （filter type None），zlib 压一下。三十行，没有新依赖。
+        """
+        import struct
+        import zlib
+        h, w, _ = arr.shape
+        raw = bytearray()
+        for y in range(h):
+            raw.append(0)
+            raw += arr[y].tobytes()
+
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            return (struct.pack('>I', len(data)) + tag + data
+                    + struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+        return (b'\x89PNG\r\n\x1a\n'
+                + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                + chunk(b'IDAT', zlib.compress(bytes(raw), 6))
+                + chunk(b'IEND', b''))
+
+    def capture_photo(self, path: str, camera: str = 'front',
+                      timeout: float = 8.0, fresh: bool = True) -> str:
+        """抓当前相机的一帧存成 PNG，返回实际写入的路径。
+
+        Args:
+            path: 存到哪。目录不存在会自动建。
+            camera: `'front'` 前视 / `'down'` 下视。**这架飞机全局只有一个真实
+                相机**（挂在可动关节上，见 `set_camera_view()`），所以要拍哪路
+                得先 `set_camera_view()` 把关节转过去、等零点几秒到位，再拍；
+                这个参数只决定订阅哪个话题。
+            timeout: 等一帧图最多等多久。
+            fresh: True（默认）只接受**调用之后**新到的帧，避免拿到切视角前
+                的旧画面；False 则有缓存就直接用。
+
+        Raises:
+            DetectionTimeoutError: 超时没等到图（相机没开、视角没切过去、
+                或者 DDS 还没发现这个话题）。
+
+        回传：这里只负责**存盘**。存到挂载给地面站的目录（仿真里是 /logs）
+        就等于回传了；真要走别的通道（HTTP/图传）是地面站侧的协议问题，
+        不在 SDK 这一层定。
+        """
+        if camera not in self._CAMERA_TOPIC_SUFFIX:
+            raise ValueError(f"camera 只能是 'front' 或 'down'，收到 {camera!r}")
+        self._ensure_image_sub(camera)
+        t_call = time.time()
+        if fresh:
+            self._latest_image.pop(camera, None)
+
+        def _got() -> bool:
+            msg = self._latest_image.get(camera)
+            if msg is None:
+                return False
+            if not fresh:
+                return True
+            return _stamp_to_sec(msg.header.stamp) <= 0 or time.time() >= t_call
+
+        if not self._poll_until(_got, timeout,
+                                lambda: self._progress(f'等{camera}相机图像…')):
+            raise DetectionTimeoutError(
+                class_id=f'{camera}_camera/image_raw', timeout_s=timeout,
+                namespace=self.namespace)
+
+        msg = self._latest_image[camera]
+        import numpy as _np
+        buf = _np.frombuffer(bytes(msg.data), dtype=_np.uint8)
+        enc = (msg.encoding or 'rgb8').lower()
+        step = msg.step or (len(buf) // max(1, msg.height))
+        nch = {'rgb8': 3, 'bgr8': 3, 'rgba8': 4, 'bgra8': 4, 'mono8': 1}.get(enc)
+        if nch is None:
+            raise ValueError(f'不认识的图像编码 {msg.encoding!r}（支持 rgb8/bgr8/rgba8/bgra8/mono8）')
+        # 按 step 切行再裁掉行尾 padding——ROS 的 step 不一定等于 width*nch
+        img = buf[:msg.height * step].reshape(msg.height, step)[:, :msg.width * nch]
+        img = img.reshape(msg.height, msg.width, nch)
+        if enc in ('bgr8', 'bgra8'):
+            img = img[:, :, 2::-1] if nch == 3 else img[:, :, [2, 1, 0]]
+        elif enc == 'rgba8':
+            img = img[:, :, :3]
+        elif enc == 'mono8':
+            img = _np.repeat(img, 3, axis=2)
+        img = _np.ascontiguousarray(img)
+
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(self._encode_png(img))
+        self._progress(f'已拍照存盘 {path}（{msg.width}x{msg.height}，{camera}）')
+        return path
+
+    # ------------------------------------------------------------------
     # 2.1节能力6：坐标系转换
     # ------------------------------------------------------------------
 
