@@ -10,6 +10,8 @@
        2#  在 M(6,16) 朝 +90°（正北）拍      —— 拍照 + 开高楼火情识别
        1#  在 N(14,16) 朝 +90°（正北）拍     —— 拍照 + 开高楼火情识别
    面朝 2#/1# 时识别到火情就当场对准、插入一轮协同灭火；灭完继续巡检下一栋。
+   **有火情的那栋楼，照片等对准之后再拍**（用户 2026-09-30）——那张照片要能
+   看清着火点，火情落在画面边上等于没拍到；没火情的楼转到位就拍。
    三栋走完即"巡检完毕"，进入编队返回。
    （楼的坐标来自 sample_room_layout.yaml：3#(5.5,12.5) 2#(5.5,19.5) 1#(13.5,19.5)，
      M/N 是**观察位**不是楼本身，各在对应楼南侧 3.5 m。火情高度 1.5 或 2.5 m。）
@@ -412,10 +414,20 @@ def center_fire_in_view(sdk, tag='火情'):
     return False
 
 
-def _aim_and_step_in(sdk):
-    """把火情居中到前视画面，然后沿机头方向前移 FORWARD_BEFORE_FIRE_M，
-    返回发射点世界坐标。"""
-    center_fire_in_view(sdk, '高层火情')
+def _back_to_observe_alt(sdk):
+    """回到观察高度。_inspect_here 找不到火情时会升降到 1.5/2.5 米去看，
+    回来拍那张交付照片之前得先把高度收回去。"""
+    cx, cy, _ = sdk.get_local_position()
+    _, _, lz = sdk.world_to_local(0.0, 0.0, OBSERVE_AGL_M)
+    sdk.goto_direct(cx, cy, lz)
+
+
+def _step_in_to_launch(sdk):
+    """沿机头方向前移 FORWARD_BEFORE_FIRE_M，返回发射点世界坐标。
+
+    调用之前必须已经 center_fire_in_view() 对准——2026-09-30 把对准和前移
+    拆开了，中间要插一张"对准后的交付照片"。
+    """
     cx, cy, cz = sdk.get_local_position()
     yaw = sdk.get_current_yaw()
     tx = cx + FORWARD_BEFORE_FIRE_M * math.cos(yaw)
@@ -457,12 +469,14 @@ def recon(sdk):
         print(f'[{sdk.namespace}] 在 {pt_name} 点转到 {yaw_deg:.0f}° 巡检 {bldg} 楼', flush=True)
         sdk.face_yaw(math.radians(yaw_deg), timeout=编队.TURN_TIMEOUT_S,
                      tolerance_deg=编队.TURN_TOL_DEG)
-        # 先拍照再查火情：照片是硬性交付物（每栋楼必须有一张），不能让后面的
-        # 识别/灭火失败把它带掉。
-        _capture_photo(sdk, f'{bldg}楼')
-        if not detect:
-            continue
-        if fired_any:
+        # 没火情的楼：转到位就拍，照片是硬性交付物（每栋楼必须有一张），
+        # 不能让后面的识别失败把它带掉。
+        # **有火情的楼等对准之后再拍**（用户 2026-09-30）——那张照片要能看清
+        # 着火点，火情在画面边上等于没拍到。
+        if not detect or fired_any:
+            _capture_photo(sdk, f'{bldg}楼')
+            if not detect:
+                continue
             # 火情只可能有一处（premise：1#/2# 其中一栋）。已经协同灭过火了，
             # 后面的楼只补拍那张必交的照片就走，不必再跑一遍识别+升降扫高度
             # ——用户 2026-09-30："侦查机到 1# 楼，拍摄完即可前往 G 点等待"。
@@ -472,12 +486,19 @@ def recon(sdk):
         sdk.play_sound_light('侦察机排查高层火情')
         det = _inspect_here(sdk)
         if det is None:
+            # 没找到：_inspect_here 会为了找它升降到 1.5/2.5 米，先回观察高度
+            # 再拍，免得这张交付照片是从一个歪高度上拍的。
+            _back_to_observe_alt(sdk)
+            _capture_photo(sdk, f'{bldg}楼')
             print(f'[{sdk.namespace}] {bldg} 楼没有火情，继续巡检', flush=True)
             continue
 
         # ================= 过程② 协同灭火 =================
         sdk.play_sound_light('侦察机发现高楼火情')
-        fire_pos = _aim_and_step_in(sdk)
+        # 先对准，再拍这栋楼的交付照片——这样火情在画面正中
+        center_fire_in_view(sdk, '高层火情')
+        _capture_photo(sdk, f'{bldg}楼')
+        fire_pos = _step_in_to_launch(sdk)
         at_station = None       # 前移过了，不再在观察位上
         print(f'[{sdk.namespace}] {bldg} 楼有火情，发射点 '
               f'({fire_pos[0]:.2f}, {fire_pos[1]:.2f})，通报任务机并原地等待', flush=True)
