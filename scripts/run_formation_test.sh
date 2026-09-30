@@ -59,6 +59,20 @@ done
 docker rm -f fm_leader fm_follower >/dev/null 2>&1 || true
 
 # ---- 1. 重启仿真，拿一个干净的初始位姿 ----
+# ---- 起飞之前先过一遍静态自检 ----
+# 2026-09-30：我改任务3 时从 `def _inspect_here` 一路切到 `def _back_to_observe_alt`，
+# 把夹在中间的 center_fire_in_view / _drive_servos / _supply_point_action 三个
+# 函数连带删掉了。py_compile 只查语法、照样通过，飞到"发现火情"那一步才抛
+# NameError，两架飞机已经在天上了。仓库里本来就有这个按作用域查未定义名字的
+# 检查器，能精确抓到这类错——问题不在工具缺失，在改完没跑。所以接进来，
+# 让这一步跳不过去，不靠记性。
+if [ -f scripts/check_python_static.py ]; then
+    if ! python3 scripts/check_python_static.py contestant_template/*.py; then
+        echo "!! 选手脚本静态自检不通过，先修好再飞 !!" >&2
+        exit 1
+    fi
+fi
+
 if [ "$RESTART" = "1" ]; then
     log "重启仿真容器…"
     docker compose down --timeout 20 >/dev/null 2>&1 || true
