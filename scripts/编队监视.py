@@ -170,7 +170,13 @@ class FormationMonitor(Node):
         self.cruise_agl = cruise_agl
         self.tol = tol
         self.t0 = time.monotonic()
+        self.wall0 = time.time()              # 跟 t0 同一时刻的墙上时间，换算起飞时刻用
         self.track = {n: {'t': [], 'x': [], 'y': [], 'z': [], 'yaw': []} for n in names}
+        # ---- 飞行统计（2026-09-30 用户要求：动画上显示起飞时刻、编队时长、里程、均速）----
+        self.takeoff_t = {n: None for n in names}   # 首次高于 AIRBORNE_Z 的时刻（相对 t0）
+        self.land_t = {n: None for n in names}      # 判定降落的时刻
+        self.dist_m = {n: 0.0 for n in names}       # 水平飞行里程（累加）
+        self._last_xy = {n: None for n in names}    # 上一帧位置，算增量用
         self.gap_t, self.gap_d = [], []      # 沿航线的间距（主指标）
         self.gap_line = []                    # 直线距离，只作参考对照
         self.gap_xy = []                      # 算这个间距时两机的原始 xy，存 CSV 用
@@ -209,6 +215,7 @@ class FormationMonitor(Node):
                 return
             d['t'].append(t); d['x'].append(p.x); d['y'].append(p.y)
             d['z'].append(p.z); d['yaw'].append(yaw)
+            self._accumulate(name, t, p.x, p.y, p.z)
             self._update_landed(name, p.z)
             self._note_airborne()
             self._update_gap(t)
@@ -224,6 +231,53 @@ class FormationMonitor(Node):
             # 算的（lag = 实际间距 - fd_eff），3.5+lag 会恒比实际间距高出一个 trim。
             self.diag_gap.append(float(msg.data[4]) if len(msg.data) >= 5 else float('nan'))
 
+    #: 里程用**锚点累加**而不是逐帧累加：离上一个锚点走够 DIST_ANCHOR_M 才记一笔，
+    #: 然后把锚点挪过来。逐帧累加会把 UWB 的厘米级抖动全部攒进里程——第一版用
+    #: 0.03 m 死区，1714 帧每帧漏进 5 cm，86 米的航线算出 184 米。锚点法里噪声
+    #: 只会让飞机在锚点周围打转、永远够不到门限，天然不累加。
+    #: 0.25 m 的弦长在本场地的曲率下跟弧长差可以忽略。
+    DIST_ANCHOR_M = 0.25
+    DIST_MAX_STEP_M = 3.0      # 超过这个是解算野值，丢掉并重置锚点
+
+    def _accumulate(self, name, t, x, y, z):
+        """累计水平里程，并记下起飞时刻（首次高于 AIRBORNE_Z）。"""
+        if self.takeoff_t[name] is None and z > AIRBORNE_Z:
+            self.takeoff_t[name] = t
+        anchor = self._last_xy[name]
+        if anchor is None:
+            self._last_xy[name] = (x, y)
+            return
+        step = math.hypot(x - anchor[0], y - anchor[1])
+        if step > self.DIST_MAX_STEP_M:
+            self._last_xy[name] = (x, y)        # 野值：重置锚点，不计这一段
+            return
+        if step >= self.DIST_ANCHOR_M:
+            self.dist_m[name] += step
+            self._last_xy[name] = (x, y)
+
+    def flight_stats(self):
+        """返回 (每机统计 list, 编队时长 or None)。
+
+        - 起飞时刻：首次高于 AIRBORNE_Z 的墙上时间；
+        - 空中时长：起飞到降落（还没落就算到现在）；
+        - 里程：水平位移累加（带死区/跳变门限，见 DIST_MIN_STEP_M）；
+        - 平均速度：里程 / 空中时长。**不是巡航速度**——航点停顿、起降段都算在里面。
+        - 编队时长：僚机跟随节点发 formation_diag 的首末时刻之差，也就是
+          "跟随回路真正在工作"的那段，比"两机都在天上"更贴近编队本身。
+        """
+        now = time.monotonic() - self.t0
+        rows = []
+        for n in self.names:
+            t_up = self.takeoff_t[n]
+            if t_up is None:
+                rows.append((n, None, None, self.dist_m[n], None))
+                continue
+            t_dn = self.land_t[n] if self.land_t[n] is not None else now
+            air = max(1e-6, t_dn - t_up)
+            rows.append((n, self.wall0 + t_up, air, self.dist_m[n], self.dist_m[n] / air))
+        form = (self.diag_t[-1] - self.diag_t[0]) if len(self.diag_t) >= 2 else None
+        return rows, form
+
     def _note_airborne(self):
         """两机同时高于 AIRBORNE_Z 就置位——任务结束判据的前置条件。"""
         if self._all_airborne_seen:
@@ -238,6 +292,12 @@ class FormationMonitor(Node):
             if self._low_since[name] is None:
                 self._low_since[name] = now
             elif now - self._low_since[name] >= LANDED_HOLD:
+                # 只有**起飞过**才算降落。少了这个判断，起飞前趴在地上那段就会
+                # 记一次"降落时刻"，起飞后又不清，空中时长算出 0（run75 实测
+                # NX01 空中 0.0s、均速 1.8e8 m/s）。
+                if not self.landed[name] and self.takeoff_t[name] is not None:
+                    # 落地时刻算成"开始贴地"那一刻，不是保持够 LANDED_HOLD 的那一刻
+                    self.land_t[name] = self._low_since[name] - self.t0
                 self.landed[name] = True
         else:
             self._low_since[name] = None
@@ -316,6 +376,21 @@ class FormationMonitor(Node):
         return True
 
 
+def stats_lines(mon):
+    """飞行统计的文字行，动画左下角和结束时的文字报告共用同一份。"""
+    rows, form = mon.flight_stats()
+    out = []
+    if form is not None:
+        out.append(f'编队飞行 {form:5.1f} s')
+    for n, wall, air, dist, v in rows:
+        if wall is None:
+            out.append(f'{n} 未起飞')
+            continue
+        out.append(f'{n} 起飞 {time.strftime("%H:%M:%S", time.localtime(wall))}  '
+                   f'空中 {air:5.1f}s  里程 {dist:6.1f}m  均速 {v:4.2f}m/s')
+    return out
+
+
 def draw(fig, axes, mon):
     ax_xy, ax_z, ax_gap = axes
     for ax in axes:
@@ -361,6 +436,13 @@ def draw(fig, axes, mon):
     ax_xy.set_aspect('equal'); ax_xy.grid(alpha=0.3)
     ax_xy.set_xlabel('x (m)'); ax_xy.set_ylabel('y (m)')
     ax_xy.legend(loc='upper right', fontsize=8)
+    # 飞行统计（2026-09-30 用户要求：动画上直接显示起飞时刻/编队时长/里程/均速）。
+    # 贴在俯视图左下角——equal aspect 在这里本来就留白，不遮轨迹。
+    txt = '\n'.join(stats_lines(mon))
+    if txt:
+        ax_xy.text(0.02, 0.02, txt, transform=ax_xy.transAxes,
+                   va='bottom', ha='left', fontsize=7.5,
+                   bbox=dict(fc='white', ec='#bbb', alpha=0.85, pad=3))
 
     tmax = max([d['t'][-1] for d in mon.track.values() if d['t']] or [0.0])
     tlo = 0.0                                   # 全程，不滚动
@@ -397,7 +479,7 @@ def draw(fig, axes, mon):
 
 
 def summarize(mon):
-    lines = []
+    lines = list(stats_lines(mon))
     if mon.diag_lag:
         import statistics as st
         lines.append(f'节点自报落后量：中位 {st.median(mon.diag_lag):+.2f} m，'
