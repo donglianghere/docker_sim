@@ -283,7 +283,7 @@ services:
       - GOAL_RETRANSFORM=${GOAL_RETRANSFORM:-true}  # 论文3.2节的目标点持续
                                   # 重变换修复；设false=退回修复前行为，
                                   # 是E13"修复前/后"对照实验的开关
-      - DISPLAY=${DISPLAY}   # 2026-09-28：scripts/编队监视.py 的实时图形窗口用
+      - DISPLAY=${DISPLAY}   # 2026-09-28：scripts/monitor.py 的实时图形窗口用
       - LOCALIZATION_SOURCE=${LOCALIZATION_SOURCE:-uwb_slam}  # 2026-09-07
                                   # 默认从gt改成uwb_slam——配合下面SLAM_BACKEND
                                   # 默认fast_lio，日常仿真默认就跑真实SLAM
@@ -557,7 +557,7 @@ services:
       # 小时（实测照片写 09:03、宿主机 17:03）。挂 /etc/localtime 比设 TZ 更稳：
       # 不要求容器里装了 tzdata，也不用把时区名写死在配置里。
       - /etc/localtime:/etc/localtime:ro
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw   # 2026-09-28：给 scripts/编队监视.py 开图形窗口用
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw   # 2026-09-28：给 scripts/monitor.py 开图形窗口用
                                   # （飞行中实时动画）。宿主机要先 `xhost +local:root`，
                                   # 不给也不影响飞行——那个脚本会自动退回无窗口模式、只出PNG。
       - ./scripts:/opt/host_scripts:ro     # 监视/诊断脚本直接挂进来，改完不用重新build
@@ -668,7 +668,7 @@ services:
       # 小时（实测照片写 09:03、宿主机 17:03）。挂 /etc/localtime 比设 TZ 更稳：
       # 不要求容器里装了 tzdata，也不用把时区名写死在配置里。
       - /etc/localtime:/etc/localtime:ro
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw   # 2026-09-28：给 scripts/编队监视.py 开图形窗口用
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw   # 2026-09-28：给 scripts/monitor.py 开图形窗口用
                                   # （飞行中实时动画）。宿主机要先 `xhost +local:root`，
                                   # 不给也不影响飞行——那个脚本会自动退回无窗口模式、只出PNG。
       - ./scripts:/opt/host_scripts:ro     # 监视/诊断脚本直接挂进来，改完不用重新build

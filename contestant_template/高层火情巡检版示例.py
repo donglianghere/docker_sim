@@ -33,7 +33,7 @@
 """
 import argparse
 
-import 任务工具 as 工具
+import utils
 import itertools
 import math
 import time
@@ -139,7 +139,7 @@ def inspect_for_fire(sdk):
               flush=True)
         first_local = sdk.world_to_local(mid[0], mid[1], h1)
         try:
-            工具.transfer_to(sdk, *first_local)   # 先锁机头朝前进方向、到位等2秒，再定高飞
+            utils.transfer_to(sdk, *first_local)   # 先锁机头朝前进方向、到位等2秒，再定高飞
         except GotoUnreachableError:
             print(f'[{sdk.namespace}] 这个水平点不可达，跳过', flush=True)
             continue
@@ -350,7 +350,7 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
                   f'（这一面朝 ({pillar[0]:.1f}, {pillar[1]:.1f})）', flush=True)
             try:
                 # 机头锁在着火点上（到了就能直接看），到位等2秒再飞
-                工具.transfer_to(sdk, aim_xy[0], aim_xy[1], az, face_xy=fire_local)
+                utils.transfer_to(sdk, aim_xy[0], aim_xy[1], az, face_xy=fire_local)
             except GotoUnreachableError:
                 print(f'[{sdk.namespace}] 这个边中点不可达，换下一个候选', flush=True)
                 continue
@@ -375,7 +375,7 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
         if best is not None and best[1] != aim_xy:
             # 试到最后停在别的候选上，回到看得最清楚的那个
             try:
-                工具.transfer_to(sdk, best[1][0], best[1][1], az, face_xy=fire_local)
+                utils.transfer_to(sdk, best[1][0], best[1][1], az, face_xy=fire_local)
             except GotoUnreachableError:
                 pass
 
@@ -413,7 +413,7 @@ def recon_inspect_and_fire(sdk, 任务机就位=None):
 
     sdk.play_sound_light('侦察机发射破窗弹')
     # 从边中点直飞进到发射点打，打完原路退回边中点（这中间不走规划器）
-    工具.close_in_and_fire(sdk, fire_local, az,
+    utils.close_in_and_fire(sdk, fire_local, az,
                            lambda: 高楼.fire_launcher(sdk, '发射破窗弹'))
     sdk.play_sound_light('侦察机破窗完成')
     try:
@@ -471,7 +471,7 @@ def run_supply(sdk, teammate, 通报=None):
         standby_local = sdk.world_to_local(sx, sy, sz)
         try:
             # 机头锁在着火点上，到位等2秒再飞——到了待命点就已经对着目标
-            工具.transfer_to(sdk, *standby_local,
+            utils.transfer_to(sdk, *standby_local,
                              face_xy=sdk.world_to_local(fire[0], fire[1], sz)[:2])
         except GotoUnreachableError as exc:
             # 待命点只是个等待的地方，进不去就在原地等——绝不能因此跳过报到，
@@ -489,7 +489,7 @@ def run_supply(sdk, teammate, 通报=None):
             print(f'[{sdk.namespace}] 等了 {WAIT_BREACH_S:.0f} 秒没等到破窗通知，自行进场', flush=True)
 
         aim_local = sdk.world_to_local(*aim)
-        工具.transfer_to(sdk, *aim_local,
+        utils.transfer_to(sdk, *aim_local,
                          face_xy=sdk.world_to_local(fire[0], fire[1], aim[2])[:2])
         sdk.play_sound_light('任务机到达瞄准点')
         fire_local = sdk.world_to_local(fire[0], fire[1], aim[2])[:2]
@@ -498,7 +498,7 @@ def run_supply(sdk, teammate, 通报=None):
 
         sdk.play_sound_light('任务机发射灭火弹')
         # 同侦察机：规划器只送到瞄准点（侦察机通报的那个边中点），最后一段直飞进出
-        工具.close_in_and_fire(sdk, fire_local, aim_local[2],
+        utils.close_in_and_fire(sdk, fire_local, aim_local[2],
                                lambda: 高楼.fire_launcher(sdk, '发射灭火弹'))
         # 等侦察机先走：它破窗后就开始返航，两机的返航走廊是叠在一起的
         print(f'[{sdk.namespace}] 原地等 {AFTER_FIRE_HOLD_S:.0f} 秒让侦察机先返航', flush=True)
@@ -510,11 +510,11 @@ def run_supply(sdk, teammate, 通报=None):
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
     home = sdk.world_to_local(pad[0], pad[1], aim[2])
     try:
-        工具.transfer_to(sdk, *home)    # 先锁机头朝起飞点方向、到位等2秒，再定高飞回去
+        utils.transfer_to(sdk, *home)    # 先锁机头朝起飞点方向、到位等2秒，再定高飞回去
     except GotoUnreachableError:
         pass
     sdk.goto_direct(0.0, 0.0, aim[2])           # 最后一段收准再落
-    工具.land_or_confirm(sdk)                   # 自动播"任务机降落"
+    utils.land_or_confirm(sdk)                   # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
 
 

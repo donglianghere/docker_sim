@@ -51,12 +51,12 @@ import argparse
 import math
 import time
 
-import 编队飞行示例 as 编队
-import 任务工具 as 工具
+import formation
+import utils
 from contest_sdk import DroneSDK
 from contest_sdk.exceptions import GotoUnreachableError
 
-CRUISE_AGL_M = 编队.CRUISE_AGL_M
+CRUISE_AGL_M = formation.CRUISE_AGL_M
 SPACING_M = 4.0
 
 ROUTE_A, ROUTE_B = (3.0, 3.0), (3.0, 22.0)
@@ -292,20 +292,20 @@ def _fly_route(sdk, legs, z_agl=CRUISE_AGL_M):
     航段之间航向不再变化（2026-09-30 用户要求，跟编队飞行同一条规则）。
 
     legs 是 [(名字, (wx, wy)), ...]，从飞机**当前位置**出发依次飞过去。
-    停顿时长/转向超时/容差都复用《编队飞行示例》的常量，两边保持一致。
+    停顿时长/转向超时/容差都复用《formation.py》的常量，两边保持一致。
     """
     cx, cy, _ = sdk.get_local_position()
     for name, (wx, wy) in legs:
         tx, ty, tz = sdk.world_to_local(wx, wy, z_agl)
         heading = math.atan2(ty - cy, tx - cx)
         print(f'[{sdk.namespace}] 飞往航点{name} ({wx:.2f}, {wy:.2f})，'
-              f'航向 {math.degrees(heading):.0f}°（停 {编队.WAYPOINT_HOLD_S:.0f} 秒转向）',
+              f'航向 {math.degrees(heading):.0f}°（停 {formation.WAYPOINT_HOLD_S:.0f} 秒转向）',
               flush=True)
         t0 = time.time()
-        if not sdk.face_yaw(heading, timeout=编队.TURN_TIMEOUT_S,
-                            tolerance_deg=编队.TURN_TOL_DEG):
+        if not sdk.face_yaw(heading, timeout=formation.TURN_TIMEOUT_S,
+                            tolerance_deg=formation.TURN_TOL_DEG):
             print(f'[{sdk.namespace}] 航向没转到位，仍继续前飞', flush=True)
-        left = 编队.WAYPOINT_HOLD_S - (time.time() - t0)
+        left = formation.WAYPOINT_HOLD_S - (time.time() - t0)
         if left > 0:
             time.sleep(left)
         with sdk.fixed_altitude(tz):
@@ -352,13 +352,13 @@ def _drive_servos(sdk, pwm, label):
 def _supply_point_action(sdk, pwm, label, sound=None):
     """飞到物资点 -> 边瞄准边降落到底 -> 驱动机械抓 -> 起飞回巡航高度。
 
-    降落复用 `任务工具.descend_onto()`：**不要用
+    降落复用 `utils.descend_onto()`：**不要用
     `precision_land_and_confirm()`**，那是"对准一点、下降一点"的分级下降，
     从 2.5 m 下来要 40 秒以上、30 秒时限内走不完，每次都走超时兜底
     （2026-09-23 实测）。descend_onto 是连续修正，同一时间既对准也下降。
     """
     _goto_world(sdk, SUPPLY_XY[0], SUPPLY_XY[1], '物资点')
-    工具.descend_onto(sdk, SUPPLY_TAG, '灭火器材')
+    utils.descend_onto(sdk, SUPPLY_TAG, '灭火器材')
     print(f'[{sdk.namespace}] 已降落在物资点，开始{label}', flush=True)
     if sound:
         sdk.play_sound_light(sound)
@@ -415,7 +415,7 @@ def center_fire_in_view(sdk, tag='火情'):
         print(f'[{sdk.namespace}] 平移到 ({tx:.2f}, {ty:.2f}, {tz:.2f})（局部系）', flush=True)
         sdk.goto_direct(tx, ty, tz)          # 直线平移/升降，不经规划器
         # 平移不改朝向，但 goto_direct 之后朝向可能被带偏，复位一次
-        sdk.face_yaw(yaw0, timeout=编队.TURN_TIMEOUT_S, tolerance_deg=2.0)
+        sdk.face_yaw(yaw0, timeout=formation.TURN_TIMEOUT_S, tolerance_deg=2.0)
         time.sleep(AIM_SETTLE_S)
     print(f'[{sdk.namespace}] {AIM_MAX_TRIES} 轮仍没对准{tag}，按当前状态继续', flush=True)
     return False
@@ -476,8 +476,8 @@ def recon(sdk):
                 pending_spot_clear(f'下一个巡检点 {pt_name}')
                 pending_spot_clear = None
         print(f'[{sdk.namespace}] 在 {pt_name} 点转到 {yaw_deg:.0f}° 巡检 {bldg} 楼', flush=True)
-        sdk.face_yaw(math.radians(yaw_deg), timeout=编队.TURN_TIMEOUT_S,
-                     tolerance_deg=编队.TURN_TOL_DEG)
+        sdk.face_yaw(math.radians(yaw_deg), timeout=formation.TURN_TIMEOUT_S,
+                     tolerance_deg=formation.TURN_TOL_DEG)
         # 没火情的楼：转到位就拍，照片是硬性交付物（每栋楼必须有一张），
         # 不能让后面的识别失败把它带掉。
         # **有火情的楼等对准之后再拍**（用户 2026-09-30）——那张照片要能看清
@@ -521,7 +521,7 @@ def recon(sdk):
         at_e.wait(AT_E_WAIT_S)          # 原地等任务机到 E 点待命
         print(f'[{sdk.namespace}] 任务机已到 E 点，发射破窗弹', flush=True)
         sdk.play_sound_light('侦察机发射破窗弹')
-        工具.fire_launcher(sdk, '发射破窗弹')
+        utils.fire_launcher(sdk, '发射破窗弹')
         sdk.send_to_teammate(EV_BREACHED)
         sdk.play_sound_light('侦察机破窗完成')
         # 发射点马上要让给任务机了。两条放行路径：离得够远（watchdog 线程），
@@ -558,10 +558,10 @@ def recon(sdk):
     # 解散判据：**任务机过 D 点**就解散（用户 2026-09-30 要求），不是默认的
     # "长机飞回自己起飞点上空"。解散后长机继续飞到 A 点待命，任务机去物资点
     # 释放器材再回自己起降点。
-    编队.leader_route(sdk, [ROUTE_G, ROUTE_D], spacing_m=SPACING_M,
+    formation.leader_route(sdk, [ROUTE_G, ROUTE_D], spacing_m=SPACING_M,
                       start_xy=ROUTE_G, final_xy=ROUTE_A,
                       disband_after_follower_passes=ROUTE_D)
-    编队._hold_at_point_a(sdk, ROUTE_A)
+    formation._hold_at_point_a(sdk, ROUTE_A)
     # 任务完成的播报时机：**任务机确实落在自己的起降点上**（用户 2026-09-30）。
     # 不能拿"降落动作结束"当判据——任务机全程要降落三次（取器材、放器材、回家），
     # 前两次都不是任务结束。所以由任务机自己核对落点坐标后发事件，这边等它。
@@ -589,8 +589,8 @@ def supply(sdk):
     breached = _Inbox(sdk, EV_BREACHED)
     spot_clear = _Inbox(sdk, EV_SPOT_CLEAR)
     inspect_done = _Inbox(sdk, EV_INSPECT_DONE)
-    route_done = 编队._Inbox(sdk, 编队.ROUTE_DONE)
-    route_plan = 编队._Inbox(sdk, 编队.ROUTE_PLAN)
+    route_done = formation._Inbox(sdk, formation.ROUTE_DONE)
+    route_plan = formation._Inbox(sdk, formation.ROUTE_PLAN)
 
     airborne = False
     print(f'[{sdk.namespace}] 等侦察机通报高层火情…', flush=True)
@@ -650,7 +650,7 @@ def supply(sdk):
 
         sdk.play_sound_light('任务机发射灭火弹')
         for i in range(1, EXTINGUISHER_SHOTS + 1):
-            工具.fire_launcher(sdk, f'发射灭火弹 {i}/{EXTINGUISHER_SHOTS}')
+            utils.fire_launcher(sdk, f'发射灭火弹 {i}/{EXTINGUISHER_SHOTS}')
             if i < EXTINGUISHER_SHOTS:
                 time.sleep(SHOT_INTERVAL_S)
         sdk.send_to_teammate(EV_EXTINGUISHED)
@@ -675,16 +675,16 @@ def supply(sdk):
     # ================= 过程③ 编队返回 =================
     # goto_station=False = **就近入列**：任务机这会儿就在侦察机附近，再飞一趟
     # "航线起点后方 spacing 米"的站位点纯属绕路。起降由本脚本自己管，编队只管空中。
-    编队.follow_formation(sdk, SPACING_M, inbox=route_done, plan=route_plan,
+    formation.follow_formation(sdk, SPACING_M, inbox=route_done, plan=route_plan,
                           goto_station=False)
 
     # 解散在**任务机过 D 点**之后（用户 2026-09-30 要求）。解散后先回物资点
     # 降落、松开机械抓模拟释放器材，再回自己起降点降落。
     _supply_point_action(sdk, RELEASE_PWM, '释放灭火器材')
-    编队._land_at_pad(sdk)
+    formation._land_at_pad(sdk)
     # 核对**真的落在自己的起降点上**再播报（用户 2026-09-30）：全程要降落三次
     # （取器材、放器材、回家），"降落动作完成"本身说明不了任务结束。
-    pad = 编队._own_pad(sdk)
+    pad = formation._own_pad(sdk)
     px, py, _ = sdk.get_local_position()
     wx, wy = sdk.local_to_world(px, py, 0.0)[:2]
     d = math.hypot(wx - pad[0], wy - pad[1])

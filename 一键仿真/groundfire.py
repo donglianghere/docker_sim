@@ -16,13 +16,13 @@
                                       飞火情点 -> 对准通报坐标 -> 投放灭火弹
 收到"已投放" ◄──────────────────── 通知已投放
 就地（G 点）开始编队                   （在原地等长机发航线）
-  ↓ 从 G 开始编队，NX01 在前 NX02 在后，规则跟《编队飞行示例》完全一样
+  ↓ 从 G 开始编队，NX01 在前 NX02 在后，规则跟《formation.py》完全一样
   G -> D -> A，长机飞回自己起飞点上空时解散
 NX01 悬停在 A 点待命                      NX02 降落在自己起降点
 
 两个要点：
 
-1. **编队段直接复用 `编队飞行示例` 的函数**，不另写一套。用户要求"和编队飞行
+1. **编队段直接复用 `formation.py` 的函数**，不另写一套。用户要求"和编队飞行
    这一段的要求一样"——复制一份代码迟早两边分叉，所以那边把**纯空中**的编队
    段拆成了 `leader_route()` / `follow_formation()`（起降不属于编队内容），
    这里直接调。协调转弯、解散判据、间距控制全都是同一份实现。
@@ -30,7 +30,7 @@ NX01 悬停在 A 点待命                      NX02 降落在自己起降点
 2. **所有跨机事件在脚本最开头就全部注册**。可靠事件通道是"先 ACK 再分发"，
    没注册处理函数的事件会被确认后丢弃——等用到了才注册必然丢事件。
 
-3. **降落抓取直接复用 `任务工具.descend_onto()`**，不自己写一套，
+3. **降落抓取直接复用 `utils.descend_onto()`**，不自己写一套，
    也不用 SDK 的 `precision_land_and_confirm()`——后者分级下降太慢，30 秒时限
    内走不完（那份文件的注释里记着 2026-09-23 的实测）。
 """
@@ -38,12 +38,12 @@ import argparse
 import math
 import time
 
-import 编队飞行示例 as 编队
-import 任务工具 as 工具
+import formation
+import utils
 from contest_sdk import DroneSDK
 from contest_sdk.exceptions import ActionFailedError
 
-CRUISE_AGL_M = 编队.CRUISE_AGL_M      # 2.0，跟编队段保持同一个巡航高度
+CRUISE_AGL_M = formation.CRUISE_AGL_M      # 2.0，跟编队段保持同一个巡航高度
 SPACING_M = 4.0
 
 ROUTE_A = (3.0, 3.0)
@@ -193,9 +193,9 @@ def recon(sdk):
     # start_xy 要的是**世界坐标**（航线本身就是世界系）。飞机此刻就在 G，
     # 直接用 ROUTE_G——早先传 get_local_position() 的局部坐标，被当成世界坐标
     # 用，站位点算到了 3# 楼那一片、飞不过去（2026-09-29 实测）。
-    编队.leader_route(sdk, [ROUTE_G, ROUTE_D], spacing_m=SPACING_M,
+    formation.leader_route(sdk, [ROUTE_G, ROUTE_D], spacing_m=SPACING_M,
                       start_xy=ROUTE_G, final_xy=ROUTE_A)
-    编队._hold_at_point_a(sdk, ROUTE_A)
+    formation._hold_at_point_a(sdk, ROUTE_A)
     sdk.play_sound_light('侦察机任务完成')
 
 
@@ -205,8 +205,8 @@ def recon(sdk):
 def supply(sdk):
     # 三个事件全部先注册（见模块 docstring 第 2 点）
     fire = _Inbox(sdk, EV_FIRE)
-    route_done = 编队._Inbox(sdk, 编队.ROUTE_DONE)
-    route_plan = 编队._Inbox(sdk, 编队.ROUTE_PLAN)
+    route_done = formation._Inbox(sdk, formation.ROUTE_DONE)
+    route_plan = formation._Inbox(sdk, formation.ROUTE_PLAN)
 
     print(f'[{sdk.namespace}] 等侦察机通报地面火情…', flush=True)
     d = fire.wait(FIRE_WAIT_S)
@@ -220,14 +220,14 @@ def supply(sdk):
     time.sleep(HOVER_AFTER_TAKEOFF_S)
 
     # ---- 物资点：边瞄准边降落到底，抓取 ----
-    # 直接复用 任务工具.descend_onto()（2026-09-30 从已过时的《地面火情搜索示例》
+    # 直接复用 utils.descend_onto()（2026-09-30 从已过时的《地面火情搜索示例》
     # 搬进公共工具箱）——它的注释写得很清楚：
     # **不要用 precision_land_and_confirm()**，那是"对准一点、下降一点、再对准"的
     # 分级下降，从 2.5 m 下来要 40 秒以上、30 秒时限内走不完，每次都走超时兜底
     # （2026-09-23 实测），等于精度只做了一半。descend_onto 是连续修正，同一时间
     # 既对准也下降，最后 0.7 m 交给普通降落。
     _goto_world(sdk, SUPPLY_XY[0], SUPPLY_XY[1], '物资点')
-    工具.descend_onto(sdk, SUPPLY_TAG, '灭火弹')
+    utils.descend_onto(sdk, SUPPLY_TAG, '灭火弹')
     print(f'[{sdk.namespace}] 已降落在物资点，开始抓取', flush=True)
     sdk.play_sound_light('任务机抓取灭火弹')
     _drive_servos(sdk, GRAB_PWM, '抓取')
@@ -251,9 +251,9 @@ def supply(sdk):
     # 只调编队的**空中段**：起降不是编队内容（用户 2026-09-29 明确）。
     # 任务机此刻已经在空中（刚投完弹），入列 -> 跟队 -> 解散，然后自己降落。
     # 灭火完毕就地入列：此刻任务机就在长机后方约一个间距处，不用再飞站位点
-    编队.follow_formation(sdk, SPACING_M, inbox=route_done, plan=route_plan,
+    formation.follow_formation(sdk, SPACING_M, inbox=route_done, plan=route_plan,
                           goto_station=False)
-    编队._land_at_pad(sdk)
+    formation._land_at_pad(sdk)
     sdk.play_sound_light('任务机已降落')
 
 

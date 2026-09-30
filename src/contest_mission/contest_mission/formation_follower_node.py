@@ -943,7 +943,7 @@ class FormationFollowerNode(Node):
         # 转到位再走"。停下来这件事本身是编队的大扰动：僚机停 3 秒，长机没停，
         # 间距就涨 3 米，之后还得追回来。
         # turn_in_place=False 改成：机头按限速**连续**转向当前段航向，参考点
-        # 一刻不停。长机侧的对应改动在 编队飞行示例.py 的 _start_coordinated_yaw。
+        # 一刻不停。长机侧的对应改动在 formation.py 的 _start_coordinated_yaw。
         self.declare_parameter('yaw_turn_in_place', True)
         self.declare_parameter('yaw_slew_rate_dps', 60.0)
         # 航线（世界坐标，[x0,y0,x1,y1,...]，第一个点是长机起飞点）。航向**只能**
@@ -999,7 +999,7 @@ class FormationFollowerNode(Node):
         # 轨迹跟随的真正输出口（见 cmd_rate_hz 参数上面的说明）
         self.cmd_pub = self.create_publisher(PositionCommand, 'formation_cmd', 10)
         # 诊断话题（2026-09-28）：把跟随回路内部真正看到的几个量发出来，供
-        # scripts/编队监视.py 和长机的"照顾模式"用。外面自己拿两机位置去算
+        # scripts/monitor.py 和长机的"照顾模式"用。外面自己拿两机位置去算
         # 弧长是算不准的——折线基准、采样率、向后延伸那一段都跟这里不一样。
         #   data[0] = lag_m        落后量 = s_limit_gap - s_proj（>0 表示落后）
         #   data[1] = s_cmd        参考点弧长

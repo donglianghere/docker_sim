@@ -23,7 +23,7 @@
 """
 import argparse
 
-import 任务工具 as 工具
+import utils
 import threading
 import time
 
@@ -207,11 +207,11 @@ def recon_return_and_land(sdk):
     pad = sdk.local_to_world(0.0, 0.0, 0.0)
     home = sdk.world_to_local(pad[0], pad[1], CRUISE_AGL_M)
     try:
-        工具.transfer_to(sdk, *home)    # 先锁机头朝起飞点方向、到位等2秒，再定高飞回去
+        utils.transfer_to(sdk, *home)    # 先锁机头朝起飞点方向、到位等2秒，再定高飞回去
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准，落点精度高一个量级
-    工具.land_or_confirm(sdk)       # 自动播"侦察机降落"；超时再自己确认是否已贴地
+    utils.land_or_confirm(sdk)       # 自动播"侦察机降落"；超时再自己确认是否已贴地
 
 
 # ======================== 任务机（follower） ========================
@@ -250,7 +250,7 @@ def fly_above(sdk, world_x, world_y, what):
     """飞到某个世界坐标的上方（走规划器，有避障）。"""
     print(f'[{sdk.namespace}] 飞往{what} ({world_x:.2f}, {world_y:.2f})', flush=True)
     leg = sdk.world_to_local(world_x, world_y, CRUISE_AGL_M)
-    工具.transfer_to(sdk, *leg)     # 先锁机头朝前进方向、到位等2秒，再定高飞
+    utils.transfer_to(sdk, *leg)     # 先锁机头朝前进方向、到位等2秒，再定高飞
 
 
 def aim_at(sdk, tag, what):
@@ -308,7 +308,7 @@ def descend_onto(sdk, tag, what):
     else:
         print(f'[{sdk.namespace}] 边瞄准边降落用满 {PRECISION_LAND_S:.0f} 秒，转普通降落',
               flush=True)
-    工具.land_or_confirm(sdk)               # 最后一段普通降落
+    utils.land_or_confirm(sdk)               # 最后一段普通降落
 
 
 def pick_up_supply(sdk):
@@ -355,7 +355,7 @@ def supply_return_and_land(sdk):
     except GotoUnreachableError as exc:
         print(f'[{sdk.namespace}] 回程判不可达（{exc}），用直飞收尾', flush=True)
     sdk.goto_direct(0.0, 0.0, CRUISE_AGL_M)     # 最后一段收准再落
-    工具.land_or_confirm(sdk)                   # 自动播"任务机降落"
+    utils.land_or_confirm(sdk)                   # 自动播"任务机降落"
     sdk.play_sound_light('任务机已降落')
     print(f'[{sdk.namespace}] 已返回起飞点降落', flush=True)
 

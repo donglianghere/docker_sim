@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 一键仿真：主机开机后跑这一个脚本就够了。
 #
-#   ./一键运行.sh              # 默认跑编队飞行
-#   ./一键运行.sh 任务2         # 地面火情：侦查 -> 取物资 -> 投弹 -> 编队返航
-#   ./一键运行.sh 任务3         # 高层火情：巡检拍摄 -> 协同灭火 -> 编队返回
-#   ./一键运行.sh 任务3 --keep  # 结束后保留选手容器，便于翻日志
-#   ./一键运行.sh --no-sync     # 跑本目录里手改过的版本，不从仓库同步
+#   ./run.sh              # 默认跑编队飞行
+#   ./run.sh 任务2         # 地面火情：侦查 -> 取物资 -> 投弹 -> 编队返航
+#   ./run.sh 任务3         # 高层火情：巡检拍摄 -> 协同灭火 -> 编队返回
+#   ./run.sh 任务3 --keep  # 结束后保留选手容器，便于翻日志
+#   ./run.sh --no-sync     # 跑本目录里手改过的版本，不从仓库同步
 #
 # 它做这些事（按顺序）：
 #   1. 检查 docker / 镜像 / X11
@@ -16,7 +16,7 @@
 #   6. 收尾：让监视存图、修正日志属主、打印结果
 #
 # 这个目录里的 5 个文件就是实际跑起来的那 5 个：三个任务程序 + 监视程序 +
-# 本脚本。外部依赖只剩 contestant_template/任务工具.py 一个模块（公共工具箱：
+# 本脚本。外部依赖只剩 contestant_template/utils.py 一个模块（公共工具箱：
 # land_or_confirm / transfer_to / descend_onto / fire_launcher）——2026-09-30
 # 把原先散在两个**已过时**示例里的 descend_onto、fire_launcher 搬进去了，
 # 那两个示例的任务流程还用着老场景 fire_drill_room 的坐标，不该再被依赖。
@@ -49,12 +49,12 @@ while [ $# -gt 0 ]; do
 done
 
 case "$SCENE" in
-    编队)  SCRIPT=编队飞行示例.py ;;
-    任务2) SCRIPT=任务2单项测试.py ;;
-    任务3) SCRIPT=任务3单项测试.py ;;
+    编队)  SCRIPT=formation.py ;;
+    任务2) SCRIPT=groundfire.py ;;
+    任务3) SCRIPT=highrise.py ;;
 esac
 
-# 航线（世界坐标）。只有编队飞行示例吃 --route；两个任务脚本的航点写在自己
+# 航线（世界坐标）。只有 formation.py 吃 --route；两个任务脚本的航点写在自己
 # 代码里，传了也没用，所以下面只给编队那一支传。
 ROUTE="3,3 3,22 17,22 17,16 10,16 14,14 17,16 17,3"
 
@@ -88,7 +88,7 @@ for img in "$IMAGE" flight-stack:latest sim-world:latest; do
         echo "!! 镜像 $img 不存在。先在 $ROOT 下 build（见 docker-compose.yml 顶部说明） !!" >&2
         exit 1; }
 done
-for f in "$SCRIPT" 编队监视.py; do
+for f in "$SCRIPT" monitor.py; do
     [ -f "$HERE/$f" ] || { echo "!! 本目录缺 $f !!" >&2; exit 1; }
 done
 
@@ -114,13 +114,13 @@ fi
 # 要跑本目录里手改过的版本就加 --no-sync。
 if [ "$SYNC" = "1" ]; then
     n=0
-    for f in 编队飞行示例.py 任务2单项测试.py 任务3单项测试.py; do
+    for f in formation.py groundfire.py highrise.py; do
         src="$ROOT/contestant_template/$f"
         [ -f "$src" ] || continue
         cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }
     done
-    src="$ROOT/scripts/编队监视.py"
-    [ -f "$src" ] && { cmp -s "$src" "$HERE/编队监视.py" || { cp "$src" "$HERE/编队监视.py"; echo "   同步 编队监视.py"; n=$((n+1)); }; }
+    src="$ROOT/scripts/monitor.py"
+    [ -f "$src" ] && { cmp -s "$src" "$HERE/monitor.py" || { cp "$src" "$HERE/monitor.py"; echo "   同步 monitor.py"; n=$((n+1)); }; }
     [ "$n" = "0" ] && log "本目录已是最新版" || log "已从仓库同步 $n 个文件"
 else
     log "--no-sync：用本目录现有的版本，不从仓库同步"
@@ -172,13 +172,13 @@ log "Gazebo 界面 ${gz_n:-0} 个、RViz ${rv_n:-0} 个"
 MON_OUT="/logs/${SCRIPT%.py}_formation.png"
 MON_LOG="/logs/${SCRIPT%.py}_monitor.log"
 log "启动监视窗口（报告将存到 runtime_logs/$(basename "$MON_OUT")）"
-docker cp "$HERE/编队监视.py" "$FSNX01:/tmp/编队监视.py" >/dev/null 2>&1 || true
+docker cp "$HERE/monitor.py" "$FSNX01:/tmp/monitor.py" >/dev/null 2>&1 || true
 docker exec -d -e DISPLAY="$DISPLAY" "$FSNX01" bash -lc "
     source /opt/ros/humble/setup.bash
     export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
            RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
            CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
-    python3 -u /tmp/编队监视.py --layout '$LAYOUT' --route '$ROUTE' \
+    python3 -u /tmp/monitor.py --layout '$LAYOUT' --route '$ROUTE' \
         --out '$MON_OUT' --spacing $SPACING > '$MON_LOG' 2>&1
 " >/dev/null 2>&1 || echo "（监视没起来，不影响飞行）" >&2
 
@@ -229,7 +229,7 @@ done
 # ---- 7. 收尾 ----
 # 监视自带的"任务结束"判据是给编队飞行写的，任务流程里不一定成立，直接发
 # SIGINT 让它存图再退，给几秒写完。
-docker exec "$FSNX01" pkill -INT -f 编队监视 >/dev/null 2>&1 || true
+docker exec "$FSNX01" pkill -INT -f monitor.py >/dev/null 2>&1 || true
 sleep 6
 # 容器以 root 往 /logs 写，宿主机这边属主会是 root，普通用户删不掉——改回来
 docker run --rm -v "$LOGDIR:/logs" --entrypoint chown "$IMAGE" \

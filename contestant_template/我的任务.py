@@ -33,7 +33,7 @@ x 往前、y 往左、z 往上，单位米。想用场地的世界坐标就先�
     sdk.do_action(name)                           触发动作（抓取/投放等）
     sdk.set_mission_state(s) / get_mission_state() 记录/查询任务进度
 
-完整的双机编队例子见同目录的"编队飞行示例.py"。
+完整的双机编队例子见同目录的"formation.py"。
 """
 import argparse
 

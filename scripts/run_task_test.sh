@@ -2,8 +2,8 @@
 # 跑单项任务测试（任务2/任务3 单项测试.py）：重启仿真 -> 等两机就绪 ->
 # 起两个选手容器 -> 等两边都退出 -> 报结果。
 #
-#   ./scripts/run_task_test.sh --script 任务2单项测试.py
-#   ./scripts/run_task_test.sh --script 任务3单项测试.py --keep
+#   ./scripts/run_task_test.sh --script groundfire.py
+#   ./scripts/run_task_test.sh --script highrise.py --keep
 #
 # 跟 run_formation_test.sh 的区别只有两处：跑哪个脚本可选；结束判据用
 # **容器退出**而不是某一行日志——任务脚本没有统一的结束标志，长机和僚机
@@ -11,7 +11,7 @@
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
-SCRIPT="任务2单项测试.py"
+SCRIPT="groundfire.py"
 SPACING=4.0
 RESTART=1
 KEEP=0
@@ -108,7 +108,7 @@ docker exec -d -e DISPLAY="${DISPLAY:-:1}" "$FSNX01" bash -lc "
     export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
            RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
            CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
-    python3 -u /opt/host_scripts/编队监视.py \
+    python3 -u /opt/host_scripts/monitor.py \
         --layout /opt/contest_mission_ws/src/contest_mission/config/sample_room_layout.yaml \
         --out '${MON_OUT}' --spacing ${SPACING} > '${MON_LOG}' 2>&1
 " >/dev/null 2>&1 || echo "（监视没起来，不影响飞行测试）" >&2
@@ -129,7 +129,7 @@ done
 # 选手程序都退了，让监视收尾出图：它自己的"任务结束"判据是给编队飞行写的
 # （两机都落地/悬停够久），任务流程里不一定成立；这里直接发 SIGINT，脚本
 # 收到就存 PNG+CSV 再退。给几秒让它写完。
-docker exec "$FSNX01" pkill -INT -f 编队监视 >/dev/null 2>&1 || true
+docker exec "$FSNX01" pkill -INT -f monitor.py >/dev/null 2>&1 || true
 sleep 6
 
 # 属主修正：选手容器以 root 身份往 /logs 写（照片、日志），宿主机这边属主就是

@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """双机一字纵队编队飞行。两机跑同一份代码，靠 --role 区分。
 
-    python3 编队飞行示例.py --namespace NX01 --role leader  --teammate NX02 \
+    python3 formation.py --namespace NX01 --role leader  --teammate NX02 \
         --route "3,3 3,22 17,22 17,16 10,16 14,14 17,16 17,3" --spacing 4.0
-    python3 编队飞行示例.py --namespace NX02 --role follower --teammate NX01 --spacing 3.5
+    python3 formation.py --namespace NX02 --role follower --teammate NX01 --spacing 3.5
 
 航点是世界坐标 (x, y)，至少两个，按顺序飞。僚机不需要知道航线，它沿长机
 实际飞过的轨迹走，沿轨迹间距不小于 --spacing（这是下限，不是要死守的值）。
@@ -20,7 +20,7 @@
 """
 import argparse
 
-import 任务工具 as 工具
+import utils
 import math
 import time
 
@@ -418,7 +418,7 @@ def _goto_start_station(sdk, route, spacing_m):
           f'航向 {math.degrees(heading):.0f}°', flush=True)
     tx, ty, tz = sdk.world_to_local(sx, sy, CRUISE_AGL_M)
     try:
-        工具.transfer_to(sdk, tx, ty, tz)     # 锁当前朝向、定高飞过去
+        utils.transfer_to(sdk, tx, ty, tz)     # 锁当前朝向、定高飞过去
     except Exception as exc:
         print(f'[僚机] 站位点飞不过去（{exc}），就当前位置入列', flush=True)
     # 到位再转向：先转会让 transfer_to 锁的朝向被覆盖，白转一次
@@ -775,7 +775,7 @@ def _land_at_pad(sdk):
     else:
         print(f'[{sdk.namespace}] 回起飞点 {pad} 降落', flush=True)
     sdk.goto_direct(lx, ly, lz)          # 最后一段精修，落点精度靠它
-    工具.land_or_confirm(sdk)
+    utils.land_or_confirm(sdk)
 
 
 def _own_pad(sdk):

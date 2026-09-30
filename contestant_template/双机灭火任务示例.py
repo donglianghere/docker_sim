@@ -27,8 +27,7 @@
 """
 import argparse
 
-import 任务工具 as 工具
-
+import utils
 import 地面火情搜索示例 as 地面
 import 高楼火情绕飞版示例 as 高楼
 from contest_sdk import DroneSDK
@@ -51,14 +50,14 @@ def return_home_and_land(sdk):
     try:
         # 转场段统一动作：先把机头锁到"朝起飞点"的方向、到位后等 2 秒再飞，全程
         # 定高（这一段最长，不钉住的话规划器会把轨迹高度压下去）
-        工具.transfer_to(sdk, *home)
+        utils.transfer_to(sdk, *home)
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准，下一次起飞还是这个点
     # 机头恢复成起飞时的朝向：上一个任务可能把它锁在了对准火点的方向上，
     # 带着那个朝向落地、再起飞，下一个任务的画面朝向就不可预期了
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
-    工具.land_or_confirm(sdk)       # 自动播"侦察机降落"
+    utils.land_or_confirm(sdk)       # 自动播"侦察机降落"
 
 
 def wait_supply_landed(sdk, 通知):

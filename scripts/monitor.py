@@ -22,7 +22,7 @@
        export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
               RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
               CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml; \
-       python3 /opt/host_scripts/编队监视.py --out /logs/formation.png'
+       python3 /opt/host_scripts/monitor.py --out /logs/formation.png'
 
 没有图形界面（DISPLAY 没给、或 xhost 没放行）时自动退回无窗口模式：不弹窗，
 照常记录，结束时仍然出 PNG。

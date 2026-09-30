@@ -30,14 +30,13 @@
   · 侦察机要**等任务机降落之后**才起飞做下一个任务。
 
 各段实现直接复用单任务示例（同一个文件夹，容器里一起挂到 /workspace），这里只
-负责串起来：编队飞行示例.py / 地面火情搜索示例.py / 高层火情巡检版示例.py
+负责串起来：formation.py / 地面火情搜索示例.py / 高层火情巡检版示例.py
 """
 import argparse
 
-import 任务工具 as 工具
-
+import utils
 import 地面火情搜索示例 as 地面
-import 编队飞行示例 as 编队
+import formation
 import 高层火情巡检版示例 as 巡检
 import 高楼火情绕飞版示例 as 高楼      # 只用它的 Notice/listen_for_report 这些公共件
 from contest_sdk import DroneSDK
@@ -65,14 +64,14 @@ def return_home_and_land(sdk):
     try:
         # 转场段统一动作：先把机头锁到"朝起飞点"的方向、到位后等 2 秒再飞，全程
         # 定高（这一段最长，不钉住的话规划器会把轨迹高度压下去）
-        工具.transfer_to(sdk, *home)
+        utils.transfer_to(sdk, *home)
     except GotoUnreachableError:
         pass
     sdk.goto_direct(*home)          # 最后一段收准，下一次起飞还是这个点
     # 机头恢复成起飞时的朝向：上一个任务可能把它锁在了对准火点的方向上，
     # 带着那个朝向落地、再起飞，下一个任务的画面朝向就不可预期了
     sdk.set_yaw_mode_constant(sdk.pretakeoff_yaw or sdk.get_current_yaw())
-    工具.land_or_confirm(sdk)       # 自动播"侦察机降落"
+    utils.land_or_confirm(sdk)       # 自动播"侦察机降落"
 
 
 def wait_supply_landed(sdk, 通知):
@@ -104,11 +103,11 @@ def run_recon(sdk):
     sdk.on_teammate_event(SUPPLY_LANDED_EVENT, 任务机已降落.on_event)
     任务机就位 = 高楼.Notice()
     sdk.on_teammate_event(巡检.STANDBY_EVENT, 任务机就位.on_event)
-    僚机就位 = 编队.listen_standby(sdk)
+    僚机就位 = formation.listen_standby(sdk)
 
     # 每段任务各起飞一次，且**直接起到该段的巡航高度**——省掉"起飞到1米再爬"
     # 那一次纯垂直规划（2026-09-25 加）。自动播"侦察机起飞"。
-    sdk.takeoff(height_m=编队.CRUISE_AGL_M)
+    sdk.takeoff(height_m=formation.CRUISE_AGL_M)
 
     # ① 编队飞行：全程唯一开定高的一段。本项目默认 LOCALIZATION_SOURCE=uwb_imu，
     # 那套定位的 z 就是离地高度，所以"钉住高度"= 仿地飞行（见 SDK 里
@@ -116,8 +115,8 @@ def run_recon(sdk):
     # ⚠️ 只对长机生效：僚机走 formation_follower_node 直发 position_cmd，
     # 不经过 traj_server。
     # 定高的 z 必须跟 goto() 同一套局部坐标系，不能直接传世界高度（见 SDK 说明）
-    with sdk.fixed_altitude(sdk.world_to_local(0.0, 0.0, 编队.CRUISE_AGL_M)[2]):
-        编队.leader_route(sdk, ROUTE, 僚机就位)
+    with sdk.fixed_altitude(sdk.world_to_local(0.0, 0.0, formation.CRUISE_AGL_M)[2]):
+        formation.leader_route(sdk, ROUTE, 僚机就位)
     return_home_and_land(sdk)
     wait_supply_landed(sdk, 任务机已降落)
 
@@ -142,7 +141,7 @@ def run_supply(sdk, teammate):
     报告地面 = 地面.listen_for_report(sdk)
     报告高层 = 高楼.listen_for_report(sdk)
 
-    编队.follower(sdk, SPACING_M)                 # 跟队飞完 -> 回起飞点降落
+    formation.follower(sdk, SPACING_M)                 # 跟队飞完 -> 回起飞点降落
     通知已降落(sdk, teammate)
 
     地面.run_supply(sdk, teammate, 报告地面)      # 取弹投放 -> 返航降落

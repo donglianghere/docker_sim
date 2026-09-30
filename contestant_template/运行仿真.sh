@@ -12,7 +12,7 @@
 # 只想飞一架时加 --single 参数：
 #     bash 运行仿真.sh --single
 # 想跑这个文件夹里别的程序（比如示例），用 --task 指定文件名：
-#     bash 运行仿真.sh --task 编队飞行示例.py
+#     bash 运行仿真.sh --task formation.py
 # 连真机调试加 --real（或者直接运行同目录的"运行真机.sh"）：
 #     bash 运行仿真.sh --real
 # 仿真和真机用不同的 ROS_DOMAIN_ID（仿真21/真机20），互相隔离，不会连错。

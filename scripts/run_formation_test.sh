@@ -7,7 +7,7 @@
 #   ./scripts/run_formation_test.sh --no-restart      # 沿用当前已经在跑的仿真
 #   ./scripts/run_formation_test.sh --keep            # 结束后不删选手容器，便于翻日志
 #
-# 跑的是 contestant_template/编队飞行示例.py，两架飞机各起一个容器、
+# 跑的是 contestant_template/formation.py，两架飞机各起一个容器、
 # 跑同一份代码，只有 --role 不同。
 set -eo pipefail
 
@@ -38,7 +38,7 @@ FOLLOWER=NX02
 FSNX01=docker_sim-flight-stack-nx01-1
 IMAGE=contestant-sdk:latest
 WORKDIR="$PWD/contestant_template"
-SCRIPT="编队飞行示例.py"
+SCRIPT="formation.py"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
@@ -158,7 +158,7 @@ docker exec -d -e DISPLAY="${DISPLAY:-:1}" "$FSNX01" bash -lc "
     export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
            RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
            CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
-    python3 -u /opt/host_scripts/编队监视.py --layout '${MON_LAYOUT}' \
+    python3 -u /opt/host_scripts/monitor.py --layout '${MON_LAYOUT}' \
         --route '${ROUTE}' --out '${MON_OUT}' --spacing ${SPACING} > '${MON_LOG}' 2>&1
 " >/dev/null 2>&1 || echo "（监视没起来，不影响飞行测试）" >&2
 
@@ -173,7 +173,7 @@ while :; do
         log "两机都已完成"
         # 让监视收尾出图：它自带的"任务结束"判据不一定在所有流程里成立，
         # 直接发 SIGINT，脚本收到就存 PNG+CSV 再退。给几秒让它写完。
-        docker exec "$FSNX01" pkill -INT -f 编队监视 >/dev/null 2>&1 || true
+        docker exec "$FSNX01" pkill -INT -f monitor.py >/dev/null 2>&1 || true
         sleep 6
         break
     fi

@@ -1290,7 +1290,7 @@ ros2 run contest_mission formation_follower_node \
 # yaw_turn_in_place=true（2026-09-29 用户改要求："无论编队还是单独飞行、无论
 # 长机还是僚机，每个航点处都停顿 2 秒同时调整航向，航点之间航向不再变化"）：
 # 僚机到拐点停下、把机头转到下一段航向、转到位再走。长机侧的对应实现在
-# contestant_template/编队飞行示例.py 的 leader_route（每段飞前 face_yaw +
+# contestant_template/formation.py 的 leader_route（每段飞前 face_yaw +
 # 补足 WAYPOINT_HOLD_S 秒）。
 # 09-28 那版的"协调转弯（false）"是为了消除拐点处失控的 4~8 秒爬行，代价是
 # 切角 1 米以上；现在改成**确定性的 2 秒停顿**，停多久自己说了算。
