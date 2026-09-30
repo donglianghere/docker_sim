@@ -98,6 +98,8 @@ WAYPOINT_SYNC_POLL_S = 0.1
 # 被 goto() 判成"不可达"时，停的位置离航点在这个距离以内就算到了（见 _goto_waypoint）。
 # 取 0.7：判定下限本身就是 0.5 米，爬行平台落在 0.5~0.7 是典型值；再大就不该当到达了。
 GOTO_ACCEPT_M = 0.7
+# 判成"不可达"但离得还远时，等这么久再重发一次目标（见 _goto_waypoint）。
+GOTO_RETRY_WAIT_S = 2.0
 YAW_LEG_ADVANCE_M = 1.5       # 离本段终点这么近就算进入下一段（转弯线程自己推进）
 YAW_LEG_DONE_RATIO = 0.98     # 或者沿本段投影进度到这个比例也算走完（切角时兜底）
 READY = 'formation_standby'   # 僚机 -> 长机
@@ -438,14 +440,30 @@ def _goto_waypoint(sdk, tx, ty, tz, tag):
     整条航线崩掉。所以：停的位置离目标在 GOTO_ACCEPT_M 以内就按到达处理、
     打一行日志继续飞；超出这个范围才是真的到不了，照常抛出去。
     """
-    try:
-        sdk.goto(tx, ty, tz)
-    except GotoUnreachableError as exc:
-        d = float(getattr(exc, 'distance_m', 1e9))
-        if d > GOTO_ACCEPT_M:
+    for attempt in (1, 2):
+        try:
+            sdk.goto(tx, ty, tz)
+            return
+        except GotoUnreachableError as exc:
+            d = float(getattr(exc, 'distance_m', 1e9))
+            if d <= GOTO_ACCEPT_M:
+                print(f'[长机] {tag}：规划器终端爬行被判卡住，但离航点只有 {d:.2f} m '
+                      f'(≤{GOTO_ACCEPT_M:.1f} m)，按到达处理继续飞', flush=True)
+                return
+            if attempt == 1:
+                # 还差得远，但**先重试一次再说**：ego_planner 的安全检查会触发
+                # EMERGENCY_STOP（轨迹上突然出现障碍，多半是占据图上的瞬时杂点），
+                # 急停期间飞机原地不动，几秒后自己 re-trigger 重新规划就恢复了。
+                # 而 goto() 的卡住判据是"5 秒内移动不足 0.5 米"——2026-09-30 实测
+                # 急停 12:01:00.2 -> 恢复 12:01:04.9，异常 12:01:05.5，只差 0.6 秒
+                # 就抢在恢复前把整个任务判死了。飞机本身没问题，重发一次目标就走。
+                print(f'[长机] {tag}：离航点还有 {d:.2f} m 就被判卡住'
+                      f'（规划器可能刚触发过安全急停），等 {GOTO_RETRY_WAIT_S:.0f} 秒重试一次',
+                      flush=True)
+                time.sleep(GOTO_RETRY_WAIT_S)
+                continue
+            print(f'[长机] {tag}：重试后仍到不了（还差 {d:.2f} m）', flush=True)
             raise
-        print(f'[长机] {tag}：规划器终端爬行被判卡住，但离航点只有 {d:.2f} m '
-              f'(≤{GOTO_ACCEPT_M:.1f} m)，按到达处理继续飞', flush=True)
 
 
 def _wait_follower_settled(sdk, tag):
