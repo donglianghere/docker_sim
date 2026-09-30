@@ -4,6 +4,7 @@
 #   ./run.sh              # 默认跑编队飞行
 #   ./run.sh 任务2         # 地面火情：侦查 -> 取物资 -> 投弹 -> 编队返航
 #   ./run.sh 任务3         # 高层火情：巡检拍摄 -> 协同灭火 -> 编队返回
+#   ./run.sh 综合           # 三轮连贯：编队 + 两种火情（火情随机、两轮不重复）
 #   ./run.sh 任务3 --keep  # 结束后保留选手容器，便于翻日志
 #   ./run.sh --no-sync     # 跑本目录里手改过的版本，不从仓库同步
 #
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
         编队|formation)  SCENE=编队;  shift ;;
         任务2|task2)     SCENE=任务2; shift ;;
         任务3|task3)     SCENE=任务3; shift ;;
+        综合|mission)    SCENE=综合; shift ;;
         --spacing)       SPACING="$2"; shift 2 ;;
         --no-restart)    RESTART=0; shift ;;
         --no-sync)       SYNC=0; shift ;;
@@ -52,6 +54,7 @@ case "$SCENE" in
     编队)  SCRIPT=formation.py ;;
     任务2) SCRIPT=groundfire.py ;;
     任务3) SCRIPT=highrise.py ;;
+    综合) SCRIPT=mission.py ;;
 esac
 
 # 航线（世界坐标）。只有 formation.py 吃 --route；两个任务脚本的航点写在自己
@@ -114,12 +117,16 @@ fi
 # 要跑本目录里手改过的版本就加 --no-sync。
 if [ "$SYNC" = "1" ]; then
     n=0
-    for f in formation.py groundfire.py highrise.py; do
+    for f in formation.py groundfire.py highrise.py mission.py; do
         src="$ROOT/contestant_template/$f"
         [ -f "$src" ] || continue
         cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }
     done
-    src="$ROOT/scripts/monitor.py"
+    for f in monitor.py referee.py; do
+        src="$ROOT/scripts/$f"
+        [ -f "$src" ] && { cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }; }
+    done
+    src=""
     [ -f "$src" ] && { cmp -s "$src" "$HERE/monitor.py" || { cp "$src" "$HERE/monitor.py"; echo "   同步 monitor.py"; n=$((n+1)); }; }
     [ "$n" = "0" ] && log "本目录已是最新版" || log "已从仓库同步 $n 个文件"
 else
@@ -169,6 +176,11 @@ log "Gazebo 界面 ${gz_n:-0} 个、RViz ${rv_n:-0} 个"
 # ---- 5. 监视窗口 ----
 # docker cp 送进容器再跑，保证用的是**本目录这一份**监视程序
 # （compose 把 ROOT/scripts 挂在 /opt/host_scripts，那是另一份）。
+# 综合任务是多轮的：轮次之间任务机降落、侦察机在 A 点悬停，正好满足监视默认的
+# "任务结束"判据，会在半道退出（用户 2026-09-30 发现"监控也自己掉了"）。
+# 侦察机只在整个任务结束时才降落，拿它当判据最准。
+MON_END=""
+[ "$SCENE" = "综合" ] && MON_END="--end-on-leader-land"
 MON_OUT="/logs/${SCRIPT%.py}_formation.png"
 MON_LOG="/logs/${SCRIPT%.py}_monitor.log"
 log "启动监视窗口（报告将存到 runtime_logs/$(basename "$MON_OUT")）"
@@ -179,8 +191,25 @@ docker exec -d -e DISPLAY="$DISPLAY" "$FSNX01" bash -lc "
            RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
            CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
     python3 -u /tmp/monitor.py --layout '$LAYOUT' --route '$ROUTE' \
-        --out '$MON_OUT' --spacing $SPACING > '$MON_LOG' 2>&1
+        --out '$MON_OUT' --spacing $SPACING $MON_END > '$MON_LOG' 2>&1
 " >/dev/null 2>&1 || echo "（监视没起来，不影响飞行）" >&2
+
+# ---- 5.5 综合任务：起"出题裁判" ----
+# 它负责把两处火情标识先从 world 里删掉，等侦察机过 G 点再把本轮抽中的那个
+# 生成回来（两轮不重复）。只有综合任务需要——三个单任务的火情是固定摆好的。
+if [ "$SCENE" = "综合" ]; then
+    log "启动出题裁判（火情随机出现，两轮不重复）"
+    docker cp "$HERE/referee.py" "$SIMWORLD:/tmp/referee.py" >/dev/null 2>&1 || true
+    docker exec -d "$SIMWORLD" bash -lc "
+        source /opt/ros/humble/setup.bash
+        export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
+               RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+               CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
+        python3 -u /tmp/referee.py --leader $LEADER > /logs/mission_referee.log 2>&1
+    " >/dev/null 2>&1 || echo "（裁判没起来，火情不会随机出现）" >&2
+    sleep 3
+    docker exec "$SIMWORLD" head -2 /logs/mission_referee.log 2>/dev/null || true
+fi
 
 # ---- 6. 跑选手程序 ----
 # 本目录挂 /workspace（优先），contestant_template 挂 /deps 补三个依赖模块；

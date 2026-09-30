@@ -530,6 +530,13 @@ def main():
                     help='布局 yaml（画俯视底图用：房间/立柱/起降点/障碍/仿地模块）。'
                          '不给就用脚本里写死的 fire_drill_room 那组老坐标。')
     ap.add_argument('--no-gui', action='store_true', help='只出PNG，不弹窗')
+    ap.add_argument('--end-on-leader-land', action='store_true',
+                    help='改用"**侦察机降落**"当收尾判据。多轮流程（综合任务）必须'
+                         '用它：轮次之间任务机会降落在起降点、侦察机在 A 点悬停等'
+                         '下一轮，正好满足默认判据（一架已降落、另一架原地悬停），'
+                         '连续成立就会在半道退出——而轮次间隔本来就可能好几分钟，'
+                         '调长确认窗口治不了。侦察机只在整个任务结束时才降落，'
+                         '拿它当判据既准确又简单。')
     ap.add_argument('--end-confirm', type=float, default=40.0,
                     help='结束条件要连续成立多少秒才真的收尾。默认 40 秒——'
                          '任务流程里"一架落地取物资、另一架悬停等待"会让结束'
@@ -591,13 +598,19 @@ def main():
             # 而那一刻 NX01 正在 G 点悬停等它——"一架已降落、另一架原地悬停"
             # 当场成立，监视就在任务半道出报告退出了（用户发现窗口自己关了）。
             # 抓取那十几秒撑不满确认窗口，真正的结束能撑满。
-            if mon.mission_done() and now > 20.0:
+            if args.end_on_leader_land:
+                ended = mon._all_airborne_seen and mon.landed[mon.names[0]]
+            else:
+                ended = mon.mission_done()
+            if ended and now > 20.0:
                 if done_since is None:
                     done_since = now
                 elif now - done_since >= args.end_confirm:
                     who = '、'.join(n for n in mon.names if mon.landed[n])
-                    print(f'[监视] 任务结束（{who} 已降落，其余在原地悬停，'
-                          f'条件连续成立 {args.end_confirm:.0f} 秒），出报告', flush=True)
+                    why = (f'侦察机 {mon.names[0]} 已降落' if args.end_on_leader_land
+                           else f'{who} 已降落，其余在原地悬停')
+                    print(f'[监视] 任务结束（{why}，条件连续成立 '
+                          f'{args.end_confirm:.0f} 秒），出报告', flush=True)
                     break
             else:
                 done_since = None
