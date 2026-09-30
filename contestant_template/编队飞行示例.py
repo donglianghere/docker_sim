@@ -73,36 +73,88 @@ YAW_SLEW_DPS = 60.0           # 机头最大偏航角速度（度/秒）
 YAW_TICK_S = 0.1              # 偏航指令刷新周期
 YAW_ANTICIPATE_M = 2.5        # 离拐点还有这么远就开始转下一段的航向
 YAW_SEND_EPS = math.radians(0.5)   # 角度变化小于这个就不下发，免得刷屏
+WAYPOINT_HOLD_S = 2.0         # 2026-09-29 用户要求：每个航点停这么久，同时换向
+# 航点握手（2026-09-30）：长机在航点转向、停满 WAYPOINT_HOLD_S 之后，**再等
+# 僚机也收拢到队形位置**才起步。
+#
+# 为什么要这个：走停模式下间距波动的主因不是增益不够，是**两机走停节拍错开**。
+# 实测 run67——长机在航点停 6~9 秒，僚机被间距上限夹住慢慢贴到 4 米；长机一
+# 起步就冲到 1.0 m/s，而僚机此刻可能还在自己的原地转向里（速度被钳成 0），
+# 于是间距一次性放大到 5.7 米。这是相位问题，连续调速治不了。
+#
+# 为什么用"落后量"一个量就够：僚机原地转向期间速度是 0、根本收不了间距，
+# 所以"落后量已经收到容差内"同时蕴含了"僚机也停稳、转完了"。不需要僚机
+# 额外上报状态，也不用改跟随节点。
+#
+# 为什么放在长机侧而不是做成双边连续律：长机的速度是 ego_planner 轨迹的一
+# 部分，连续调它会触发重规划（2026-09-29 拐点 set_max_vel 降速实测"效果极差"）。
+# 这里只在长机**本来就静止**的那一刻做一次离散等待，不碰规划器、不碰任何
+# 速度参数；航段之间的连续调节仍然僚机独占，保持单一权限。
+WAYPOINT_SYNC_ENABLED = True
+WAYPOINT_SYNC_LAG_M = 0.5     # 僚机落后量收到这个以内算"已入位"
+WAYPOINT_SYNC_MAX_WAIT_S = 8.0   # 等不到也必须走，别把整条航线拖死
+WAYPOINT_SYNC_POLL_S = 0.1
 YAW_LEG_ADVANCE_M = 1.5       # 离本段终点这么近就算进入下一段（转弯线程自己推进）
 YAW_LEG_DONE_RATIO = 0.98     # 或者沿本段投影进度到这个比例也算走完（切角时兜底）
 READY = 'formation_standby'   # 僚机 -> 长机
 ROUTE_DONE = 'route_done'     # 长机 -> 僚机
 ROUTE_PLAN = 'route_plan'     # 长机 -> 僚机：整条航线（含长机起飞点），僚机用来定每段航向
 IN_POSITION = 'formation_in_position'   # 僚机 -> 长机：已飞到起始站位、机头已转到第一段航向
-# 起步缓加速（用户 2026-09-28 要求）：长机起步头几秒把规划器限速压低，避免
-# 一上来就顶到 1.0 m/s 把僚机甩开。恢复成 None 表示用 .env 里的 V_MAX 原值。
-START_SLOW_VEL_MPS = 0.25     # 2026-09-28 从 0.4 降到 0.25（用户：起步阶段长机慢点）
-START_SLOW_S = 4.0            # 最少压这么久
+# 起步缓加速（用户 2026-09-28 要求）：起步时把规划器限速压低，避免一上来就
+# 顶到 1.0 m/s 把僚机甩开。
 # 2026-09-28：删掉长机照顾模式之后，起步间距从 4.93 涨到 5.95（巡航段两者
-# 完全一样，std 都是 0.26——照顾模式的全部价值只在起步这一段）。
-# 起步是长机**事先知道**的事件，不需要常驻回路去发现，补成一次性握手就够：
-# 压住限速直到僚机落后量收到 START_SLOW_LAG_M 以内，最多压 START_SLOW_MAX_S。
-START_SLOW_LAG_M = 0.3        # 僚机落后收到这个以内就开始放速度
-START_SLOW_MAX_S = 12.0       # 等不到也必须恢复，别把整段航线拖死
-# 放速度也要缓：从 START_SLOW_VEL_MPS 一步跳回 1.0，长机会猛加速，僚机又被甩开
-# 一次（实测起步间距冲到 5 米，用户指出）。改成分档往上爬。
-START_RAMP_STEP_MPS = 0.15    # 每档加多少
-START_RAMP_PERIOD_S = 1.5     # 每档保持多久
+# 完全一样，std 都是 0.26——照顾模式的全部价值只在起步这一段）。起步是长机
+# **事先知道**的事件，不需要常驻回路去发现，前馈就够。
+# 放速度也要缓：一步从 0.25 跳回 1.0，长机会猛加速、僚机又被甩开一次
+# （实测起步间距冲到 5 米，用户指出）。所以分档往上爬。
+# 分档要快：run71 用 +0.15/1.5 秒（0.5->1.0 要 7.5 秒、走 5 米）还速度，结果
+# 最后一档落进终端减速段把飞机顶过了头。改成 2 秒走完，只占约 1.5 米。
+START_RAMP_STEP_MPS = 0.25    # 每档加多少
+START_RAMP_PERIOD_S = 1.0     # 每档保持多久
+# 2026-09-30 用户指出：长机在每个航点都停下转向，**过每个航点都相当于重新
+# 起步**，所以"起步缓加速"不该只在第一段用，每一段都要用；而且放速度的条件
+# 应当是"僚机也过了这个航点"——只有两机同在一条航段上才谈得上平稳跟踪。
+# LEG_SLOW_VEL_MPS 是"总用时 vs 间距波动"的那个旋钮：长机爬得慢，僚机跟得住，
+# 但每段头 spacing 米都要爬 spacing/实际速度 秒。
+# **下限不能低于 0.5**：`goto()` 的卡住检测是"5 秒内三维位移不足 0.5 米且离目标
+# 还有 0.5 米以上"，即要求持续跑到 0.1 m/s 以上。而限速跟实际速度不是一回事——
+# run70 实测限速 0.25 时长机只跑 0.15 m/s（18.2 秒走 2.78 米），刚起步那几秒更
+# 低，直接被判成 GotoUnreachableError（leg 1 擦边活下来，leg 2 起步就挂）。
+# 0.5 的限速对应实际约 0.3 m/s，5 秒走 1.5 米，留了 3 倍余量。
+LEG_SLOW_VEL_MPS = 0.5        # 每段起步先把限速压到这里（0 = 关掉这个机制）
+LEG_SLOW_MIN_S = 1.0          # 至少压这么久，给规划器出新轨迹的时间
+# 上限必须大于"以 LEG_SLOW_VEL_MPS 走完 spacing+margin"所需的时间，否则超时
+# 会在僚机过点之前就把速度放开，整个机制形同虚设：4.5 米 / 0.25 (m/s) = 18 秒。
+LEG_SLOW_MAX_S = 30.0         # 等不到僚机过点也必须放速度，别把航线拖死
+LEG_SLOW_MARGIN_M = 0.5       # 判"僚机已过点"时给的余量（米）
+# 终端逼近段有两条互相顶着的约束，run71/run72 各撞了一次，都写在这里：
+#   ① **低限速不能带进终端逼近段**：规划器的轨迹终点速度为零、收敛是渐近的，
+#      限速 1.0 时最后 0.4 米就要爬 4 秒（≈0.1 m/s），已经贴着 goto() 卡住检测
+#      的下限（5 秒内位移不足 0.5 米就判不可达）。压到 0.5 就必然跌破——run72
+#      第 3 段整段 0.5 飞到底，停在离 C 点 0.80 米处被判不可达。
+#   ② **限速变更也不能带进终端逼近段**：改限速会逼 ego_planner 重做时间分配、
+#      重规划，在减速段重算刹车剖面就冲过头——run71 最后一段分档的最后一档落在
+#      离 D 点 5.5 米处，飞机冲过 D 点又被拉回（local y 2.44->2.69，高度
+#      2.40->1.76）。这跟 2026-09-29 "拐点 set_max_vel 降速效果极差"同根。
+# 结论：限速必须在**离终点还远**的时候就还回巡航，而且要还得快。
+# 这两个距离是 run73 之后收紧的：兜底距离原来给 10 米，结果四条长段里有三条
+# 都被兜底提前解除、实际只压了 3~4 米（没压够 spacing 那 4.5 米），std 只收到
+# 0.63（每段都压的 run71 是 0.42）。分档已经改成 2 秒走完、只占约 1.5 米，
+# 6 米的兜底仍给终端逼近段留了 4.5 米余量。
+LEG_SLOW_MIN_LEG_M = 8.0      # 短于这个的航段根本不压限速——没有还回去的余量
+LEG_RAMP_MUST_START_M = 6.0   # 剩这么远还没等到僚机过点，就必须开始放速度
+LEG_RAMP_FREEZE_REMAIN_M = 5.0   # 剩这么近一律不再动限速（兜底，正常到不了）
+LEG_SLOW_POLL_S = 0.1
+_LEG_SLOW = {'gen': 0}        # 换段时作废上一段还没跑完的放速度线程
 # 长机"照顾模式"已删除（2026-09-28）。它原本是：僚机落后多了长机就减速、
 # 落后太多就停下等。删掉的理由是**两个积分器盯同一个误差**——长机看到落后
 # 就减速、僚机看到落后就提速，互相激励，间距曲线上表现为持续的高频抖动。
 # 现在僚机侧的偏置补偿（bias_trim_*）自己能把稳态误差收掉，长机应该飞固定
-# 剖面，不参与调节。真要让长机等僚机，正确的位置是起步那一次同步（
-# IN_POSITION 事件）和起步缓加速（START_SLOW_*），那两处是**前馈**，不是回路。
-# 长机的巡航限速。要跟 .env 里的 V_MAX 一致——照顾模式减速之后靠它恢复。
-# 巡航速度，要跟 .env 的 V_MAX 一致。
-# 只用于"起步缓加速"的分档爬升目标和日志显示；真正的限速由 V_MAX 决定，
-# _slow_start 恢复时用的是 set_max_vel 返回的原值，不读这个常量。
+# 剖面，不参与调节。真要让长机等僚机，正确的位置是**离散的、长机自己知道
+# 时机的**那几处：入列同步（IN_POSITION 事件）、航点握手（WAYPOINT_SYNC_*）、
+# 每段起步缓加速（LEG_SLOW_*）——都是前馈/一次性握手，不是常驻回路。
+# 巡航速度，要跟 .env 的 V_MAX 一致。只用于日志显示和巡航高度换算；真正的
+# 限速由 V_MAX 决定，_slow_leg_start 恢复时用的是 set_max_vel 返回的原值。
 CRUISE_VEL_MPS = 1.0
 # 不传 --route 时用的默认航线（世界坐标）。
 # 2026-09-29 换成**样题场景**的 4 个航点：原点在房间西南角，坐标全为正，
@@ -128,7 +180,8 @@ def listen_standby(sdk):
     return _Inbox(sdk, READY, IN_POSITION)
 
 
-def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0):
+def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
+                 start_xy=None, final_xy=None):
     """长机的编队任务段：等僚机就位 -> 按航线飞一圈 -> 通知僚机航线已完成。
 
     **不起飞、不降落**，留给调用方决定，这样《双机全流程示例.py》能把编队接在
@@ -138,14 +191,20 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0):
         inbox = listen_standby(sdk)
 
     pad = _own_pad(sdk)
+    # start_xy/final_xy：让这段编队航线能从**任意位置**起、到**任意点**收尾，
+    # 给任务2/任务3 的"任务做完从半路开始编队返航"复用（默认值就是本示例
+    # 原来的行为：从起飞点出发、最后回 A 点）。解散判据仍然是"长机飞回自己
+    # 起飞点上空"，跟起点终点无关。
+    start = tuple(start_xy) if start_xy is not None else pad
+    tail = tuple(final_xy) if final_xy is not None else tuple(route_xy[0])
     waypoints = list(route_xy)
     # 2026-09-29 样题流程：A->B->C->D 跑完之后**长机回到 A 点选题**，不是回起飞点。
     # 所以收尾航点是 route_xy[0]（A），不是 pad。僚机那边不受影响——它收到
     # ROUTE_DONE 之后各回各的起降点降落（见 follower()）。
-    if tuple(waypoints[-1]) != tuple(route_xy[0]):
-        waypoints.append(tuple(route_xy[0]))
+    if tuple(waypoints[-1]) != tail:
+        waypoints.append(tail)
     # 从起飞点出发，每一段都是"上一个点 -> 这个点"
-    legs = list(zip([pad] + waypoints[:-1], waypoints))
+    legs = list(zip([start] + waypoints[:-1], waypoints))
 
     # 把整条航线（含长机起飞点）发给僚机。两个用途：
     #   ① 僚机每段的航向用这条航线算，不能靠从长机轨迹估切线——轨迹是里程计
@@ -155,7 +214,14 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0):
     # 2026-09-28 把这一步挪到等 READY **之前**：僚机要先拿到航线才能去站位，
     # 反过来写就是互等。
     try:
-        sdk.send_to_teammate(ROUTE_PLAN, route=[list(p) for p in ([pad] + waypoints)])
+        # 2026-09-29 订正：这里原来拼的是 [pad] + waypoints。加了 start_xy 之后
+        # 编队段可以从**半路**起步（任务2/任务3 是从 G 点开始编队），再拼 pad
+        # 就等于告诉僚机"第一段是 起飞点->G"——那一段根本不存在。僚机据此算
+        # 站位点会算到房间外（实测 (-6.22,-3.34) 不可达），分段航向也跟着错。
+        # 起点跟首航点重合时不要重复塞：那样首段长度为零，僚机拿它算航向会得到
+        # 一个任意值（任务2 从 G 起步、首航点也是 G，实测算出 0° 的假航向）。
+        plan_pts = list(waypoints) if _same_xy(start, waypoints[0]) else [start] + list(waypoints)
+        sdk.send_to_teammate(ROUTE_PLAN, route=[list(p) for p in plan_pts])
     except Exception as exc:                # 送不到不影响自己飞，僚机退化成锁定初始朝向
         print(f'[长机] 航线没送到僚机（{exc}），僚机将保持入列时的朝向', flush=True)
 
@@ -180,44 +246,67 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0):
         fx, fy, _ = sdk.world_to_local(frm[0], frm[1], CRUISE_AGL_M)
         tx, ty, _ = sdk.world_to_local(to[0], to[1], CRUISE_AGL_M)
         legs_local.append(((fx, fy), (tx, ty)))
-    # 协调转弯：机头连续转，飞机不停（2026-09-28 用户要求，见 YAW_SLEW_DPS 注释）
-    yaw_state = {'stop': False, 'idx': 0, 'yaw': None, 'sent': None}
-    stop_yaw = _start_coordinated_yaw(sdk, legs_local, yaw_state)
-
-    # ---- 整条航线一次下发（2026-09-28 用户要求：拐点不要减速等待）----
-    # 原来是逐段 sdk.goto()。那样每一段对 ego_planner 都是独立终点，轨迹**终点
-    # 速度为零**，桥接节点又要等飞机进到 0.3 m 球内才发下一个目标，于是每个航点
-    # 必然"减速到 0 → 判到点 → 从 0 重新加速"。实测四个拐点最低速度 0.01~0.09
-    # m/s、速度<0.3 的时长各 2.2~5.4 秒，长机巡航速度中位只有 0.59 m/s（限速 1.0）。
-    # 一次下发之后由桥接节点按顺序推进，配合它的 flythrough_radius_m（环境变量
-    # WAYPOINT_FLYTHROUGH_M）中间航点提前切换，规划器从"还在动"的状态接着规划。
     _, _, tz = sdk.world_to_local(legs[0][1][0], legs[0][1][1], CRUISE_AGL_M)
-    route_pts = [(tx, ty, tz) for (_f, (tx, ty)) in legs_local]
+
     # 解散看门狗：盯着长机什么时候飞回**自己的起飞点**上空，到了就发 ROUTE_DONE
     disband_state = {'stop': False, 'sent': False}
     stop_disband = _start_disband_watch(sdk, pad, spacing_m, disband_state)
+    sync_wait_s = 0.0       # 航点握手总共等了多久（见 _wait_follower_settled）
 
+    # ---- 逐段飞：每个航点停 WAYPOINT_HOLD_S 秒、同时把机头转到下一段航向 ----
+    # 2026-09-29 用户要求："无论编队还是单独飞行、无论长机还是僚机，每个航点处
+    # 都停顿 2 秒同时调整航向，航点之间航向不再变化。"
+    #
+    # 这是把 09-28 的"协调转弯 + 整条航线一次下发（goto_route）"**反过来**：
+    # 那一版是为了消除拐点处失控的 4~8 秒爬行，代价是切角 1 米以上；现在改成
+    # **确定性的 2 秒停顿**——停多久是自己说了算的，不再看规划器的渐近收敛脸色，
+    # 而且航向在航段内恒定，观感和判读都更清楚。
+    # 相应地 WAYPOINT_FLYTHROUGH_M 要设回 0：现在是**要**真正飞到航点的。
     for i, (frm, to) in enumerate(legs, start=1):
         (fx, fy), (tx, ty) = legs_local[i - 1]
+        heading = math.atan2(ty - fy, tx - fx)
         print(f'[长机] 航点 {i}/{len(legs)}: ({to[0]}, {to[1]})，'
-              f'航向 {math.degrees(math.atan2(ty - fy, tx - fx)):.0f}°', flush=True)
-    if START_SLOW_VEL_MPS:
-        # 起步缓加速：压住限速直到僚机跟上（见 START_SLOW_LAG_M）
-        _slow_start(sdk)
-    # 定高飞：整条航线一个高度，所以 with 块包住整条航线而不是每段一次。
-    # fixed_altitude 要用**局部系**的 z，且必须等于航点的 z，否则永远判不到点。
-    if hasattr(sdk, 'goto_route'):
+              f'航向 {math.degrees(heading):.0f}°（停 {WAYPOINT_HOLD_S:.0f} 秒转向）',
+              flush=True)
+        # 停顿与转向同时进行：face_yaw 阻塞到转到位，不足 2 秒的部分补足
+        t0 = time.time()
+        if not sdk.face_yaw(heading, timeout=TURN_TIMEOUT_S, tolerance_deg=TURN_TOL_DEG):
+            print(f'[长机] 航向没转到位（目标 {math.degrees(heading):.0f}°），仍继续前飞',
+                  flush=True)
+        left = WAYPOINT_HOLD_S - (time.time() - t0)
+        if left > 0:
+            time.sleep(left)
+        # 停满、转到位之后，再等僚机也收拢到队形位置才起步（见 WAYPOINT_SYNC_*）。
+        # 解散之后僚机不再跟随，落后量停更新，这时不能再等。
+        if not disband_state['sent']:
+            sync_wait_s += _wait_follower_settled(sdk, f'航点 {i}/{len(legs)}')
+        leg_len = math.hypot(tx - fx, ty - fy)
+        if LEG_SLOW_VEL_MPS and leg_len >= LEG_SLOW_MIN_LEG_M:
+            # 长航段起步缓加速：压住限速直到僚机也过了这个航点（见 _slow_leg_start）。
+            # (fx, fy) 就是长机此刻脚下的那个航点——本段的起点。
+            _slow_leg_start(sdk, (fx, fy), (tx, ty), spacing_m,
+                            f'航点 {i}/{len(legs)}')
+        elif LEG_SLOW_VEL_MPS:
+            print(f'[长机] 航点 {i}/{len(legs)}：本段只有 {leg_len:.1f} m '
+                  f'(<{LEG_SLOW_MIN_LEG_M:.0f} m)，不压限速直接巡航'
+                  f'——没有把速度还回去的余量，压了会在终端逼近段被判卡住',
+                  flush=True)
+        # 定高飞：航向已经锁在 heading 上，整段不再变
         with sdk.fixed_altitude(tz):
-            sdk.goto_route(route_pts, timeout=ROUTE_DONE_WAIT_S)
-    else:
-        # 老镜像没有 goto_route：退回逐段飞（拐点会停，但能飞完）
-        print('[长机] SDK 没有 goto_route，退回逐段飞（拐点会减速停顿）', flush=True)
-        for tx, ty, tzz in route_pts:
-            with sdk.fixed_altitude(tzz):
-                sdk.goto(tx, ty, tzz)
+            sdk.goto(tx, ty, tz)
 
-    stop_yaw()
     stop_disband()
+    # 最后一段可能是"保持 LEG_SLOW_VEL_MPS 飞完"收尾的，限速还压着。编队段结束
+    # 后面还有别的飞行（长机回 A 点选题、任务2/3 的后续动作），把巡航限速还回去。
+    # 此刻长机已经到点停住，改限速是安全的。
+    cruise = _LEG_SLOW.get('cruise')
+    if cruise is not None and hasattr(sdk, 'set_max_vel'):
+        try:
+            sdk.set_max_vel(cruise)
+        except Exception as exc:
+            print(f'[长机] 巡航限速没还回去（{exc}）', flush=True)
+    if WAYPOINT_SYNC_ENABLED:
+        print(f'[长机] 航点握手累计等待 {sync_wait_s:.1f} 秒', flush=True)
     if not disband_state['sent']:
         # 兜底：看门狗没能判出"僚机已过点"（位置读不到/航线太短/提前结束），
         # 航线都飞完了还是要解散，不然僚机会一直跟着不回家。
@@ -239,20 +328,24 @@ def leader(sdk, route_xy, spacing_m=4.0):
     sdk.play_sound_light('侦察机任务完成')
 
 
-def follower(sdk, spacing_m):
-    """僚机：起飞 -> 跟队 -> 回起飞点降落。任务机每个任务都要落地，所以这一段
-    本来就自带起降，可以直接被《双机全流程示例.py》复用。"""
-    inbox = _Inbox(sdk, ROUTE_DONE)
-    plan = _Inbox(sdk, ROUTE_PLAN)          # 必须在长机可能发之前就注册
-    sdk.takeoff(height_m=CRUISE_AGL_M)      # 直接起飞到编队巡航高度
-    sdk.send_to_teammate(READY)             # "我起飞完了"，长机据此发航线
+def follow_formation(sdk, spacing_m, inbox=None, plan=None, goto_station=True):
+    """**纯空中**的编队跟随段：入列 -> 跟队 -> 收到解散通知为止。
 
-    # 2026-09-28 改：先飞到**起始站位**并把机头转到第一段航向，再接管跟随。
-    # 旧版是起飞完立刻接管、报 READY，长机随即起步，僚机却要等长机轨迹够长才
-    # 开始入列——这段空窗里间距以长机的速度线性拉大，而跟随算法是匀速的，
-    # 拉开了就再也收不回来。
-    # 顺序不能反：一旦 start_formation_follow() 接管（relay_mode=formation），
-    # 设定点就由节点直接喂 pt4ctrl，这里再调 goto/face_yaw 就不管用了。
+    2026-09-29 按用户要求拆出来："编队只有空中动作，起降不是编队内容"。
+    起飞和降落由任务脚本自己管——任务2/任务3 里任务机是先做完取物资、投弹
+    才入列的，它的起降时机跟编队没关系；本示例的 follower() 只是在这一段
+    外面加了起降的一个薄壳。
+
+    inbox/plan 允许调用方**提前注册**这两个事件：可靠事件通道是"先 ACK 再
+    分发"，没注册处理函数的事件会被确认后丢弃，所以多任务脚本必须一开始就
+    把所有事件注册上，不能等用到了才注册。
+    """
+    if inbox is None:
+        inbox = _Inbox(sdk, ROUTE_DONE)
+    if plan is None:
+        plan = _Inbox(sdk, ROUTE_PLAN)
+    sdk.send_to_teammate(READY)             # "我到位了"，长机据此发航线
+
     route = []
     try:
         plan.wait(ROUTE_PLAN, 60.0)
@@ -260,17 +353,14 @@ def follower(sdk, spacing_m):
     except TimeoutError:
         print('[僚机] 没收到长机航线，跳过预站位，退回旧行为', flush=True)
 
-    if len(route) >= 2:
+    if goto_station and len(route) >= 2:
         _goto_start_station(sdk, route, spacing_m)
+    elif not goto_station:
+        # 任务2/任务3：任务机刚做完事（投弹/发射）就在长机后方不远处，直接入列。
+        # 再飞一趟"航线起点后方 spacing 米"的站位点纯属绕路——实测任务2 里它
+        # 已经离长机正好 4 米了，而首段朝南、站位点却在长机北边。
+        print('[僚机] 就地入列（跳过预站位）', flush=True)
 
-    # 这个方法返回的含义是"机载已接管、在当前位置上空保持"。
-    # 高度一并下发：僚机的高度由这个节点按定高雷达保持（天然仿地），默认 1.5 米，
-    # 不显式传的话长机改了巡航高度、僚机还停在默认值，编队会一高一低。
-    # turn_in_place：僚机跟长机同一套动作——拐点先停下把机头转到下一段的航向，
-    # 转到位再前飞（用户 2026-09-24 要求「长机、从机都一样」）
-    # 航线跟着 start_formation_follow 一起下发，**不能**等接管之后再补发：
-    # 节点是在"切长机"时清空轨迹缓冲区、随后第一帧长机位姿就要用航线的第一段
-    # 方向把轨迹向后延伸（对齐弧长0到僚机站位），那一帧比后补的航线早到就来不及了。
     sdk.start_formation_follow(follow_distance_m=spacing_m,
                                altitude_agl_m=CRUISE_AGL_M,
                                turn_in_place=True,
@@ -279,6 +369,17 @@ def follower(sdk, spacing_m):
 
     inbox.wait(ROUTE_DONE, ROUTE_DONE_WAIT_S)
     sdk.stop_formation_follow()
+
+
+def follower(sdk, spacing_m):
+    """僚机完整流程 = 起飞 + 编队跟随（空中段） + 回起飞点降落。
+
+    起降在这里，不在 follow_formation 里——编队只管空中。
+    """
+    inbox = _Inbox(sdk, ROUTE_DONE)
+    plan = _Inbox(sdk, ROUTE_PLAN)          # 必须在长机可能发之前就注册
+    sdk.takeoff(height_m=CRUISE_AGL_M)      # 直接起飞到编队巡航高度
+    follow_formation(sdk, spacing_m, inbox=inbox, plan=plan)
     _land_at_pad(sdk)
     sdk.play_sound_light('任务机已降落')
 
@@ -306,6 +407,47 @@ def _goto_start_station(sdk, route, spacing_m):
               flush=True)
 
 
+def _wait_follower_settled(sdk, tag):
+    """长机在航点上等僚机收拢到队形位置。返回实际等待秒数。
+
+    判据是僚机自报的落后量（`teammate_formation_lag()` = 实际间距 − 有效跟随
+    距离，>0 表示落后）。只判"不落后太多"、不判 |lag|——落后是能靠僚机自己
+    追上来消掉的，太近却没法后退（参考点只前进不后退），等也白等。
+
+    僚机节点没在跟随 / 话题还没到时 `teammate_formation_lag()` 返回 None，
+    这时直接走，退回没有握手的旧行为；读到的值也可能是僚机停发之后的残值，
+    所以一律带 WAYPOINT_SYNC_MAX_WAIT_S 硬超时。
+    """
+    if not WAYPOINT_SYNC_ENABLED:
+        return 0.0
+    if not hasattr(sdk, 'teammate_formation_lag'):   # 旧版 SDK
+        return 0.0
+    if sdk.teammate_formation_lag() is None:
+        print(f'[长机] {tag}：读不到僚机落后量，不等待（退回无握手行为）', flush=True)
+        return 0.0
+    t0 = time.time()
+    while time.time() - t0 < WAYPOINT_SYNC_MAX_WAIT_S:
+        lag = sdk.teammate_formation_lag()
+        if lag is None:                     # 中途停发（比如已解散）就别等了
+            break
+        if lag <= WAYPOINT_SYNC_LAG_M:
+            waited = time.time() - t0
+            print(f'[长机] {tag}：僚机已入位（落后 {lag:+.2f} m），'
+                  f'等了 {waited:.1f} 秒后起步', flush=True)
+            return waited
+        time.sleep(WAYPOINT_SYNC_POLL_S)
+    lag = sdk.teammate_formation_lag()
+    waited = time.time() - t0
+    print(f'[长机] {tag}：等了 {waited:.1f} 秒僚机仍落后 '
+          f'{"读不到" if lag is None else f"{lag:+.2f} m"}，按超时起步', flush=True)
+    return waited
+
+
+def _same_xy(a, b, tol=0.3):
+    """两个航点算不算同一个点（米）。"""
+    return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])) <= tol
+
+
 def _wrap_pi(a):
     """把角度归一到 (-pi, pi]，转弯取近路用。"""
     while a > math.pi:
@@ -315,130 +457,107 @@ def _wrap_pi(a):
     return a
 
 
-def _start_coordinated_yaw(sdk, legs_local, state):
-    """后台线程：把机头**连续限速**转到当前航段方向，拐点前提前起转。
+def _slow_leg_start(sdk, corner_local, end_local, spacing_m, tag):
+    """**每段**起步缓加速：压住限速，等僚机也过了这个航点再分档放回巡航速度。
 
-    飞机全程不停——这是"协调转弯"跟原来"到点悬停转向"的唯一区别。
-    `state['idx']` 由主循环更新成当前在飞第几段。
-    返回 stop 函数。
-    """
-    import threading
-    if not legs_local:
-        return lambda: None
+    为什么每段都要（2026-09-30 用户指出）：长机在每个航点都停下转向，对它自己
+    来说**过每个航点都相当于重新起步**。而僚机是沿长机实飞轨迹落后 spacing 米
+    的——长机站在拐点上时，僚机还在**上一段**上、还没拐弯。这时候两机不在同
+    一条航线上，跟踪必然差；长机此刻一脚油门顶到 1.0 m/s，间距就一次性放大
+    （run68 实测起步段峰值 7.02 m，而全程其它地方都不超过 5.86 m）。
 
-    def _leg_heading(i):
-        (fx, fy), (tx, ty) = legs_local[i]
-        return math.atan2(ty - fy, tx - fx)
+    "僚机已过点"的判据：僚机沿轨迹落在长机后方 `spacing + lag` 米（lag 是僚机
+    自报的落后量），而本段是直线，所以**长机离拐点的直线距离 ≥ spacing + lag**
+    就等价于"僚机已经走过这个拐点"。这个量长机自己就能算（自己的位置 + 僚机
+    自报的落后量），不需要僚机额外上报，也不用改跟随节点。
 
-    def _loop():
-        while not state['stop']:
-            i = max(0, min(state['idx'], len(legs_local) - 1))
-            want = _leg_heading(i)
-            # 航段号**自己推进**：整条航线是一次性下发的（goto_route），主循环
-            # 不再逐段阻塞，没人来喂这个索引了。判据：
-            #   ① 离本段终点够近；或 ② 沿本段的投影进度已经到头（切了角也算走完）。
-            #
-            # 2026-09-29 订正：判据 ② 原来写的是"离下一段终点比离本段终点还近"，
-            # 这在**航线折返**时必然误判——航线 A B C G E F G D 里，飞 G(17,16)
-            # -> E(10,16) 这一段时，下一段终点 F(14,14) 离 G 只有 3.6 m，而本段
-            # 终点 E 有 7.0 m，飞机刚离开 G 就满足条件、航段号立刻跳到 E->F，
-            # 机头朝着 E->F 的方向转，人还在往西飞。用沿本段的投影进度就不会
-            # 被折返骗：进度只跟"在这一段上走了多远"有关，跟别的点离得近不近无关。
-            if i + 1 < len(legs_local):
-                try:
-                    px, py, _ = sdk.get_local_position()
-                    (fx0, fy0), (tx, ty) = legs_local[i]
-                    d_cur = math.hypot(tx - px, ty - py)
-                    ex, ey = tx - fx0, ty - fy0
-                    seg2 = ex * ex + ey * ey
-                    prog = 0.0 if seg2 < 1e-9 else ((px - fx0) * ex + (py - fy0) * ey) / seg2
-                    if d_cur < YAW_LEG_ADVANCE_M or prog >= YAW_LEG_DONE_RATIO:
-                        state['idx'] = i + 1
-                    elif d_cur < YAW_ANTICIPATE_M:
-                        # 提前起转：转弯跨在拐角两边，而不是到了点才开始
-                        want = _leg_heading(i + 1)
-                except Exception:
-                    pass                      # 取不到位置就按本段航向，不影响飞行
-            if state['yaw'] is None:
-                try:
-                    state['yaw'] = sdk.get_current_yaw()
-                except Exception:
-                    state['yaw'] = want
-            step = math.radians(YAW_SLEW_DPS) * YAW_TICK_S
-            d = _wrap_pi(want - state['yaw'])
-            state['yaw'] = _wrap_pi(state['yaw'] + max(-step, min(step, d)))
-            # 只在角度真的变了才下发：set_yaw_mode_constant 每次都会打一行
-            # 进度日志，10 Hz 无条件下发会把任务日志刷满（实测 run41 刷了
-            # 几百行"朝向模式 -> 固定角度(90°)"，把真正的报错顶出了视野）。
-            if (state['sent'] is None
-                    or abs(_wrap_pi(state['yaw'] - state['sent'])) > YAW_SEND_EPS):
-                try:
-                    sdk.set_yaw_mode_constant(state['yaw'])
-                    state['sent'] = state['yaw']
-                except Exception:
-                    pass
-            time.sleep(YAW_TICK_S)
+    ⚠️ 这里压的是 ego_planner 的 `manager/max_vel`，跟 2026-09-29 试过、被判
+    "效果极差"的那个拐点降速是**同一个旋钮的不同用法**：那次是在飞行**中途**
+    改限速、逼规划器重规划；这里改限速时长机是**停着的**，改完才下发新目标，
+    走的是原来"第一段起步缓加速"那条已经验证过的路径。
 
-    t = threading.Thread(target=_loop, daemon=True)
-    t.start()
-
-    def _stop():
-        state['stop'] = True
-        t.join(timeout=2.0)
-    return _stop
-
-
-def _slow_start(sdk):
-    """起步缓加速：把规划器限速压到 START_SLOW_VEL_MPS，等僚机跟上再恢复。
-
-    恢复条件（2026-09-28 改）：僚机自报的落后量收到 START_SLOW_LAG_M 以内，
-    或者到了 START_SLOW_MAX_S 上限。这是**一次性的起步握手**，不是常驻调节
-    回路——起步是长机事先知道的事件，前馈就够，见 START_SLOW_LAG_M 注释。
-    拿不到僚机落后量（老镜像/僚机没起跟随）时退回"固定 START_SLOW_S 秒"。
-
-    后台线程里恢复，不挡住 goto。限速改的是 ego_planner 的 manager/max_vel，
-    它影响初值多项式的时间分配（梯形剖面）——限速低，加速段就被拉长。
-    SDK 探测不到这个能力（老镜像）时静默跳过，不影响飞行。
+    corner_local / end_local 是本段起点（长机此刻脚下的那个航点）和终点的局部
+    坐标。终点用来提前放速度，见 LEG_SLOW_RELEASE_REMAIN_M——短航段（比如
+    E->F 只有 4.47 米、F->G 只有 3.6 米）本来就短于 spacing，僚机不可能在长机
+    到下一个拐点之前过点，这时全靠这条提前释放。
     """
     import threading
     if not hasattr(sdk, 'set_max_vel'):
         return
+    _LEG_SLOW['gen'] += 1
+    gen = _LEG_SLOW['gen']
     try:
-        old = sdk.set_max_vel(START_SLOW_VEL_MPS)
+        old = sdk.set_max_vel(LEG_SLOW_VEL_MPS)
     except Exception as exc:
-        print(f'[长机] 起步限速没设上（{exc}），按原速起步', flush=True)
+        print(f'[长机] {tag}：起步限速没设上（{exc}），按原速起步', flush=True)
         return
-    print(f'[长机] 起步缓加速：限速 {START_SLOW_VEL_MPS} m/s，'
-          f'等僚机落后收到 {START_SLOW_LAG_M} m 以内再分档放回 {old} m/s'
-          f'（最少 {START_SLOW_S:.0f} 秒，最多 {START_SLOW_MAX_S:.0f} 秒）', flush=True)
+    # 巡航限速只在第一次记录：第二段再调 set_max_vel 时，它返回的"旧值"已经是
+    # 上一段压下去的 0.25，拿它当恢复目标的话速度就再也回不到巡航了。
+    cruise = _LEG_SLOW.setdefault('cruise', old)
+    cx, cy = float(corner_local[0]), float(corner_local[1])
+    ex, ey = float(end_local[0]), float(end_local[1])
+    need0 = spacing_m + LEG_SLOW_MARGIN_M
+    print(f'[长机] {tag}：起步限速 {LEG_SLOW_VEL_MPS} m/s，'
+          f'等僚机也过这个航点（长机离拐点走够 ~{need0:.1f} m）再分档放回 {cruise} m/s',
+          flush=True)
 
     def _restore():
         t0 = time.time()
-        time.sleep(START_SLOW_S)            # 这段时间内无条件压住
-        why = f'{START_SLOW_S:.0f} 秒到'
-        if hasattr(sdk, 'teammate_formation_lag'):
-            while time.time() - t0 < START_SLOW_MAX_S:
-                lag = sdk.teammate_formation_lag()
-                if lag is not None and lag <= START_SLOW_LAG_M:
-                    why = f'僚机已跟上（落后 {lag:+.2f} m）'
-                    break
-                time.sleep(0.2)
-            else:
-                why = f'等僚机超过 {START_SLOW_MAX_S:.0f} 秒上限'
-        # 分档爬回巡航速度，别一步跳满（见 START_RAMP_STEP_MPS）
-        print(f'[长机] {why}，开始分档放速度（{START_SLOW_VEL_MPS} -> {old} m/s，'
+        time.sleep(LEG_SLOW_MIN_S)
+        why = f'压满 {LEG_SLOW_MIN_S:.0f} 秒下限'
+        while time.time() - t0 < LEG_SLOW_MAX_S:
+            if _LEG_SLOW['gen'] != gen:      # 已经换段了，这条线程作废
+                return
+            try:
+                px, py, _ = sdk.get_local_position()
+            except Exception:
+                break                        # 读不到位置就退回"只压下限时间"
+            gone = math.hypot(px - cx, py - cy)
+            remain = math.hypot(px - ex, py - ey)
+            if remain <= LEG_RAMP_MUST_START_M:
+                why = (f'剩余 {remain:.2f} m 已到必须放速度的距离'
+                       f'（僚机还没过点，但再压下去终端逼近段会被判卡住）')
+                break
+            lag = (sdk.teammate_formation_lag()
+                   if hasattr(sdk, 'teammate_formation_lag') else None)
+            need = spacing_m + LEG_SLOW_MARGIN_M + max(0.0, lag or 0.0)
+            if gone >= need:
+                why = (f'僚机已过点（长机离拐点 {gone:.2f} m ≥ '
+                       f'{need:.2f} m，僚机落后 '
+                       f'{"读不到" if lag is None else f"{lag:+.2f} m"}）')
+                break
+            time.sleep(LEG_SLOW_POLL_S)
+        else:
+            why = f'等僚机过点超过 {LEG_SLOW_MAX_S:.0f} 秒上限'
+        if _LEG_SLOW['gen'] != gen:
+            return
+        print(f'[长机] {tag}：{why}，开始分档放速度'
+              f'（{LEG_SLOW_VEL_MPS} -> {cruise} m/s，'
               f'每 {START_RAMP_PERIOD_S:.1f} 秒 +{START_RAMP_STEP_MPS}）', flush=True)
-        v = START_SLOW_VEL_MPS
+        v = LEG_SLOW_VEL_MPS
         try:
-            while v < old - 1e-3:
-                v = min(old, v + START_RAMP_STEP_MPS)
+            while v < cruise - 1e-3:
+                if _LEG_SLOW['gen'] != gen:
+                    return
+                # 每加一档之前再查一次：爬档过程中飞机一直在往前走，进了冻结区
+                # 就停在当前这一档，绝不把限速变更带进终端减速段。
+                try:
+                    px, py, _ = sdk.get_local_position()
+                    remain = math.hypot(px - ex, py - ey)
+                except Exception:
+                    remain = None
+                if remain is not None and remain <= LEG_RAMP_FREEZE_REMAIN_M:
+                    print(f'[长机] {tag}：离本段终点还剩 {remain:.2f} m，'
+                          f'分档停在 {v} m/s 不再上调', flush=True)
+                    return
+                v = min(cruise, v + START_RAMP_STEP_MPS)
                 sdk.set_max_vel(v)
-                if v < old - 1e-3:
+                if v < cruise - 1e-3:
                     time.sleep(START_RAMP_PERIOD_S)
-            print(f'[长机] 已回到巡航限速 {old} m/s（起步共用时 {time.time() - t0:.1f} 秒）',
-                  flush=True)
+            print(f'[长机] {tag}：已回到巡航限速 {cruise} m/s'
+                  f'（本段起步共用时 {time.time() - t0:.1f} 秒）', flush=True)
         except Exception as exc:
-            print(f'[长机] 限速没恢复（{exc}）', flush=True)
+            print(f'[长机] {tag}：限速没恢复（{exc}）', flush=True)
 
     threading.Thread(target=_restore, daemon=True).start()
 

@@ -66,11 +66,11 @@ source /opt/PX4-Autopilot/Tools/simulation/gazebo-classic/setup_gazebo.bash \
     /opt/PX4-Autopilot /opt/PX4-Autopilot/build/px4_sitl_default
 set -u
 
-# 2026-09-09改默认值hard_forest→fire_drill_room，跟docker-compose.yml里
-# WORLD_ENV那行的默认值改动保持一致（原因见那边注释：fire_drill_room是
-# 正式比赛场景，不该是"没传就悄悄变成别的场景"）——这里的默认值只有
-# 绕过compose直接`docker run`这个镜像、且没显式传WORLD_ENV时才会用到。
-WORLD_ENV="${WORLD_ENV:-fire_drill_room}"
+# 2026-09-09改默认值hard_forest→fire_drill_room，2026-09-30再改成sample_room，
+# 都跟docker-compose.yml里WORLD_ENV那行的默认值保持一致（原因见那边注释：
+# 默认值必须是当前的正式比赛场景，不该是"没传就悄悄变成别的场景"）——这里的
+# 默认值只有绕过compose直接`docker run`这个镜像、且没显式传WORLD_ENV时才用到。
+WORLD_ENV="${WORLD_ENV:-sample_room}"
 NUM_AGENTS="${NUM_AGENTS:-2}"
 USE_GAZEBO_GUI="${USE_GAZEBO_GUI:-false}"
 # USE_RVIZ 默认true——之前雷达在Gazebo里开射线可视化(<visualize>true</visualize>)

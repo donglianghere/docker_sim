@@ -1285,11 +1285,15 @@ ros2 run contest_mission formation_follower_node \
     -p bias_trim_gain:="${FORMATION_BIAS_TRIM_GAIN:-0.15}" \
     -p bias_trim_max_m:="${FORMATION_BIAS_TRIM_MAX_M:-1.5}" \
     -p path_prune_max_chord_m:="${FORMATION_PRUNE_CHORD_M:-2.5}" \
-    -p yaw_turn_in_place:="${FORMATION_TURN_IN_PLACE:-false}" \
+    -p yaw_turn_in_place:="${FORMATION_TURN_IN_PLACE:-true}" \
     -p yaw_slew_rate_dps:="${FORMATION_YAW_SLEW_DPS:-60.0}" &
-# yaw_turn_in_place=false（2026-09-28 用户要求"拐点处不停留，协调转弯"）：
-# 僚机到拐点不再停下转向，机头按限速连续转过去，参考点一刻不停。长机侧的
-# 对应改动在 contestant_template/编队飞行示例.py 的 _start_coordinated_yaw。
+# yaw_turn_in_place=true（2026-09-29 用户改要求："无论编队还是单独飞行、无论
+# 长机还是僚机，每个航点处都停顿 2 秒同时调整航向，航点之间航向不再变化"）：
+# 僚机到拐点停下、把机头转到下一段航向、转到位再走。长机侧的对应实现在
+# contestant_template/编队飞行示例.py 的 leader_route（每段飞前 face_yaw +
+# 补足 WAYPOINT_HOLD_S 秒）。
+# 09-28 那版的"协调转弯（false）"是为了消除拐点处失控的 4~8 秒爬行，代价是
+# 切角 1 米以上；现在改成**确定性的 2 秒停顿**，停多久自己说了算。
 # path_prune_max_chord_m：长机轨迹清洗，丢掉不让航线进度前进的点（拐点回钩、
 # 悬停飘移），僚机就不会复刻它们。0=不清洗。
 # lookahead_m（节点默认 1.2）：参考点最多领先僚机投影多少弧长。落后量的上界是
