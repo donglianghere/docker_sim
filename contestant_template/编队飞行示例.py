@@ -25,6 +25,7 @@ import math
 import time
 
 from contest_sdk import DroneSDK
+from contest_sdk.exceptions import GotoUnreachableError
 
 # 巡航离地高度。2026-09-24 调过两次：仿地模块改成坡道后，1.5 米时飞机离顶面
 # 太近（小于规划器 0.6 米的障碍物膨胀半径），规划器会把坡道当障碍绕开、看不到
@@ -94,6 +95,9 @@ WAYPOINT_SYNC_ENABLED = True
 WAYPOINT_SYNC_LAG_M = 0.5     # 僚机落后量收到这个以内算"已入位"
 WAYPOINT_SYNC_MAX_WAIT_S = 8.0   # 等不到也必须走，别把整条航线拖死
 WAYPOINT_SYNC_POLL_S = 0.1
+# 被 goto() 判成"不可达"时，停的位置离航点在这个距离以内就算到了（见 _goto_waypoint）。
+# 取 0.7：判定下限本身就是 0.5 米，爬行平台落在 0.5~0.7 是典型值；再大就不该当到达了。
+GOTO_ACCEPT_M = 0.7
 YAW_LEG_ADVANCE_M = 1.5       # 离本段终点这么近就算进入下一段（转弯线程自己推进）
 YAW_LEG_DONE_RATIO = 0.98     # 或者沿本段投影进度到这个比例也算走完（切角时兜底）
 READY = 'formation_standby'   # 僚机 -> 长机
@@ -293,7 +297,7 @@ def leader_route(sdk, route_xy, inbox=None, spacing_m=4.0,
                   flush=True)
         # 定高飞：航向已经锁在 heading 上，整段不再变
         with sdk.fixed_altitude(tz):
-            sdk.goto(tx, ty, tz)
+            _goto_waypoint(sdk, tx, ty, tz, f'航点 {i}/{len(legs)}')
 
     stop_disband()
     # 最后一段可能是"保持 LEG_SLOW_VEL_MPS 飞完"收尾的，限速还压着。编队段结束
@@ -405,6 +409,29 @@ def _goto_start_station(sdk, route, spacing_m):
     if not sdk.face_yaw(heading, timeout=TURN_TIMEOUT_S, tolerance_deg=TURN_TOL_DEG):
         print(f'[僚机] 起始航向没转到位（目标 {math.degrees(heading):.0f}°），仍继续',
               flush=True)
+
+
+def _goto_waypoint(sdk, tx, ty, tz, tag):
+    """飞到航点，并兜住"终端渐近爬行被误判成不可达"这一类失败。
+
+    根因是规划器轨迹的终点速度为零、收敛是渐近的：最后半米要爬好几秒（早先
+    实测"最后 0.4 米爬了 4 秒"，约 0.1 m/s）。而 `goto()` 的卡住判据是
+    "5 秒内三维位移不足 0.5 米、且离目标还有 0.5 米以上"——爬行平台一旦停在
+    0.5 米出头就正好落进判定区（run76 实测停在离 G 点 0.52 米处抛异常，那条
+    段根本没压限速、全程巡航，跟缓起步无关；之前几轮没撞上纯属运气）。
+
+    这时候飞机其实**已经到点了**（0.52 m 已经在过点精度范围内），没有理由让
+    整条航线崩掉。所以：停的位置离目标在 GOTO_ACCEPT_M 以内就按到达处理、
+    打一行日志继续飞；超出这个范围才是真的到不了，照常抛出去。
+    """
+    try:
+        sdk.goto(tx, ty, tz)
+    except GotoUnreachableError as exc:
+        d = float(getattr(exc, 'distance_m', 1e9))
+        if d > GOTO_ACCEPT_M:
+            raise
+        print(f'[长机] {tag}：规划器终端爬行被判卡住，但离航点只有 {d:.2f} m '
+              f'(≤{GOTO_ACCEPT_M:.1f} m)，按到达处理继续飞', flush=True)
 
 
 def _wait_follower_settled(sdk, tag):
