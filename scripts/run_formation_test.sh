@@ -119,11 +119,11 @@ log "两机就绪"
 
 # ---- 3. 起两个选手程序 ----
 log "启动选手程序（长机=$LEADER 航线=\"$ROUTE\"，僚机=$FOLLOWER 间距=${SPACING}米）"
-docker run -d --name fm_leader --network host -v "$WORKDIR:/workspace" "$IMAGE" \
+docker run -d --name fm_leader --network host -v /etc/localtime:/etc/localtime:ro -v "$WORKDIR:/workspace" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" \
     --namespace "$LEADER" --role leader --teammate "$FOLLOWER" \
     --route "$ROUTE" --spacing "$SPACING" >/dev/null
-docker run -d --name fm_follower --network host -v "$WORKDIR:/workspace" "$IMAGE" \
+docker run -d --name fm_follower --network host -v /etc/localtime:/etc/localtime:ro -v "$WORKDIR:/workspace" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" \
     --namespace "$FOLLOWER" --role follower --teammate "$LEADER" \
     --spacing "$SPACING" >/dev/null

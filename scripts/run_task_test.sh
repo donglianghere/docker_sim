@@ -76,10 +76,10 @@ done
 log "两机就绪"
 
 log "启动选手程序：$SCRIPT（长机=$LEADER 僚机=$FOLLOWER 间距=${SPACING}米）"
-docker run -d --name tk_leader --network host -v "$WORKDIR:/workspace" -v "$LOGDIR:/logs" "$IMAGE" \
+docker run -d --name tk_leader --network host -v /etc/localtime:/etc/localtime:ro -v "$WORKDIR:/workspace" -v "$LOGDIR:/logs" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" --namespace "$LEADER" --role leader \
     --teammate "$FOLLOWER" --spacing "$SPACING" >/dev/null
-docker run -d --name tk_follower --network host -v "$WORKDIR:/workspace" -v "$LOGDIR:/logs" "$IMAGE" \
+docker run -d --name tk_follower --network host -v /etc/localtime:/etc/localtime:ro -v "$WORKDIR:/workspace" -v "$LOGDIR:/logs" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" --namespace "$FOLLOWER" --role follower \
     --teammate "$LEADER" --spacing "$SPACING" >/dev/null
 

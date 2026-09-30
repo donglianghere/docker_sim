@@ -211,6 +211,11 @@ services:
                                 # 三个服务都挂同一个宿主机目录到容器内同一个/logs，
                                 # 不分服务开子挂载点，各脚本自己按/logs/nx01、
                                 # /logs/rosbag这些约定的子路径分开写，互不冲突。
+      # 时区跟宿主机一致（2026-09-30）：容器默认没设时区，Python 的 localtime()
+      # 退化成 UTC——照片烧的时间戳、监视报告里的"起飞时刻"都会比本地时间早 8
+      # 小时（实测照片写 09:03、宿主机 17:03）。挂 /etc/localtime 比设 TZ 更稳：
+      # 不要求容器里装了 tzdata，也不用把时区名写死在配置里。
+      - /etc/localtime:/etc/localtime:ro
     devices:
       - /dev/dri:/dev/dri
     deploy:
@@ -547,6 +552,11 @@ services:
                                   # 等不到frame_align而被丢弃、退化成完全不避让
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
+      # 时区跟宿主机一致（2026-09-30）：容器默认没设时区，Python 的 localtime()
+      # 退化成 UTC——照片烧的时间戳、监视报告里的"起飞时刻"都会比本地时间早 8
+      # 小时（实测照片写 09:03、宿主机 17:03）。挂 /etc/localtime 比设 TZ 更稳：
+      # 不要求容器里装了 tzdata，也不用把时区名写死在配置里。
+      - /etc/localtime:/etc/localtime:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw   # 2026-09-28：给 scripts/编队监视.py 开图形窗口用
                                   # （飞行中实时动画）。宿主机要先 `xhost +local:root`，
                                   # 不给也不影响飞行——那个脚本会自动退回无窗口模式、只出PNG。
@@ -653,6 +663,11 @@ services:
                                   # 保持一致，见flight-stack-nx01那边的完整注释
     volumes:
       - ./runtime_logs:/logs   # 同sim-world那边的注释——运行时数据记录用
+      # 时区跟宿主机一致（2026-09-30）：容器默认没设时区，Python 的 localtime()
+      # 退化成 UTC——照片烧的时间戳、监视报告里的"起飞时刻"都会比本地时间早 8
+      # 小时（实测照片写 09:03、宿主机 17:03）。挂 /etc/localtime 比设 TZ 更稳：
+      # 不要求容器里装了 tzdata，也不用把时区名写死在配置里。
+      - /etc/localtime:/etc/localtime:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw   # 2026-09-28：给 scripts/编队监视.py 开图形窗口用
                                   # （飞行中实时动画）。宿主机要先 `xhost +local:root`，
                                   # 不给也不影响飞行——那个脚本会自动退回无窗口模式、只出PNG。
