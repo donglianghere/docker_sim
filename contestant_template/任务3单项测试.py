@@ -52,8 +52,7 @@ import math
 import time
 
 import 编队飞行示例 as 编队
-import 地面火情搜索示例 as 地面
-import 高楼火情绕飞版示例 as 高楼
+import 任务工具 as 工具
 from contest_sdk import DroneSDK
 from contest_sdk.exceptions import GotoUnreachableError
 
@@ -128,7 +127,7 @@ HOVER_AFTER_TAKEOFF_S = 2.0
 # 第 536 行明写着 `if '_camera_down_' not in msg.header.frame_id: return`
 # ——只认**下视**相机的检测，是给地面标靶精准降落用的。高层火情贴在楼立面上、
 # 走前视相机，所以它永远收敛不了，实测一直是 40 秒超时后走兜底。
-# 改成自己按画面偏差转机头，跟《高楼火情绕飞版示例》的 aim_at_fire 同一套算法。
+# 改成自己按画面偏差转机头（算法出处是已过时的《高楼火情绕飞版示例》的 aim_at_fire）。
 IMAGE_W = 640
 IMAGE_H = 480
 FOCAL_PX = 381.35             # = (IMAGE_W/2)/tan(HFOV/2)，HFOV=80°，跟 camera_info 一致
@@ -353,13 +352,13 @@ def _drive_servos(sdk, pwm, label):
 def _supply_point_action(sdk, pwm, label, sound=None):
     """飞到物资点 -> 边瞄准边降落到底 -> 驱动机械抓 -> 起飞回巡航高度。
 
-    降落复用《地面火情搜索示例》的 `descend_onto()`：**不要用
+    降落复用 `任务工具.descend_onto()`：**不要用
     `precision_land_and_confirm()`**，那是"对准一点、下降一点"的分级下降，
     从 2.5 m 下来要 40 秒以上、30 秒时限内走不完，每次都走超时兜底
     （2026-09-23 实测）。descend_onto 是连续修正，同一时间既对准也下降。
     """
     _goto_world(sdk, SUPPLY_XY[0], SUPPLY_XY[1], '物资点')
-    地面.descend_onto(sdk, SUPPLY_TAG, '灭火器材')
+    工具.descend_onto(sdk, SUPPLY_TAG, '灭火器材')
     print(f'[{sdk.namespace}] 已降落在物资点，开始{label}', flush=True)
     if sound:
         sdk.play_sound_light(sound)
@@ -522,7 +521,7 @@ def recon(sdk):
         at_e.wait(AT_E_WAIT_S)          # 原地等任务机到 E 点待命
         print(f'[{sdk.namespace}] 任务机已到 E 点，发射破窗弹', flush=True)
         sdk.play_sound_light('侦察机发射破窗弹')
-        高楼.fire_launcher(sdk, '发射破窗弹')
+        工具.fire_launcher(sdk, '发射破窗弹')
         sdk.send_to_teammate(EV_BREACHED)
         sdk.play_sound_light('侦察机破窗完成')
         # 发射点马上要让给任务机了。两条放行路径：离得够远（watchdog 线程），
@@ -651,7 +650,7 @@ def supply(sdk):
 
         sdk.play_sound_light('任务机发射灭火弹')
         for i in range(1, EXTINGUISHER_SHOTS + 1):
-            高楼.fire_launcher(sdk, f'发射灭火弹 {i}/{EXTINGUISHER_SHOTS}')
+            工具.fire_launcher(sdk, f'发射灭火弹 {i}/{EXTINGUISHER_SHOTS}')
             if i < EXTINGUISHER_SHOTS:
                 time.sleep(SHOT_INTERVAL_S)
         sdk.send_to_teammate(EV_EXTINGUISHED)

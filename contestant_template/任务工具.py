@@ -19,7 +19,12 @@
 import math
 import time
 
-from contest_sdk.exceptions import ContestSdkError, DetectionTimeoutError, LandTimeoutError
+from contest_sdk.exceptions import (
+    ActionFailedError,      # fire_launcher 用：舵机没配好时只打警告不中断
+    ContestSdkError,
+    DetectionTimeoutError,
+    LandTimeoutError,
+)
 
 LANDED_AGL_M = 0.45      # 低于这个离地高度就认为已经贴地（雷达最小量程约 0.3 米）
 LANDED_MOVE_M = 0.10     # 这段时间内位移小于这个值才算"停住了"
@@ -155,3 +160,81 @@ def close_in_and_fire(sdk, fire_xy, z, fire_fn):
     except ContestSdkError as exc:
         print(f'[{sdk.namespace}] 退出没走到位（{exc}）——注意此时可能仍在膨胀区内，'
               f'接下来的 goto() 有卡住风险', flush=True)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-30 从两个**已过时**的示例里搬过来的通用动作。
+# 原来 descend_onto 在《地面火情搜索示例》、fire_launcher 在《高楼火情绕飞版
+# 示例》里，而那两个文件的任务流程用的还是老场景 fire_drill_room 的坐标
+# （SUPPLY_POINT=(-4.0,-6.0)、PILLARS/BUILDINGS=[(4.5,7),(-4.5,7),(0,0)]，
+# 原点在房间中心、带负坐标），跟样题场景对不上，已经不该再被当例子用。
+# 但任务2/任务3 一直从里面 import 这两个函数——等于"过时文件里扣着还在用的
+# 代码"，谁哪天把过时示例删了，任务脚本当场就断。
+# 这两个函数本身跟场景无关（只依赖舵机 PWM、下降步长、降落判据这类调参常量，
+# 没有任何坐标），搬到这个真正的公共工具箱里才是它们该在的位置。
+# ---------------------------------------------------------------------------
+
+# --- 边瞄准边降落到底（原属《地面火情搜索示例》）---
+PRECISION_LAND_S = 30.0      # 边瞄准边降落这一段的总时限，到点就交给普通降落
+DESCENT_STEP_M = 0.8         # 每一步下降多少：降一点就重新解算一次目标位置
+                             # 2026-09-30 用户要求 0.4 -> 0.8，物资点那次降落
+                             # 从 42.9 秒降到 33.8 秒。代价是每步之间才重新对准
+                             # 一次，步子迈大了中间修正机会变少，落点精度要盯住。
+HANDOFF_AGL_M = 0.7          # 降到离地这么高就交给普通降落（再低下视相机看不全标志）
+HANDOFF_TOL_M = 0.15         # 到交接高度附近就算到了：悬停本身有零点几十厘米的
+                             # 起伏，死等"严格低于交接高度"会一直卡在上面空耗
+                             # （实测卡满 30 秒）
+
+def descend_onto(sdk, tag, what):
+    """边瞄准边降落：每降一小段就把目标位置重新解算一次，直接命令"目标正上方、
+    低一点"那个位置——水平修正和下降在同一条指令里完成；降到交接高度后交给
+    普通降落收尾。
+
+    为什么不用 precision_land_and_confirm()：那是"对准一点、下降一点、再对准"
+    的分级下降，从 2.5 米下来要 40 秒以上，30 秒的时限内根本走不完，每次都会
+    走超时兜底（2026-09-23 实测），等于精度只做了一半。这里换成连续修正，同一
+    时间既在对准也在下降，30 秒够用；最后 0.7 米交给 land()，那一段本来就只能
+    垂直下降，再修也无意义。
+    """
+    deadline = time.monotonic() + PRECISION_LAND_S
+    while time.monotonic() < deadline:
+        _, _, z = sdk.get_local_position()
+        try:
+            t = sdk.locate_target(tag, timeout=2.0, samples=3)
+        except DetectionTimeoutError:
+            print(f'[{sdk.namespace}] 下降中看不到{what}了，就地转普通降落', flush=True)
+            break
+        agl = z - t.z                       # t.z 是解算出的地面高度
+        if agl <= HANDOFF_AGL_M + HANDOFF_TOL_M:
+            print(f'[{sdk.namespace}] 已降到离地 {agl:.2f} m，交给普通降落', flush=True)
+            break
+        next_agl = max(HANDOFF_AGL_M, agl - DESCENT_STEP_M)
+        print(f'[{sdk.namespace}] 对准{what} ({t.x:.2f}, {t.y:.2f}) 并降到离地 '
+              f'{next_agl:.2f} m（当前 {agl:.2f} m，{t.samples}帧离散 {t.spread_m:.2f}m）',
+              flush=True)
+        sdk.goto_direct(t.x, t.y, t.z + next_agl)
+    else:
+        print(f'[{sdk.namespace}] 边瞄准边降落用满 {PRECISION_LAND_S:.0f} 秒，转普通降落',
+              flush=True)
+    land_or_confirm(sdk)               # 最后一段普通降落
+
+
+# --- 发射机构：装填 -> 发射 -> 复位（原属《高楼火情绕飞版示例》）---
+LOAD_PWM = 800               # 装填/复位
+FIRE_PWM = 2000              # 发射
+SERVO_TRAVEL_S = 2.0         # 舵机没有位置反馈，只能等
+
+def fire_launcher(sdk, label):
+    """发射：把发射机构的舵机推到松开位置，等它到位，再复位装填。
+    没配舵机的飞机（见 sdk.servos）只打印提示，不让流程中断。"""
+    if not sdk.servos:
+        print(f'[{sdk.namespace}] {label}：这架飞机没有配置舵机，跳过（见 SDK 的 SERVO_CONFIG）',
+              flush=True)
+        return
+    try:
+        sdk.set_servos({s: FIRE_PWM for s in sorted(sdk.servos)})
+        time.sleep(SERVO_TRAVEL_S)
+        sdk.set_servos({s: LOAD_PWM for s in sorted(sdk.servos)})
+        time.sleep(SERVO_TRAVEL_S)
+    except (ActionFailedError, ValueError) as exc:
+        print(f'[{sdk.namespace}] {label}：舵机没动（{exc}）', flush=True)

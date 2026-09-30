@@ -15,10 +15,12 @@
 #   6. 收尾：让监视存图、修正日志属主、打印结果
 #
 # 这个目录里的 5 个文件就是实际跑起来的那 5 个：三个任务程序 + 监视程序 +
-# 本脚本。任务程序还要用到 contestant_template 下的三个依赖模块
-# （任务工具 / 地面火情搜索示例 / 高楼火情绕飞版示例），脚本把本目录挂成
-# /workspace（优先）、contestant_template 挂成 /deps 补齐，所以**跑的是本
-# 目录这几份**，不是 contestant_template 里的。
+# 本脚本。外部依赖只剩 contestant_template/任务工具.py 一个模块（公共工具箱：
+# land_or_confirm / transfer_to / descend_onto / fire_launcher）——2026-09-30
+# 把原先散在两个**已过时**示例里的 descend_onto、fire_launcher 搬进去了，
+# 那两个示例的任务流程还用着老场景 fire_drill_room 的坐标，不该再被依赖。
+# 脚本把本目录挂成 /workspace（优先）、contestant_template 挂成 /deps 补那一个
+# 模块，所以**跑的是本目录这几份**，不是 contestant_template 里的。
 set -eo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -30,7 +30,7 @@ NX01 悬停在 A 点待命                      NX02 降落在自己起降点
 2. **所有跨机事件在脚本最开头就全部注册**。可靠事件通道是"先 ACK 再分发"，
    没注册处理函数的事件会被确认后丢弃——等用到了才注册必然丢事件。
 
-3. **降落抓取直接复用《地面火情搜索示例》的 `descend_onto()`**，不自己写一套，
+3. **降落抓取直接复用 `任务工具.descend_onto()`**，不自己写一套，
    也不用 SDK 的 `precision_land_and_confirm()`——后者分级下降太慢，30 秒时限
    内走不完（那份文件的注释里记着 2026-09-23 的实测）。
 """
@@ -38,7 +38,6 @@ import argparse
 import math
 import time
 
-import 地面火情搜索示例 as 地面
 import 编队飞行示例 as 编队
 import 任务工具 as 工具
 from contest_sdk import DroneSDK
@@ -221,13 +220,14 @@ def supply(sdk):
     time.sleep(HOVER_AFTER_TAKEOFF_S)
 
     # ---- 物资点：边瞄准边降落到底，抓取 ----
-    # 直接复用《地面火情搜索示例》里验证过的 descend_onto()——它的注释写得很清楚：
+    # 直接复用 任务工具.descend_onto()（2026-09-30 从已过时的《地面火情搜索示例》
+    # 搬进公共工具箱）——它的注释写得很清楚：
     # **不要用 precision_land_and_confirm()**，那是"对准一点、下降一点、再对准"的
     # 分级下降，从 2.5 m 下来要 40 秒以上、30 秒时限内走不完，每次都走超时兜底
     # （2026-09-23 实测），等于精度只做了一半。descend_onto 是连续修正，同一时间
     # 既对准也下降，最后 0.7 m 交给普通降落。
     _goto_world(sdk, SUPPLY_XY[0], SUPPLY_XY[1], '物资点')
-    地面.descend_onto(sdk, SUPPLY_TAG, '灭火弹')
+    工具.descend_onto(sdk, SUPPLY_TAG, '灭火弹')
     print(f'[{sdk.namespace}] 已降落在物资点，开始抓取', flush=True)
     sdk.play_sound_light('任务机抓取灭火弹')
     _drive_servos(sdk, GRAB_PWM, '抓取')
