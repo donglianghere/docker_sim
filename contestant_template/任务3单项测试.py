@@ -118,8 +118,8 @@ AIM_TOL_DEG = 3.0             # 画面水平偏差小于这个角度算居中
 AIM_TOL_Z_M = 0.12            # 垂直方向差这么多以内算居中
 AIM_MAX_TRIES = 5
 AIM_SETTLE_S = 1.5            # 转完等画面稳定
-# 垂直为什么要靠改高度而不是俯仰相机：这架飞机全局只有一个相机，挂在一个可动
-# 关节上、只有"前视/下视"两个预设角度（见 SDK set_camera_view），没有连续俯仰。
+# 垂直为什么要靠改高度而不是俯仰相机：前视/下视是两个**独立的固定安装**相机
+# （模型里两个 camera_joint 都是 type='fixed'），装死了，没有俯仰自由度。
 # 火情随机化之后可能在二楼(1.5m)或三楼(2.5m)，而飞机巡航在 2.0 m——差 0.5 m、
 # 3 米距离上约 9.5°，检测得到（垂直视场约 64°）但画面里不居中，发射也偏。
 # 所以按框宽估出距离，再把这个垂直角换算成高度差，飞机自己升降过去。
@@ -189,8 +189,11 @@ def _capture_photo(sdk, tag, camera='front'):
     stamp = time.strftime('%H%M%S')
     path = f'{PHOTO_DIR}/{sdk.namespace}_{stamp}_{tag}.png'
     try:
-        sdk.set_camera_view(camera)
-        time.sleep(0.6)                 # 关节转到位要一点时间，见 set_camera_view 说明
+        # 不调 set_camera_view：前视/下视是**两个独立的固定安装相机**
+        # （模型里 {ns}_front_camera_joint / {ns}_down_camera_joint 都是 type='fixed'），
+        # 不存在"转关节切视角"这回事；set_camera_view 发的是给
+        # {ns}_switchable_camera_joint 的指令，那个关节在当前模型里根本没有，
+        # 调了是空转，还白等 0.6 秒。capture_photo 按名字订阅对应话题就够了。
         sdk.capture_photo(path, camera=camera)
         print(f'[{sdk.namespace}] 拍照回传 {tag}：{path}'
               f'（位置 ({wx:.2f}, {wy:.2f})，朝向 {math.degrees(sdk.get_current_yaw()):.0f}°）',
@@ -343,7 +346,7 @@ def center_fire_in_view(sdk, tag='火情'):
     相机。这里直接读前视检测框的偏移：
       · 水平：`atan2(bbox_x - W/2, f)` -> 修 yaw（画面右 = yaw 要减小）
       · 垂直：按框宽估距离（tag 实际 0.5 m），把 `atan2(bbox_y - H/2, f)` 这个
-        垂直角换算成高度差 -> 飞机升降过去（相机不能俯仰，只能整机动）
+        垂直角换算成高度差 -> 飞机升降过去（相机固定安装、不能俯仰，只能整机动）
     两轴都进容差才算居中。
     """
     for i in range(1, AIM_MAX_TRIES + 1):

@@ -1559,10 +1559,10 @@ class DroneSDK:
 
         Args:
             path: 存到哪。目录不存在会自动建。
-            camera: `'front'` 前视 / `'down'` 下视。**这架飞机全局只有一个真实
-                相机**（挂在可动关节上，见 `set_camera_view()`），所以要拍哪路
-                得先 `set_camera_view()` 把关节转过去、等零点几秒到位，再拍；
-                这个参数只决定订阅哪个话题。
+            camera: `'front'` 前视 / `'down'` 下视。前视和下视是**两个独立的
+                固定安装相机**（模型里两个 camera_joint 都是 `type='fixed'`），
+                各自一路话题，这个参数就是选订阅哪一路，**不需要**先调
+                `set_camera_view()`——当前模型里没有可动的相机关节。
             timeout: 等一帧图最多等多久。
             fresh: True（默认）只接受**调用之后**新到的帧，避免拿到切视角前
                 的旧画面；False 则有缓存就直接用。
