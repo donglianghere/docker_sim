@@ -5,6 +5,7 @@
 #   ./一键运行.sh 任务2         # 地面火情：侦查 -> 取物资 -> 投弹 -> 编队返航
 #   ./一键运行.sh 任务3         # 高层火情：巡检拍摄 -> 协同灭火 -> 编队返回
 #   ./一键运行.sh 任务3 --keep  # 结束后保留选手容器，便于翻日志
+#   ./一键运行.sh --no-sync     # 跑本目录里手改过的版本，不从仓库同步
 #
 # 它做这些事（按顺序）：
 #   1. 检查 docker / 镜像 / X11
@@ -30,6 +31,7 @@ SCENE=编队
 SPACING=4.0
 RESTART=1
 KEEP=0
+SYNC=1
 TIMEOUT_S=1500
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -38,6 +40,7 @@ while [ $# -gt 0 ]; do
         任务3|task3)     SCENE=任务3; shift ;;
         --spacing)       SPACING="$2"; shift 2 ;;
         --no-restart)    RESTART=0; shift ;;
+        --no-sync)       SYNC=0; shift ;;
         --keep)          KEEP=1; shift ;;
         --timeout)       TIMEOUT_S="$2"; shift 2 ;;
         -h|--help)       sed -n '2,20p' "$0"; exit 0 ;;
@@ -104,14 +107,24 @@ if [ -f "$ROOT/scripts/check_python_static.py" ]; then
         exit 1
     fi
 fi
-# 顺带提醒：本目录是 contestant_template 的副本，两边改歪了要知道
-for f in 编队飞行示例.py 任务2单项测试.py 任务3单项测试.py; do
-    src="$ROOT/contestant_template/$f"
-    [ -f "$src" ] || continue
-    cmp -s "$src" "$HERE/$f" || echo "（注意：$f 跟 contestant_template 里的那份已经不一样了，本次跑的是本目录这份）" >&2
-done
-cmp -s "$ROOT/scripts/编队监视.py" "$HERE/编队监视.py" || \
-    echo "（注意：编队监视.py 跟 scripts/ 里的那份已经不一样了，本次跑的是本目录这份）" >&2
+# ---- 2.5 从仓库同步最新版到本目录 ----
+# 本目录这 4 个 .py 是 contestant_template/ 和 scripts/ 的副本，开发都在源头改，
+# 副本不同步就会悄悄跑旧代码。所以**每次启动自动同步**，而不是靠人记得拷贝
+# （用户已经两次要求"把最新版放进去"了，说明手工同步迟早要漏）。
+# 要跑本目录里手改过的版本就加 --no-sync。
+if [ "$SYNC" = "1" ]; then
+    n=0
+    for f in 编队飞行示例.py 任务2单项测试.py 任务3单项测试.py; do
+        src="$ROOT/contestant_template/$f"
+        [ -f "$src" ] || continue
+        cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }
+    done
+    src="$ROOT/scripts/编队监视.py"
+    [ -f "$src" ] && { cmp -s "$src" "$HERE/编队监视.py" || { cp "$src" "$HERE/编队监视.py"; echo "   同步 编队监视.py"; n=$((n+1)); }; }
+    [ "$n" = "0" ] && log "本目录已是最新版" || log "已从仓库同步 $n 个文件"
+else
+    log "--no-sync：用本目录现有的版本，不从仓库同步"
+fi
 
 # ---- 3. 起仿真 ----
 docker rm -f "$C_LEADER" "$C_FOLLOWER" >/dev/null 2>&1 || true
