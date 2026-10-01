@@ -75,6 +75,10 @@ OBSERVE_AGL_M = 2.0                   # 用户指定：在 M 点悬停于 2 米�
 #   1# (13.5,19.5) 在 N(14,16) 的**正北** -> 机头 +90°
 # 巡检站点表：(楼号, 观察位, 观察位名字, 机头朝向°, 这栋楼要不要查火情)
 # 按楼号 3 -> 2 -> 1 的顺序走。3# 只拍照不查火情——火情只可能在 1#/2# 两栋。
+# 火情只可能贴在楼的 -Y 面（layout 的 fire_apriltag_random.face），所以"正对
+# 楼面"就是机头朝正北。下面 INSPECT_STATIONS 里 2#/1# 两站用的也是这个角度。
+FACADE_YAW_DEG = 90.0
+
 INSPECT_STATIONS = (
     ('3#', POINT_M, 'M', -90.0, False),
     ('2#', POINT_M, 'M',  90.0, True),
@@ -645,6 +649,23 @@ def supply(sdk):
             print(f'[{sdk.namespace}] 没能精确到点（还差 {d:.2f} m ≤{ARRIVE_ACCEPT_M:.0f} m），'
                   f'就地发射', flush=True)
         sdk.play_sound_light('任务机到达瞄准点')
+        # **先把机头对正楼面，再居中**（2026-10-01 补）。
+        # center_fire_in_view 是"锁住当前朝向、只做横向平移"的，它的 docstring
+        # 写着"调用方进来之前已经 face_yaw 到位"——侦察机在 M/N 观察位上确实
+        # 先转过了，任务机这条路径却从起飞到这里**一次都没设过朝向**
+        # （takeoff / _supply_point_action / descend_onto / _goto_world / goto
+        #  全都不改 yaw）。
+        #
+        # 那它之前为什么一直能用？因为两个毫不相关的配置值碰巧相等：
+        #     NX02 的 spawn 朝向 = 90°（layout 的 takeoff_landing_pads.nx02.yaw_deg）
+        #     楼面法线          = 90°（layout 的 fire_apriltag_random.face = -y）
+        # 飞机全程保持出生朝向，正好对正楼面。这是巧合不是设计——改 spawn 朝向、
+        # 把火情改贴到别的面、或者在前面插入任何会改朝向的动作，都会破掉它。
+        # 综合任务 mission.py 就踩了：第 1 轮编队最后一段 D->A 航向 180°，任务机
+        # 带着它降落，到发射点时朝向 178.9°、离法线差 89°，标识直接出 40° 半视场。
+        # 这里把隐含前提写成显式动作，代价只有一次转向。
+        sdk.face_yaw(math.radians(FACADE_YAW_DEG), timeout=formation.TURN_TIMEOUT_S,
+                     tolerance_deg=formation.TURN_TOL_DEG)
         # 同样走前视居中，不用 center_on_target（只认下视相机，见 IMAGE_W 注释）
         center_fire_in_view(sdk, '高层火情')
 
