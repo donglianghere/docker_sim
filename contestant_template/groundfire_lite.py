@@ -33,7 +33,7 @@ def recon(sdk: DroneSDK):
 
     sdk.hold_at(POINT_G[0], POINT_G[1], agl_m=CRUISE_AGL_M)
     sdk.wait_event(EV_DROPPED, 420.0)
-    sdk.lead_formation([POINT_G, POINT_D], spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M,
+    sdk.lead_formation([POINT_G, POINT_D], agl_m=CRUISE_AGL_M,
                        start_xy=POINT_G, final_xy=POINT_A, disband_at=POINT_D,
                        tail_direct=True)
     sdk.hold_at(POINT_A[0], POINT_A[1], agl_m=CRUISE_AGL_M, seconds=15.0)
@@ -56,7 +56,7 @@ def supply(sdk: DroneSDK):
     sdk.snapshot('地面火情已扑灭', camera='down')   # 灭火完成的交付凭证
     sdk.send_to_teammate(EV_DROPPED)
 
-    sdk.follow_formation(spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M, join='nearest')
+    sdk.follow_formation(agl_m=CRUISE_AGL_M, join='nearest')
     sdk.return_home(sound='任务机已降落', direct=True)
 
 

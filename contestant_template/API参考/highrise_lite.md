@@ -1,6 +1,6 @@
 # highrise_lite.py 用到的 SDK API
 
-> 这个程序用到 **24 个** API（SDK 全部能力有 80 个，其余是底层/备用接口，这个程序没用到）。
+> 这个程序用到 **23 个** API（SDK 全部能力有 80 个，其余是底层/备用接口，这个程序没用到）。
 > 条目按**程序里出现的先后**排，括号里是首次用到的行号——对着 `highrise_lite.py` 从上往下读，顺序能对上。
 > 本文档由 `scripts/gen_sdk_api_doc.py` 自动生成，**不要手改**。
 
@@ -23,7 +23,6 @@
 | 53 | [`yield_spot`](#yield_spot) | 跨机协同 | 宣告"我马上让开这个点"，真的让开了就给队友发一次 event。 |
 | 55 | [`patrol`](#patrol) | 视觉：识别与对准 | 逐站巡检：飞到观察位 -> 转到指定机头朝向 -> 拍交付照片 -> （该查就查）。 |
 | 61 | [`lead_formation`](#lead_formation) | 编队 | 长机带队飞一条航线。只管空中段，起降由调用方自己决定。 |
-| 61 | [`spacing_m`](#spacing_m) | 程序入口 | run() 把命令行 --spacing 存成这个属性，任务函数直接读。 |
 | 64 | [`hold_at`](#hold_at) | 航线飞行 | 飞到某个世界坐标悬停待命，不降落。seconds>0 就停够这么久再返回。 |
 | 78 | [`wait_any_event`](#wait_any_event) | 跨机协同 | 等这几个事件里先到的那一个，返回 (事件名, 数据)。 |
 | 83 | [`fetch_from`](#fetch_from) | 抓放与发射 | 飞到物资点 -> 边瞄边降到底 -> 抓取 -> 起飞回巡航高度。 |
@@ -210,7 +209,7 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 - once: 找到一次之后，后面要查的站只补拍照片、不再跑识别。任务3 里 火情只可能有一处，灭完了就不必在剩下的楼前再等识别超时。
 
 <a id="lead_formation"></a>
-### `lead_formation(route: Sequence[Tuple[float, float]], spacing_m: float=4.0, agl_m: float=2.0, hold_s: float=2.0, start_xy: Optional[Tuple[float, float]]=None, final_xy: Optional[Tuple[float, float]]=None, disband_at: Optional[Tuple[float, float]]=None, wait_follower_s: float=300.0, tail_direct: bool=False)`
+### `lead_formation(route: Sequence[Tuple[float, float]], spacing_m: Optional[float]=None, agl_m: float=2.0, hold_s: float=2.0, start_xy: Optional[Tuple[float, float]]=None, final_xy: Optional[Tuple[float, float]]=None, disband_at: Optional[Tuple[float, float]]=None, wait_follower_s: float=300.0, tail_direct: bool=False)`
 
 *highrise_lite.py 第 61 行首次用到 · 编队*
 
@@ -219,7 +218,7 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 **参数**
 
 - route: 航线（世界坐标）。
-- spacing_m: 目标纵向间距。
+- spacing_m: 目标纵向间距（米）。**不给就用 `self.spacing_m`** （`run()` 从命令行 `--spacing` 存进去的值），所以一般不用传—— 写 `spacing_m=sdk.spacing_m` 等于把 SDK 自己的值原样传回来， 没有任何信息量。只有这一段要用跟全局不同的间距时才显式给。
 - agl_m: 全程锁的离地高度（米）。
 - hold_s: 每个航点停多久（秒）。转向跟停顿同时进行，不足的部分补足。
 - start_xy: 从哪儿起步（默认自己当前位置换算成的起飞点）。编队段从 半路开始时要给，否则僚机算出来的起始站位会跑到场外。
@@ -229,13 +228,6 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 - tail_direct: 最后一段（飞往 final_xy 那一段）走直线。 **解散就发生在这一段上**——disband_at 的判据是"长机已经离开 那个航点 spacing+lag 米"，所以长机走到这一段中途才解散，剩下 的路本质上是"解散后各自回家"。前提同 `goto_world()` 的 direct：必须算过这条直线的余量。
 
 > ⚠️ disband_at 要显式给。不给的话默认判据是“长机飞回自己起飞点上空”，而起飞点不一定在航线上，编队可能在半路散掉。
-
-<a id="spacing_m"></a>
-### `spacing_m`
-
-*highrise_lite.py 第 61 行首次用到 · 程序入口*
-
-run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 <a id="hold_at"></a>
 ### `hold_at(wx: float, wy: float, agl_m: float=2.0, seconds: float=0.0, direct: bool=False)`
@@ -310,7 +302,7 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 - agl_m: 目标离地高度（米）。水平位置不动，只升降。
 
 <a id="follow_formation"></a>
-### `follow_formation(spacing_m: float=4.0, agl_m: float=2.0, join: str='station', route_wait_s: float=60.0, done_wait_s: float=600.0)`
+### `follow_formation(spacing_m: Optional[float]=None, agl_m: float=2.0, join: str='station', route_wait_s: float=60.0, done_wait_s: float=600.0)`
 
 *highrise_lite.py 第 100 行首次用到 · 编队*
 
@@ -318,7 +310,7 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 **参数**
 
-- spacing_m: 跟在长机后方多少米。要跟长机那边给的一致。
+- spacing_m: 跟在长机后方多少米。**不给就用 `self.spacing_m`**， 跟长机那边同一个来源（都来自 `--spacing`），天然一致。
 - agl_m: 入列和跟队时的离地高度（米）。
 - join: `'station'` 先飞到"航线起点后方 spacing 米"的站位点再入列 （编队从头开始时用）；`'nearest'` 就地入列（任务流程里僚机刚 做完事就在长机附近，再飞一趟站位点纯属绕路）。
 - route_wait_s: 等长机下发航线的上限（秒）。等不到就只跟队、不做 分段航向，机头全程不变。

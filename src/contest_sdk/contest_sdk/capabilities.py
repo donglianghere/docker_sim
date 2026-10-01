@@ -3901,7 +3901,7 @@ class DroneSDK:
     LEG_RAMP_STEP_MPS = 0.25
     LEG_RAMP_PERIOD_S = 1.0
 
-    def lead_formation(self, route: Sequence[Tuple[float, float]], spacing_m: float = 4.0,
+    def lead_formation(self, route: Sequence[Tuple[float, float]], spacing_m: Optional[float] = None,
                        agl_m: float = 2.0, hold_s: float = 2.0,
                        start_xy: Optional[Tuple[float, float]] = None,
                        final_xy: Optional[Tuple[float, float]] = None,
@@ -3912,7 +3912,10 @@ class DroneSDK:
 
         Args:
             route: 航线（世界坐标）。
-            spacing_m: 目标纵向间距。
+            spacing_m: 目标纵向间距（米）。**不给就用 `self.spacing_m`**
+                （`run()` 从命令行 `--spacing` 存进去的值），所以一般不用传——
+                写 `spacing_m=sdk.spacing_m` 等于把 SDK 自己的值原样传回来，
+                没有任何信息量。只有这一段要用跟全局不同的间距时才显式给。
             agl_m: 全程锁的离地高度（米）。
             hold_s: 每个航点停多久（秒）。转向跟停顿同时进行，不足的部分补足。
             start_xy: 从哪儿起步（默认自己当前位置换算成的起飞点）。编队段从
@@ -3928,6 +3931,7 @@ class DroneSDK:
                 direct：必须算过这条直线的余量。
         """
         import threading
+        spacing_m = self.spacing_m if spacing_m is None else spacing_m
         self.open_inbox(self.EV_READY, self.EV_IN_POSITION)
         hx, hy, _ = self.local_to_world(0.0, 0.0, 0.0)
         start = tuple(start_xy) if start_xy is not None else (hx, hy)
@@ -3998,13 +4002,14 @@ class DroneSDK:
                 except Exception:
                     pass
 
-    def follow_formation(self, spacing_m: float = 4.0, agl_m: float = 2.0,
+    def follow_formation(self, spacing_m: Optional[float] = None, agl_m: float = 2.0,
                          join: str = 'station', route_wait_s: float = 60.0,
                          done_wait_s: float = 600.0) -> None:
         """僚机跟队。**只管空中段**，起降由调用方自己决定。
 
         Args:
-            spacing_m: 跟在长机后方多少米。要跟长机那边给的一致。
+            spacing_m: 跟在长机后方多少米。**不给就用 `self.spacing_m`**，
+                跟长机那边同一个来源（都来自 `--spacing`），天然一致。
             agl_m: 入列和跟队时的离地高度（米）。
             join: `'station'` 先飞到"航线起点后方 spacing 米"的站位点再入列
                 （编队从头开始时用）；`'nearest'` 就地入列（任务流程里僚机刚
@@ -4014,6 +4019,7 @@ class DroneSDK:
             done_wait_s: 等长机发"解散"的上限（秒）。等不到也会自己出列，
                 免得长机那边出问题时僚机永远挂着。
         """
+        spacing_m = self.spacing_m if spacing_m is None else spacing_m
         self.open_inbox(self.EV_ROUTE_PLAN, self.EV_ROUTE_DONE)
         self.send_to_teammate(self.EV_READY)
         route: List[Tuple[float, float]] = []

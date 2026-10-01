@@ -21,7 +21,7 @@ def leader(sdk: DroneSDK):
     # disband_at=D（航线最后一个航点，也是两机分头回家的分岔口）。不给的话
     # 默认判据是"长机飞回自己起飞点上空"，而那个点不在航线上、只是碰巧跟最后
     # 一段共线，编队会在半路散掉。
-    sdk.lead_formation(ROUTE, spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M,
+    sdk.lead_formation(ROUTE, agl_m=CRUISE_AGL_M,
                        final_xy=POINT_A, disband_at=POINT_D, tail_direct=True)
     sdk.hold_at(POINT_A[0], POINT_A[1], agl_m=CRUISE_AGL_M, seconds=15.0)
     sdk.announce('侦察机任务完成')
@@ -30,7 +30,7 @@ def leader(sdk: DroneSDK):
 def follower(sdk: DroneSDK):
     """僚机：起飞 -> 入列跟队 -> 解散后回自己起降点降落。"""
     sdk.takeoff(height_m=CRUISE_AGL_M)
-    sdk.follow_formation(spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M, join='station')
+    sdk.follow_formation(agl_m=CRUISE_AGL_M, join='station')
     sdk.return_home(sound='任务机已降落', direct=True)
 
 

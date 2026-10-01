@@ -47,7 +47,7 @@ def _formation_home_recon(sdk: DroneSDK, last):
     解散后就地降落。
     """
     final = sdk.own_pad() if last else ROUTE_A
-    sdk.lead_formation([ROUTE_G, ROUTE_D], spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M,
+    sdk.lead_formation([ROUTE_G, ROUTE_D], agl_m=CRUISE_AGL_M,
                        start_xy=ROUTE_G, final_xy=final, disband_at=ROUTE_D,
                        tail_direct=True)
     if last:
@@ -100,7 +100,7 @@ def recon(sdk: DroneSDK):
     # （都在 y=3）——编队会在离终点还有 5 米的半路上散掉，散在一个跟任务无关的
     # 点上；起降点哪天挪开这条线，这个判据就永远不成立。D 点是两机路径真正的
     # 分岔口（僚机回 (12,3)、长机去 A），跟第 2/3 轮同一套规则。
-    sdk.lead_formation(FORMATION_ROUTE, spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M,
+    sdk.lead_formation(FORMATION_ROUTE, agl_m=CRUISE_AGL_M,
                        final_xy=ROUTE_A, disband_at=ROUTE_D, tail_direct=True)
     sdk.hold_at(ROUTE_A[0], ROUTE_A[1], agl_m=CRUISE_AGL_M)
 
@@ -145,7 +145,7 @@ def _ground_round_supply(sdk: DroneSDK):
     sdk.grip(release=True, label='投放')
     sdk.snapshot('地面火情已扑灭', camera='down')   # 灭火完成的交付凭证
     sdk.send_to_teammate(EV_DROPPED)
-    sdk.follow_formation(spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M, join='nearest')
+    sdk.follow_formation(agl_m=CRUISE_AGL_M, join='nearest')
     # 灭火弹已经投到火点上了，没东西可还，直接回家
 
 
@@ -166,7 +166,7 @@ def _high_round_supply(sdk: DroneSDK):
     sdk.shoot(SHOTS, interval_s=1.0, label='发射灭火弹', sound='任务机发射灭火弹')
     sdk.send_to_teammate(EV_EXTINGUISHED)
     sdk.set_agl(CRUISE_AGL_M)        # 对准时被挪到了着火点高度，入列前收回来
-    sdk.follow_formation(spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M, join='nearest')
+    sdk.follow_formation(agl_m=CRUISE_AGL_M, join='nearest')
     # 器材是抓在手上带去发射的，打完还在机上 -> 解散后先还回物资点
     sdk.release_at(SUPPLY_XY, SUPPLY_TAG, what='灭火器材', agl_m=CRUISE_AGL_M,
                    direct=True)
@@ -179,7 +179,7 @@ def supply(sdk: DroneSDK):
     sdk.takeoff(height_m=CRUISE_AGL_M)
 
     sdk.progress('===== 第 1 轮：编队飞行 =====')
-    sdk.follow_formation(spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M, join='station')
+    sdk.follow_formation(agl_m=CRUISE_AGL_M, join='station')
     sdk.return_home(sound='任务机已降落', report=EV_ROUND_DONE, direct=True)
 
     for rnd in (2, 3):
