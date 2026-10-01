@@ -74,6 +74,34 @@ def used_apis():
     return out
 
 
+def param_gaps(api):
+    """每个在用 API 的**每个参数**都必须在 docstring 的 Args 里有说明。
+
+    返回 [(方法名, [缺说明的参数])]。这是一道闸：参数说明不全就不出文档。
+    2026-10-01 第一次量的时候 96 个参数里缺 64 个（67%），全靠这个脚本逐个
+    点名才补齐——没有闸的话下次加参数又会忘。
+    """
+    cls = next(n for n in ast.parse(io.open(SRC, encoding='utf-8').read()).body
+               if isinstance(n, ast.ClassDef) and n.name == 'DroneSDK')
+    fn = {n.name: n for n in cls.body
+          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    gaps = []
+    for name, info in api.items():
+        if name not in fn:
+            continue                      # 属性，没有参数
+        a = fn[name].args
+        ps = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs if x.arg != 'self']
+        if a.vararg:
+            ps.append(a.vararg.arg)
+        if a.kwarg:
+            ps.append(a.kwarg.arg)
+        doc = {d.split(':')[0].strip().lstrip('*') for d in info['args']}
+        lack = [x for x in ps if x not in doc]
+        if lack:
+            gaps.append((name, lack))
+    return gaps
+
+
 def category_of(name):
     for cat, names in CATEGORIES:
         if name in names:
@@ -273,8 +301,17 @@ def main():
         return 1
     if stale:
         print(f'注意  分类表里这些已经没有程序在用，已跳过：{stale}', file=sys.stderr)
+    gaps = [(n, l) for n, l in param_gaps(api) if n in allnames]
+    if gaps:
+        for n, l in gaps:
+            print(f'★NG  {n}() 这些参数在 docstring 的 Args 里没有说明：'
+                  f'{"、".join(l)}', file=sys.stderr)
+        print('     去 capabilities.py 对应方法的 docstring 里补上 Args。',
+              file=sys.stderr)
+        return 1
     if args.check:
-        print(f'OK   {len(allnames)} 个在用 API 全部有分类')
+        n_par = sum(len(api[x]['args']) for x in allnames)
+        print(f'OK   {len(allnames)} 个在用 API 全部有分类，{n_par} 个参数全部有说明')
         return 0
     os.makedirs(OUTDIR, exist_ok=True)
     for prog, items in used.items():

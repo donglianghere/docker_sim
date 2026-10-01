@@ -27,7 +27,7 @@
 | 93 | [`PHOTO_DIR`](#photo_dir) | 拍照 | snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/logs/xx |
 | 94 | [`open_inbox`](#open_inbox) | 跨机协同 | 注册这些跨机事件的收件箱。在任务一开始就全部注册，见上面说明。 |
 | 95 | [`takeoff`](#takeoff) | 起飞 / 降落 / 返航 | 起飞：发布TakeoffLand{TAKEOFF}，阻塞直到armed=True且飞控自己的起飞状态机真 |
-| 97 | [`progress`](#progress) | 日志 | 往日志里打一行带机号前缀的进度。选手程序里 print(f'[{ns}] ...')满篇都是，用这个就不 |
+| 97 | [`progress`](#progress) | 日志 | 往日志里打一行带机号前缀的进度。选手程序里 print(f'[{ns}] ...') |
 | 117 | [`search_along`](#search_along) | 视觉：识别与对准 | 从当前位置飞向 leg_end，边飞边找；看到就刹停、对准、解算坐标。 |
 | 140 | [`fetch_from`](#fetch_from) | 抓放与发射 | 飞到物资点 -> 边瞄边降到底 -> 抓取 -> 起飞回巡航高度。 |
 | 142 | [`goto_world`](#goto_world) | 航线飞行 | 飞到一个世界坐标上方并锁高（走 ego_planner，有避障）。 |
@@ -57,6 +57,8 @@
 
 - route: 航线（世界坐标）。
 - spacing_m: 目标纵向间距。
+- agl_m: 全程锁的离地高度（米）。
+- hold_s: 每个航点停多久（秒）。转向跟停顿同时进行，不足的部分补足。
 - start_xy: 从哪儿起步（默认自己当前位置换算成的起飞点）。编队段从 半路开始时要给，否则僚机算出来的起始站位会跑到场外。
 - final_xy: 航线跑完再飞到哪儿（默认 route[0]）。
 - disband_at: 给了就按"**僚机过了这个航点**"解散；不给按"长机飞回 自己起飞点上空"解散。
@@ -81,6 +83,8 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 **参数**
 
+- land: True = 到位后降落（默认）；False = 只飞回起飞点上空悬停。
+- agl_m: 飞回去时锁的离地高度（米）。
 - sound: 核对落点通过后才播的声光事件。**不要在调用方自己播**—— 任务机全程要降落三次（取器材、放器材、回家），"降落动作完成" 本身说明不了任务结束，得按落点坐标判。
 - report: 给队友发的事件名，带 x/y/ok 三个字段。落点不准也发， 否则队友会一直等到超时。
 - direct: True = 整段走直线，不经规划器。含义和前提同 `goto_world()` ——**必须先算过这条直线的余量**。编队解散之后各自回家那一段 适合开（算过：D->各自起降点最小余量 3.00 m，离墙最近）。
@@ -94,12 +98,24 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 飞到某个世界坐标悬停待命，**不降落**。seconds>0 就停够这么久再返回。
 
+**参数**
+
+- wx: 待命点的世界坐标 x（米）。
+- wy: 待命点的世界坐标 y（米）。
+- agl_m: 悬停的离地高度（米）。
+- seconds: 到位后再停多久（秒）。0 = 到了就返回，不额外等。
+- direct: True = 走直线（`goto_direct`），**不经规划器、没有避障**。 含义和前提同 `goto_world()`——必须先算过这条直线的余量。
+
 <a id="announce"></a>
 ### `announce(event: str)`
 
 *mission_lite.py 第 61 行首次用到 · 声光播报*
 
 播报一次声光事件。`play_sound_light()` 的别名，名字更贴近用途。
+
+**参数**
+
+- event: 声光事件名。**必须是固定枚举里的一项**（见 `_sound_light_port.py` 的 SOUND_LIGHT_EVENTS），自造名字会 直接抛 ValueError 把整个任务打断。
 
 <a id="send_to_teammate"></a>
 ### `send_to_teammate(event: str, timeout_s: float=DEFAULT_SEND_TO_TEAMMATE_TIMEOUT_S, **kwargs: Any)`
@@ -137,7 +153,10 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 **参数**
 
+- class_id: 要对准的目标类别，比如 'apriltag:1'。
+- camera: 'front'（前视，贴在立面上的目标）或 'down'（下视，地面目标）。 **两条路完全不同**：前视走本方法自己的几何解算；下视自动改走 `center_on_target()` 的 precision_servo 闭环。
 - face_yaw_deg: 给了就先把机头转到这个朝向再对准。**正对立面的场景 一定要给**——本方法是"锁住当前朝向只做平移"的，朝向不对的话 画面里居中了、机身却斜着，弹丸打出去也是斜的。
+- what: 目标叫什么，只用于日志。
 
 > ⚠️ camera='down' 会自动改走 precision_servo 闭环。前视那套几何把画面纵轴当成世界的高低，下视时纵轴其实是机体前后方向，照搬永远收敛不了。
 
@@ -148,6 +167,12 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 拍一张交付照片存进 /logs 并打印路径（"回传"就是存进这个挂载目录）。
 
+**参数**
+
+- tag: 这张照片叫什么，会进文件名（`{机号}_{时分秒}_{tag}.png`）。
+- camera: 用哪个相机，'front'（前视）或 'down'（下视）。 两个都是**固定安装**的独立相机，不存在"切视角"。
+- directory: 存到哪个目录。不给就用 `self.PHOTO_DIR`。
+
 > ⚠️ 不要给拍照配声光事件：声光事件是固定枚举，自造事件名会直接抛 ValueError 把整个任务打断。
 
 <a id="step_forward"></a>
@@ -156,6 +181,11 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 *mission_lite.py 第 74 行首次用到 · 航线飞行*
 
 沿**当前机头方向**平移 meters 米，返回落脚点的 (世界x, 世界y, 离地高度)。
+
+**参数**
+
+- meters: 沿机头方向前移多少米。正数向前。
+- what: 落脚点的名字，只用于日志。
 
 <a id="shoot"></a>
 ### `shoot(shots: int=1, interval_s: float=1.0, label: str='发射', sound: Optional[str]=None)`
@@ -166,6 +196,9 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 **参数**
 
+- shots: 连发几发。默认 1。
+- interval_s: 两发之间隔多久（秒）。只在 shots>1 时有意义。
+- label: 日志里怎么称呼（比如 '发射灭火弹'）。连发时自动加 "i/n"。
 - sound: 第一发之前播的声光事件。连发只播一次。
 
 > ⚠️ 连发时 sound 只播一次，播报点在第一发之前。
@@ -177,6 +210,12 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 宣告"我马上让开这个点"，**真的让开了**就给队友发一次 event。
 
+**参数**
+
+- spot_xy: 要让出的那个点的世界坐标 (x, y)。
+- event: 让开之后给队友发哪个事件名。
+- timeout_s: 兜底超时（秒）。不给用 SPOT_CLEAR_WAIT_S（120 秒）。 两条放行路径都没触发时，到点也会放行并在日志里说清楚—— 不然队友会一直等下去。
+
 <a id="patrol"></a>
 ### `patrol(stations: List[Tuple[Any, ...]], class_id: Optional[str]=None, agl_m: float=2.0, on_found: Optional[Any]=None, scan_sound: Optional[str]=None, found_sound: Optional[str]=None, once: bool=True)`
 
@@ -187,7 +226,11 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 **参数**
 
 - stations: `[(标签, (wx, wy), 观察位名, 机头朝向°, 这站要不要查), ...]`。 连续两站是同一个观察位时不重复飞，只原地转向（任务3 的 M 点 要先朝南拍 3# 楼、再原地转 180° 查 2# 楼）。
+- class_id: 要查的目标类别。`要不要查` 为 False 的站不会用到它。
+- agl_m: 观察位的离地高度（米）。
 - on_found: `on_found(det, 标签)`。找到目标时调用，**这一站的照片由它 负责拍**——要等它把目标对准到画面正中再拍，火情在画面边上 等于没拍到。它很可能把飞机挪走（比如前移到发射点），所以回来 之后不再认为飞机还在观察位上。
+- scan_sound: 每个要查的站开查之前播的声光事件。不给就不播。
+- found_sound: 找到目标时播的声光事件，在 on_found 之前播。
 - once: 找到一次之后，后面要查的站只补拍照片、不再跑识别。任务3 里 火情只可能有一处，灭完了就不必在剩下的楼前再等识别超时。
 
 <a id="fly_route"></a>
@@ -218,6 +261,10 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 
 注册这些跨机事件的收件箱。**在任务一开始就全部注册**，见上面说明。
 
+**参数**
+
+- *events: 要注册的事件名，可以一次给多个。 重复注册同一个事件是安全的（幂等），不会把已收到的内容清掉。
+
 > ⚠️ 可靠事件通道是“先回 ACK 再查处理函数”，没注册的事件会被确认后丢弃。任务一开始就把所有事件注册全，别等用到了再注册。
 
 <a id="takeoff"></a>
@@ -230,13 +277,19 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 **参数**
 
 - timeout: 总超时秒数，同时覆盖"等`armed=True`"和"等位置 稳定"这两段。默认从30秒提到60秒——实测确认这套仿真 （`uwb_imu`+`pt4ctrl`组合）从解锁到真正稳定悬停，中间 有一段爬升超调+振荡衰减的过程，衰减到0.3米容差以内 经常要20~30秒量级，30秒的旧默认值不够用。
+- height_m: 起飞到多高（米，离地）。不给就用飞控 `pt4ctrl` 里 配置的 takeoff_height。
 
 <a id="progress"></a>
 ### `progress(text: str)`
 
 *mission_lite.py 第 97 行首次用到 · 日志*
 
-往日志里打一行带机号前缀的进度。选手程序里 `print(f'[{ns}] ...')`满篇都是，用这个就不必每次自己拼前缀、也不会漏 flush=True。
+往日志里打一行带机号前缀的进度。选手程序里 `print(f'[{ns}] ...')`
+
+**参数**
+
+- text: 要打的内容。会自动加上 `[机号]` 前缀并 flush， 不用自己拼。
+- 满篇都是，用这个就不必每次自己拼前缀、也不会漏 flush=True。
 
 <a id="search_along"></a>
 ### `search_along(leg_end: Tuple[float, float], class_id: str, camera: str='down', agl_m: float=2.0, timeout_s: float=420.0, what: str='目标')`
@@ -244,6 +297,15 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 *mission_lite.py 第 117 行首次用到 · 视觉：识别与对准*
 
 从当前位置飞向 leg_end，**边飞边找**；看到就刹停、对准、解算坐标。
+
+**参数**
+
+- leg_end: 这一段飞到哪儿（世界坐标 (x, y)）。从**当前位置**出发。
+- class_id: 边飞边找什么，比如 'apriltag:2'。
+- camera: 用哪个相机找，'down'（找地面目标）或 'front'。
+- agl_m: 这一段锁的离地高度（米）。
+- timeout_s: 整段最多花多久（秒）。超时按"没找到"返回 None。
+- what: 目标叫什么，只用于日志。
 
 <a id="fetch_from"></a>
 ### `fetch_from(wxy: Tuple[float, float], class_id: str, what: str='物资', agl_m: float=2.0, sound: Optional[str]=None, direct: bool=False)`
@@ -254,7 +316,12 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 
 **参数**
 
+- wxy: 物资点的世界坐标 (x, y)。
+- class_id: 物资点上贴的标识，比如 'apriltag:0'，用来边瞄边降。
+- what: 物资叫什么，进日志也进降落提示（"已降落在{what}点"）。
+- agl_m: 飞过去时的巡航高度，抓完也回到这个高度（米）。
 - sound: 声光播报内容。**播报点在落地之后、舵机动作之前**——裁判 听到的那一声要对上"正在抓"这个瞬间；写在 `fetch_from()` 前面会提前十几秒（还在飞往物资点的路上就播了）。
+- direct: True = 飞过去那一段走直线，不经规划器。含义和前提同 `goto_world()`。
 
 <a id="goto_world"></a>
 ### `goto_world(wx: float, wy: float, agl_m: Optional[float]=None, what: str='', accept_m: float=0.0, direct: bool=False)`
@@ -265,6 +332,10 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 
 **参数**
 
+- wx: 目标点的世界坐标 x（米）。
+- wy: 目标点的世界坐标 y（米）。
+- agl_m: 飞过去之后锁住的离地高度（米）。不给就用当前高度。
+- what: 这个点叫什么，只用于日志（"飞往{what} (x, y)"）。
 - accept_m: 判成"到不了"但其实已经在这个距离以内时按到达处理。 默认 0 = 不容忍、照常抛异常。目标点贴着障碍或刚被别的飞机占过 时规划器会把终端推到膨胀区边缘，给个 1~2 米的容忍更实用。
 - direct: True = 走直线（`goto_direct`），**不经规划器、没有避障**。
 
@@ -277,6 +348,11 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 
 驱动机械抓。release=False 抓紧，True 松开。
 
+**参数**
+
+- release: False = 抓紧（PWM 800），True = 松开（PWM 2000）。 真机实测值，见 GRIP_CLOSE_PWM / GRIP_OPEN_PWM。
+- label: 日志里怎么称呼这个动作（比如 '抓取灭火弹'）。 不给就按 release 自动用"抓取"/"松开"。
+
 <a id="follow_formation"></a>
 ### `follow_formation(spacing_m: float=4.0, agl_m: float=2.0, join: str='station', route_wait_s: float=60.0, done_wait_s: float=600.0)`
 
@@ -286,7 +362,11 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 
 **参数**
 
+- spacing_m: 跟在长机后方多少米。要跟长机那边给的一致。
+- agl_m: 入列和跟队时的离地高度（米）。
 - join: `'station'` 先飞到"航线起点后方 spacing 米"的站位点再入列 （编队从头开始时用）；`'nearest'` 就地入列（任务流程里僚机刚 做完事就在长机附近，再飞一趟站位点纯属绕路）。
+- route_wait_s: 等长机下发航线的上限（秒）。等不到就只跟队、不做 分段航向，机头全程不变。
+- done_wait_s: 等长机发"解散"的上限（秒）。等不到也会自己出列， 免得长机那边出问题时僚机永远挂着。
 
 <a id="set_agl"></a>
 ### `set_agl(agl_m: float)`
@@ -294,6 +374,10 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 *mission_lite.py 第 168 行首次用到 · 航线飞行*
 
 原地升降到指定离地高度，水平位置不动（直线、不经规划器）。
+
+**参数**
+
+- agl_m: 目标离地高度（米）。水平位置不动，只升降。
 
 <a id="release_at"></a>
 ### `release_at(wxy: Tuple[float, float], class_id: str, what: str='物资', agl_m: float=2.0, sound: Optional[str]=None, direct: bool=False)`
@@ -304,7 +388,12 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 
 **参数**
 
+- wxy: 物资点的世界坐标 (x, y)。
+- class_id: 物资点上贴的标识，用来边瞄边降。
+- what: 物资叫什么，进日志。
+- agl_m: 飞过去时的巡航高度，放完也回到这个高度（米）。
 - sound: 同 `fetch_from()`，落地后、舵机动作前播报。
+- direct: True = 飞过去那一段走直线。含义和前提同 `goto_world()`。
 
 <a id="run"></a>
 ### `run(leader: Any, follower: Any, description: Optional[str]=None, spacing_m: float=4.0)`
@@ -312,4 +401,11 @@ snapshot() 的存图目录，用实例属性覆盖即可：sdk.PHOTO_DIR = '/log
 *mission_lite.py 第 197 行首次用到 · 程序入口*  ·  *staticmethod*
 
 选手程序的 main()：解析命令行 -> 建 SDK -> 按角色分派 -> 收尾。
+
+**参数**
+
+- leader: 长机那一支要跑的函数，签名是 `f(sdk)`。 `--role` 是 leader 或 recon 时调它。
+- follower: 僚机那一支要跑的函数，签名同上。
+- description: 命令行 `--help` 里显示的说明，一般传 `__doc__`。
+- spacing_m: `--spacing` 的默认值（米）。实际取到的值会存成 `sdk.spacing_m`，任务函数直接读。
 

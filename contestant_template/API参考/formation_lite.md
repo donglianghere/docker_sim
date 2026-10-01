@@ -30,6 +30,7 @@
 **参数**
 
 - timeout: 总超时秒数，同时覆盖"等`armed=True`"和"等位置 稳定"这两段。默认从30秒提到60秒——实测确认这套仿真 （`uwb_imu`+`pt4ctrl`组合）从解锁到真正稳定悬停，中间 有一段爬升超调+振荡衰减的过程，衰减到0.3米容差以内 经常要20~30秒量级，30秒的旧默认值不够用。
+- height_m: 起飞到多高（米，离地）。不给就用飞控 `pt4ctrl` 里 配置的 takeoff_height。
 
 <a id="lead_formation"></a>
 ### `lead_formation(route: List[Tuple[float, float]], spacing_m: float=4.0, agl_m: float=2.0, hold_s: float=2.0, start_xy: Optional[Tuple[float, float]]=None, final_xy: Optional[Tuple[float, float]]=None, disband_at: Optional[Tuple[float, float]]=None, wait_follower_s: float=300.0, tail_direct: bool=False)`
@@ -42,6 +43,8 @@
 
 - route: 航线（世界坐标）。
 - spacing_m: 目标纵向间距。
+- agl_m: 全程锁的离地高度（米）。
+- hold_s: 每个航点停多久（秒）。转向跟停顿同时进行，不足的部分补足。
 - start_xy: 从哪儿起步（默认自己当前位置换算成的起飞点）。编队段从 半路开始时要给，否则僚机算出来的起始站位会跑到场外。
 - final_xy: 航线跑完再飞到哪儿（默认 route[0]）。
 - disband_at: 给了就按"**僚机过了这个航点**"解散；不给按"长机飞回 自己起飞点上空"解散。
@@ -64,12 +67,24 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 飞到某个世界坐标悬停待命，**不降落**。seconds>0 就停够这么久再返回。
 
+**参数**
+
+- wx: 待命点的世界坐标 x（米）。
+- wy: 待命点的世界坐标 y（米）。
+- agl_m: 悬停的离地高度（米）。
+- seconds: 到位后再停多久（秒）。0 = 到了就返回，不额外等。
+- direct: True = 走直线（`goto_direct`），**不经规划器、没有避障**。 含义和前提同 `goto_world()`——必须先算过这条直线的余量。
+
 <a id="announce"></a>
 ### `announce(event: str)`
 
 *formation_lite.py 第 27 行首次用到 · 声光播报*
 
 播报一次声光事件。`play_sound_light()` 的别名，名字更贴近用途。
+
+**参数**
+
+- event: 声光事件名。**必须是固定枚举里的一项**（见 `_sound_light_port.py` 的 SOUND_LIGHT_EVENTS），自造名字会 直接抛 ValueError 把整个任务打断。
 
 <a id="follow_formation"></a>
 ### `follow_formation(spacing_m: float=4.0, agl_m: float=2.0, join: str='station', route_wait_s: float=60.0, done_wait_s: float=600.0)`
@@ -80,7 +95,11 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 **参数**
 
+- spacing_m: 跟在长机后方多少米。要跟长机那边给的一致。
+- agl_m: 入列和跟队时的离地高度（米）。
 - join: `'station'` 先飞到"航线起点后方 spacing 米"的站位点再入列 （编队从头开始时用）；`'nearest'` 就地入列（任务流程里僚机刚 做完事就在长机附近，再飞一趟站位点纯属绕路）。
+- route_wait_s: 等长机下发航线的上限（秒）。等不到就只跟队、不做 分段航向，机头全程不变。
+- done_wait_s: 等长机发"解散"的上限（秒）。等不到也会自己出列， 免得长机那边出问题时僚机永远挂着。
 
 <a id="return_home"></a>
 ### `return_home(land: bool=True, agl_m: float=2.0, sound: Optional[str]=None, report: Optional[str]=None, direct: bool=False)`
@@ -91,6 +110,8 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 
 **参数**
 
+- land: True = 到位后降落（默认）；False = 只飞回起飞点上空悬停。
+- agl_m: 飞回去时锁的离地高度（米）。
 - sound: 核对落点通过后才播的声光事件。**不要在调用方自己播**—— 任务机全程要降落三次（取器材、放器材、回家），"降落动作完成" 本身说明不了任务结束，得按落点坐标判。
 - report: 给队友发的事件名，带 x/y/ok 三个字段。落点不准也发， 否则队友会一直等到超时。
 - direct: True = 整段走直线，不经规划器。含义和前提同 `goto_world()` ——**必须先算过这条直线的余量**。编队解散之后各自回家那一段 适合开（算过：D->各自起降点最小余量 3.00 m，离墙最近）。
@@ -103,4 +124,11 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 *formation_lite.py 第 38 行首次用到 · 程序入口*  ·  *staticmethod*
 
 选手程序的 main()：解析命令行 -> 建 SDK -> 按角色分派 -> 收尾。
+
+**参数**
+
+- leader: 长机那一支要跑的函数，签名是 `f(sdk)`。 `--role` 是 leader 或 recon 时调它。
+- follower: 僚机那一支要跑的函数，签名同上。
+- description: 命令行 `--help` 里显示的说明，一般传 `__doc__`。
+- spacing_m: `--spacing` 的默认值（米）。实际取到的值会存成 `sdk.spacing_m`，任务函数直接读。
 
