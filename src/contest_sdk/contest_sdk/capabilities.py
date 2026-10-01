@@ -542,6 +542,19 @@ class DroneSDK:
 
         self._setup_transport()
 
+        # 编队握手的四个事件，**构造时就把收件箱建好**。
+        # 可靠事件通道是"先回 ACK 再查处理函数"，没注册的事件会被确认后丢弃；
+        # 而起飞要二十多秒，谁先飞完谁就先发事件，另一边还没注册就永久丢。
+        # 2026-10-01 实测两种翻车方式都出现过：
+        #   · 航线丢 -> 僚机拿不到 leg_route，分段航向没了，机头全程不变，
+        #     而且退化成"就地入列"；
+        #   · 加了"长机等 READY 再发航线"之后，READY 自己也撞同一个坑 ->
+        #     两边各等满 60 秒超时，白白多等两分钟才开始编队。
+        # 老版是靠选手在起飞前手写 _Inbox 躲过去的，那正是要消除的负担。
+        # 放在这里注册，不管选手什么时候调 takeoff/lead/follow 都不会漏。
+        self.open_inbox(self.EV_READY, self.EV_ROUTE_PLAN,
+                        self.EV_IN_POSITION, self.EV_ROUTE_DONE)
+
         self._progress(
             f"DroneSDK就绪（role={self.role}，teammate={self.teammate_namespace}）"
         )
@@ -1988,6 +2001,42 @@ class DroneSDK:
         self._progress(f'规划器限速 -> {max_vel_mps:.2f} m/s（原 {old:.2f}）')
         return old
 
+    def set_direct_speed(self, max_speed_mps: float, timeout: float = 5.0) -> None:
+        """改 `goto_direct()` 的限速（`precision_servo_node` 的
+        `coordinate_max_speed_mps`），**飞行中可以随时改**。
+
+        跟 `set_max_vel()` 是两条完全不同的链路，别混：
+          · `set_max_vel()` 改的是 `ego_planner` 的巡航限速，管 `goto()`
+            / `fly_route()` / `lead_formation()` 这些**走规划器、有避障**的飞行；
+          · 本方法改的是 precision_servo 的直线伺服限速，管 `goto_direct()`
+            / `return_home()` 最后一段 / `aim_at()` 的平移这些**不避障**的飞行。
+
+        默认值只有 0.3 m/s，那是给"最后一段精修落点"调的；拿它跑长距离会慢到
+        离谱（实测 5.4 米走了 45 秒）。改了记得改回去——这个参数是节点级的，
+        不会自己复位，带着高限速跑 `return_home()` 的落点精修和 `aim_at()` 的
+        平移，精度都会变差。
+
+        ⚠️ **不要拿它去"加速走直线绕过规划器"**：避障本身是考核点，航线上的
+        `obstacle_cylinder` 就是为这一项摆的。这个方法只用于已经在走直飞的
+        那些短段（落点精修、对准平移）。
+
+        Args:
+            max_speed_mps: 新的限速，米/秒。必须为正。
+
+        Raises:
+            ValueError: `max_speed_mps <= 0`。
+            ActionFailedError: 参数服务调用超时或被拒绝。
+        """
+        if max_speed_mps <= 0.0:
+            raise ValueError(f'max_speed_mps 必须为正，收到 {max_speed_mps}')
+        ok = self._call_set_parameters_blocking(
+            self._precision_servo_params_cli,
+            {'coordinate_max_speed_mps': float(max_speed_mps)}, timeout_s=timeout)
+        if not ok:
+            raise ActionFailedError(action_name=f'set_direct_speed({max_speed_mps})',
+                                    timeout_s=timeout, namespace=self.namespace)
+        self._progress(f'直飞限速 -> {max_speed_mps:.2f} m/s')
+
     def start_formation_follow(self, follow_distance_m: float, timeout: float = 10.0,
                                altitude_agl_m: Optional[float] = None,
                                turn_in_place: Optional[bool] = None,
@@ -3430,6 +3479,1204 @@ class DroneSDK:
     # 生命周期收尾（不是2.1节编号能力，但跟_rclpy_runtime.py/reliability.py
     # 各自暴露的shutdown()对称，选手程序退出前调用一次做干净清理）。
     # ------------------------------------------------------------------
+
+    # ==================================================================
+    # 2026-10-01 新增：把选手程序里反复手写的常见模式收进来（**纯增量**）。
+    #
+    # 为什么加这一层：实测 groundfire.py 的 recon() 共 89 行，其中 47 行（56%）
+    # 是在跟线程、检测轮询、刹停时序、异常兜底打交道，跟比赛题目无关，而且每个
+    # 队都要重写一遍、各踩一遍坑。这些方法把那些机制收进 SDK，让选手程序只写
+    # "做什么"。
+    #
+    # **不改任何现有方法**：全是新名字，老程序完全不受影响，新老两版共用同一个
+    # 镜像。
+    # ==================================================================
+
+    def announce(self, event: str) -> None:
+        """播报一次声光事件。`play_sound_light()` 的别名，名字更贴近用途。"""
+        self.play_sound_light(event)
+
+    #: set_direct_speed() 用完恢复成这个值（= precision_servo 的出厂默认）。
+    #: 0.3 是给"最后一段精修落点"调的，长距离直飞必须先提上来再用。
+    DIRECT_SPEED_DEFAULT_MPS = 0.3
+    #: 长距离直飞用的限速。2026-10-01 实测 8 m 航段：0.3->40.3 s、1.0->14.6 s，
+    #: 再往上到 1.5 反而变慢（17.4 s，冲过头要回收），所以 1.0 就是拐点。
+    DIRECT_CRUISE_MPS = 1.0
+
+    def goto_world(self, wx: float, wy: float, agl_m: Optional[float] = None,
+                   what: str = '', accept_m: float = 0.0,
+                   direct: bool = False) -> None:
+        """飞到一个**世界坐标**上方并锁高（走 ego_planner，有避障）。
+
+        选手程序里 `world_to_local` + `fixed_altitude` + `goto` 这三件套出现了
+        十几次，收成一个方法。agl_m 不给就用当前高度。
+
+        Args:
+            accept_m: 判成"到不了"但其实已经在这个距离以内时按到达处理。
+                默认 0 = 不容忍、照常抛异常。目标点贴着障碍或刚被别的飞机占过
+                时规划器会把终端推到膨胀区边缘，给个 1~2 米的容忍更实用。
+            direct: True = 走直线（`goto_direct`），**不经规划器、没有避障**。
+
+                ⚠️ 只在**算过整条直线余量**的航段上开。算的时候布局里的
+                `obstacle_cylinder` / `pillars` / `terrain_module` / 四面墙
+                一个都不能漏——2026-10-01 我只翻了 `pillars` 就下结论，把
+                A(3,3)->B(3,22) 判成"干净"，而 φ0.5 高 6 m 的 `obstacle_cylinder`
+                正坐在 (3.0, 8.0)，直飞就是直接撞上去。
+                更要紧的是：**航线上的避障本身是考核点**，不能为了快把它绕过去。
+                这个开关只用于编队解散之后各自回家那几段——那些段不计避障分，
+                而且确实是空的。
+        """
+        if agl_m is None:
+            agl_m = self.get_agl()
+        lx, ly, lz = self.world_to_local(wx, wy, agl_m)
+        if what:
+            self._progress(f'飞往{what} ({wx:.2f}, {wy:.2f})'
+                           f'{"（直线，不避障）" if direct else ""}')
+        if direct:
+            self._direct_leg(lx, ly, lz)
+            self._spot_clear_arrived(what or f'({wx:.1f}, {wy:.1f})')
+            return
+        try:
+            with self.fixed_altitude(lz):
+                self.goto(lx, ly, lz)
+        except GotoUnreachableError as exc:
+            d = float(getattr(exc, 'distance_m', 1e9))
+            if accept_m <= 0.0 or d > accept_m:
+                raise
+            # 规划器把终点推到了膨胀区边缘（目标点上停着别的飞机、或贴着障碍）。
+            # 调用方说了这点距离无所谓，就别让整个任务为它失败。
+            self._progress(f'没能精确到点（还差 {d:.2f} m ≤ {accept_m:.1f} m），就地继续')
+        self._spot_clear_arrived(what or f'({wx:.1f}, {wy:.1f})')
+
+    def _direct_leg(self, lx: float, ly: float, lz: float) -> None:
+        """直飞一段：先把限速提到巡航值，飞完恢复出厂默认。
+
+        限速是 precision_servo **节点级**参数，不会自己复位；不恢复的话后面
+        `return_home()` 的落点精修、`aim_at()` 的平移都会带着高限速跑，精度
+        会变差（那两处本来就是要慢的）。
+        """
+        self.set_direct_speed(self.DIRECT_CRUISE_MPS)
+        try:
+            self.goto_direct(lx, ly, lz)
+        finally:
+            self.set_direct_speed(self.DIRECT_SPEED_DEFAULT_MPS)
+
+    #: fly_route() 判成"到不了"但其实已经够近时的容忍（米）。
+    #: 规划器轨迹终点速度为零、收敛是渐近的，最后半米要爬好几秒，而 goto() 的
+    #: 卡住判据是"5 秒内位移不足 0.5 米且离目标还有 0.5 米以上"——爬行平台停在
+    #: 0.5 米出头就正好落进判定区。那时候飞机其实已经到点了。
+    FLY_ROUTE_ACCEPT_M = 0.7
+    FLY_ROUTE_RETRY_S = 2.0
+
+    #: 航点离飞机当前位置近到这个程度，就当成"已经在这儿了"直接跳过。
+    #: 2026-10-01 从 0.05 提上来——0.05 m 比悬停漂移还小，这条分支等于永远
+    #: 不成立。现场：综合任务第 2/3 轮都从 A 点出发，而 A 正是航线首点，飞机
+    #: 已经在上面悬停了一分多钟。0.05 m 判不出重合，于是对着十几厘米的残差
+    #: 向量算 atan2，得到的航向是纯噪声（实测 -9°），飞机先从上一段的 180°
+    #: 猛转到 -9°（189°）、挪十几厘米、再转到 90° 去下一个点（99°）——将近
+    #: 290° 的无谓旋转，看到的现象就是"偏航特别快、原地动了好几次"。
+    #: 取 0.3（用户 2026-10-01 定）：比悬停漂移大、能挡住上面那种噪声航向，
+    #: 又比 FLY_ROUTE_ACCEPT_M(0.7) 紧，半米出头的短航段仍然会老老实实飞。
+    ROUTE_SKIP_M = 0.3
+
+    #: 解散看门狗判"飞机已经过了某个航点"的半径。比 FLY_ROUTE_ACCEPT_M(0.7)
+    #: 松一点：到点是 goto 判的，这里只是事后确认"确实到过"，宁可松不可紧——
+    #: 判不出"过点"的后果是整个解散判据永远不成立。
+    #: 三个阈值的关系：ROUTE_SKIP_M(0.3) < FLY_ROUTE_ACCEPT_M(0.7) < PASSED_M(1.2)。
+    PASSED_M = 1.2
+
+    def fly_route(self, waypoints: List[Tuple[float, float]],
+                  agl_m: float = 2.0, hold_s: float = 2.0,
+                  names: Optional[List[str]] = None) -> None:
+        """按航点序列飞：**每个航点先把机头转到下一段方向、停住，再走**，
+        航段之间航向不变。
+
+        Args:
+            waypoints: [(wx, wy), ...] 世界坐标。
+            agl_m: 全程锁的离地高度。
+            hold_s: 每个航点停多久（转向跟停顿同时进行，不足的部分补足）。
+            names: 航点名字，只用于日志；不给就按序号。
+
+        自带两层兜底，都是实测踩出来的：
+          · 零长度航段跳过——起点跟首航点重合时 atan2(0,0) 会给出 0°，飞机会
+            朝正东白转一次；
+          · 航点判成"不可达"但离得很近时按到达处理，还远就等 2 秒重发一次目标
+            （规划器的安全检查会触发 EMERGENCY_STOP，几秒后自己恢复，而 goto()
+            的卡住判据比它快半秒，会抢在恢复前把任务判死）。
+        """
+        cx, cy, _ = self.get_local_position()
+        for i, (wx, wy) in enumerate(waypoints, start=1):
+            nm = names[i - 1] if names and i <= len(names) else str(i)
+            tx, ty, tz = self.world_to_local(wx, wy, agl_m)
+            d0 = math.hypot(tx - cx, ty - cy)
+            if d0 < self.ROUTE_SKIP_M:
+                self._progress(f'航点{nm} ({wx:.1f}, {wy:.1f}) 已经在脚下'
+                               f'（差 {d0:.2f} m < {self.ROUTE_SKIP_M:.1f} m），跳过')
+                continue
+            heading = math.atan2(ty - cy, tx - cx)
+            self._progress(f'航点{nm} ({wx:.1f}, {wy:.1f})，'
+                           f'航向 {math.degrees(heading):.0f}°（停 {hold_s:.0f} 秒转向）')
+            t0 = time.time()
+            self.face_yaw(heading)
+            left = hold_s - (time.time() - t0)
+            if left > 0:
+                time.sleep(left)
+            with self.fixed_altitude(tz):
+                self._goto_with_retry(tx, ty, tz, f'航点{nm}')
+            cx, cy = tx, ty
+
+    def _goto_with_retry(self, x: float, y: float, z: float, tag: str) -> None:
+        """goto() 外面包一层：够近就认、还远就重试一次。见 fly_route 的说明。"""
+        for attempt in (1, 2):
+            try:
+                self.goto(x, y, z)
+                self._spot_clear_arrived(tag)
+                return
+            except GotoUnreachableError as exc:
+                d = float(getattr(exc, 'distance_m', 1e9))
+                if d <= self.FLY_ROUTE_ACCEPT_M:
+                    self._progress(f'{tag}：规划器终端爬行被判卡住，但只差 {d:.2f} m，'
+                                   f'按到达处理')
+                    self._spot_clear_arrived(tag)
+                    return
+                if attempt == 1:
+                    self._progress(f'{tag}：还差 {d:.2f} m 就被判卡住'
+                                   f'（规划器可能刚触发过安全急停），等 '
+                                   f'{self.FLY_ROUTE_RETRY_S:.0f} 秒重试一次')
+                    time.sleep(self.FLY_ROUTE_RETRY_S)
+                    continue
+                raise
+
+    def hold_at(self, wx: float, wy: float, agl_m: float = 2.0,
+                seconds: float = 0.0, direct: bool = False) -> None:
+        """飞到某个世界坐标悬停待命，**不降落**。seconds>0 就停够这么久再返回。
+
+        direct 的含义和前提同 `goto_world()`。
+        """
+        self.goto_world(wx, wy, agl_m, what=f'待命点 ({wx:.1f}, {wy:.1f})',
+                        direct=direct)
+        self._progress(f'已到 ({wx:.1f}, {wy:.1f})，悬停待命')
+        if seconds > 0:
+            time.sleep(seconds)
+
+    #: return_home() 里离起降点超过这么远就先走规划器，最后一段才交给
+    #: goto_direct 精修。goto_direct 走 precision_servo 的 coordinate_goto，
+    #: 限速默认 0.3 m/s，是给"最后一段精修"调的，拿它跑长距离会慢到离谱
+    #: （实测 5.4 米走了 45 秒）。
+    RETURN_HOME_FAR_M = 2.0
+
+    #: land() 等不到解锁确认时，自己核"是不是其实已经落地了"的判据。
+    #: 判据不靠"多等几秒"，而是**看飞机自己到底落没落地**：贴地 + 静止。
+    LANDED_AGL_M = 0.45      # 低于这个离地高度就算贴地（雷达最小量程约 0.3 m）
+    LANDED_MOVE_M = 0.10     # 这段时间内位移小于这个值才算停住了
+    LANDED_WATCH_S = 2.0
+
+    def land_or_confirm(self) -> bool:
+        """降落；`land()` 等不到解锁确认时，自己核一下是不是其实已经落地了。
+
+        返回 True=已落地（正常解锁，或超时但确认贴地静止），False=确实还在空中。
+
+        为什么需要：飞控偶尔就是不把 armed 置回 false，飞机明明已经稳稳坐在
+        地上。2026-10-01 综合lite 实测侦察机最后一次降落：高度从 1.89 m 一路
+        降到 0.00 m 并在那儿待了 25 秒，armed 始终 True，`land()` 30 秒超时
+        抛 LandTimeoutError，把跑完三轮的整个任务在最后一步判死，队友接着
+        因为它已经退出而 TeammateUnreachableError。
+        老版 `utils.land_or_confirm()` 早就兜住了这一条，`return_home()` 当时
+        直接调的 `land()`，漏了。任务流程里的降落都该走这个。
+        """
+        try:
+            self.land()
+            return True
+        except LandTimeoutError as exc:
+            self._progress(f'降落没等到解锁确认（{exc}），自己核一下是不是已经落地')
+        x0, y0, z0 = self.get_local_position()
+        time.sleep(self.LANDED_WATCH_S)
+        x1, y1, z1 = self.get_local_position()
+        moved = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2)
+        try:
+            agl = self.get_agl(timeout=2.0)
+        except Exception:
+            agl = z1          # 读不到雷达就拿里程计的 z 顶上
+        if agl <= self.LANDED_AGL_M and moved <= self.LANDED_MOVE_M:
+            self._progress(f'已确认落地：离地 {agl:.2f} m、{self.LANDED_WATCH_S:.0f} 秒内'
+                           f'只动了 {moved:.2f} m（飞控没解锁，但飞机确实在地上），继续')
+            return True
+        self._progress(f'没能确认落地：离地 {agl:.2f} m、位移 {moved:.2f} m，还在空中')
+        return False
+
+    #: return_home(report=/sound=) 核对落点时的容差：离标称起降点这么近才算
+    #: "落在自己的起降点上"。
+    PAD_TOL_M = 1.0
+
+    def return_home(self, land: bool = True, agl_m: float = 2.0,
+                    sound: Optional[str] = None,
+                    report: Optional[str] = None,
+                    direct: bool = False) -> bool:
+        """回自己的起飞点，默认降落。返回**是否真的落在自己的起降点上**。
+
+        分两段：远距离用 goto()（走规划器、有避障、巡航速度）飞到起降点上空，
+        最后一段用 goto_direct（直线、不经规划器，落点精度高一个量级）精修。
+
+        Args:
+            sound: 核对落点通过后才播的声光事件。**不要在调用方自己播**——
+                任务机全程要降落三次（取器材、放器材、回家），"降落动作完成"
+                本身说明不了任务结束，得按落点坐标判。
+            report: 给队友发的事件名，带 x/y/ok 三个字段。落点不准也发，
+                否则队友会一直等到超时。
+            direct: True = 整段走直线，不经规划器。含义和前提同 `goto_world()`
+                ——**必须先算过这条直线的余量**。编队解散之后各自回家那一段
+                适合开（算过：D->各自起降点最小余量 3.00 m，离墙最近）。
+        """
+        hx, hy, _ = self.local_to_world(0.0, 0.0, 0.0)
+        lx, ly, lz = self.world_to_local(hx, hy, agl_m)
+        try:
+            cx, cy, _ = self.get_local_position()
+            far = math.hypot(cx - lx, cy - ly)
+        except Exception:
+            far = 0.0
+        if far > self.RETURN_HOME_FAR_M and not direct:
+            self._progress(f'回起飞点 ({hx:.2f}, {hy:.2f})，还有 {far:.1f} m，'
+                           f'先走规划器飞过去')
+            try:
+                with self.fixed_altitude(lz):
+                    self.goto(lx, ly, lz)
+            except Exception as exc:
+                self._progress(f'规划器飞不过去（{exc}），改用直线飞')
+        elif direct and far > self.RETURN_HOME_FAR_M:
+            self._progress(f'回起飞点 ({hx:.2f}, {hy:.2f})，还有 {far:.1f} m，'
+                           f'直线飞过去（不避障）')
+            self._direct_leg(lx, ly, lz)
+        self.goto_direct(lx, ly, lz)         # 最后一段精修，用默认 0.3 收准
+        if land:
+            self.land_or_confirm()
+        px, py, _ = self.get_local_position()
+        wx, wy = self.local_to_world(px, py, 0.0)[:2]
+        d = math.hypot(wx - hx, wy - hy)
+        ok = bool(d <= self.PAD_TOL_M)
+        if ok:
+            self._progress(f'已降落在自己起降点 ({wx:.2f}, {wy:.2f})，离标称点 {d:.2f} m')
+            if sound:
+                self.play_sound_light(sound)
+        else:
+            self._progress(f'⚠️ 落点 ({wx:.2f}, {wy:.2f}) 离自己起降点 {d:.2f} m '
+                           f'(>{self.PAD_TOL_M:.1f} m)，不算落在起降点上')
+        if report:
+            self.send_to_teammate(report, x=float(wx), y=float(wy), ok=ok)
+        return ok
+
+    # ---- 跨机协同：收件箱 ----
+    # 可靠事件通道有两个坑，这里一次性兜住：
+    #   ① 先回 ACK 再查处理函数，**没注册的事件会被确认后丢弃**——所以必须在
+    #      对方可能发之前就把所有事件注册好，不能等用到了才注册；
+    #   ② 一个事件名只能挂一个处理函数（register_event_handler 是直接赋值），
+    #      重复注册会把前一个顶掉。
+    # 选手自己写 _Inbox 的话这两条都要自己记，实测我们自己就在②上栽过一次。
+
+    def open_inbox(self, *events: str) -> None:
+        """注册这些跨机事件的收件箱。**在任务一开始就全部注册**，见上面说明。
+
+        重复注册同一个事件是安全的（幂等），不会把已收到的内容清掉。
+        """
+        if not hasattr(self, '_inbox'):
+            self._inbox: Dict[str, Dict[str, Any]] = {}
+            self._inbox_seen: set = set()
+        for ev in events:
+            if ev in self._inbox:
+                continue
+            self._inbox[ev] = {}
+
+            def _on(_ev: str = ev, **kw: Any) -> None:
+                self._inbox[_ev] = kw
+                self._inbox_seen.add(_ev)
+
+            self.on_teammate_event(ev, _on)
+            self._progress(f"收件箱已注册：'{ev}'")
+
+    def wait_event(self, event: str, timeout_s: float = 300.0,
+                   clear: bool = True, required: bool = True
+                   ) -> Optional[Dict[str, Any]]:
+        """等一个跨机事件，**返回它带来的数据**（dict，没有数据就是空 dict）。
+
+        Args:
+            event: 事件名，必须先 `open_inbox()` 注册过。
+            timeout_s: 等多久。
+            clear: 取走后把收件箱复位（默认 True）。多轮流程里同一个事件会来
+                好几次，不复位的话第二轮一进来就立刻返回上一轮的旧数据。
+            required: False = 超时就**返回 None**，不抛异常。用在"等到更好、
+                等不到也得往下走"的地方——比如最后等队友报告已降落，等不到
+                也该把任务完成播出去，不能让整个任务在这一步失败。
+
+        Raises:
+            TimeoutError: 超时还没等到（required=True 时）。
+            RuntimeError: 这个事件没注册过收件箱（多半是忘了 open_inbox）。
+        """
+        if not hasattr(self, '_inbox') or event not in self._inbox:
+            raise RuntimeError(f"事件 '{event}' 没有注册收件箱，"
+                               f"任务开始时要先 sdk.open_inbox('{event}')")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if event in self._inbox_seen:
+                data = dict(self._inbox[event])
+                if clear:
+                    self._inbox_seen.discard(event)
+                    self._inbox[event] = {}
+                return data
+            time.sleep(0.1)
+        if not required:
+            self._progress(f"等队友事件 '{event}' 超过 {timeout_s:.0f} 秒未到达，继续往下走")
+            return None
+        raise TimeoutError(f"等队友事件 '{event}' 超过 {timeout_s:.0f} 秒未到达")
+
+    def event_ready(self, event: str) -> bool:
+        """这个事件到了没有（不阻塞、不取走）。等多个事件里先到的那个时用。"""
+        return hasattr(self, '_inbox') and event in self._inbox_seen
+
+    def wait_any_event(self, events: List[str], timeout_s: float = 300.0
+                       ) -> Tuple[str, Dict[str, Any]]:
+        """等这几个事件里**先到的那一个**，返回 (事件名, 数据)。"""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            for ev in events:
+                if self.event_ready(ev):
+                    return ev, self.wait_event(ev, timeout_s=1.0)
+            time.sleep(0.1)
+        raise TimeoutError(f'等事件 {events} 超过 {timeout_s:.0f} 秒')
+
+    # ---- 编队 ----
+    #: 编队握手用的事件名。**跟老版 formation.py 用的是同一组字符串**，所以
+    #: 新老两版可以混搭（lite 长机配老僚机也能飞），不是另起一套协议。
+    EV_READY = 'formation_standby'          # 僚机 -> 长机：我就位了
+    EV_ROUTE_PLAN = 'route_plan'            # 长机 -> 僚机：整条航线
+    EV_IN_POSITION = 'formation_in_position'  # 僚机 -> 长机：已到站位、机头已转好
+    EV_ROUTE_DONE = 'route_done'            # 长机 -> 僚机：解散
+
+    #: 每段起步先把规划器限速压到这里，等僚机也过了这个航点再分档放回巡航。
+    #: 长机在每个航点都停下转向，对它自己来说**过每个航点都相当于重新起步**；
+    #: 而僚机沿长机轨迹落后一个间距，长机站在拐点上时它还在上一段没拐弯。这时
+    #: 长机一脚油门顶到巡航速度，间距就一次性放大（实测峰值 7.02 m）。
+    #: 下限不能低于 0.5：goto() 的卡住检测要求持续跑到 0.1 m/s 以上，而限速
+    #: 0.25 时实际只跑 0.15 m/s，会被判成不可达。
+    LEG_SLOW_MPS = 0.5
+    LEG_SLOW_MIN_LEG_M = 8.0      # 短于这个的航段不压限速——没有把速度还回去的余量
+    LEG_RAMP_MUST_START_M = 6.0   # 剩这么远还没等到僚机过点，就必须开始放速度
+    LEG_RAMP_STEP_MPS = 0.25
+    LEG_RAMP_PERIOD_S = 1.0
+
+    def lead_formation(self, route: List[Tuple[float, float]], spacing_m: float = 4.0,
+                       agl_m: float = 2.0, hold_s: float = 2.0,
+                       start_xy: Optional[Tuple[float, float]] = None,
+                       final_xy: Optional[Tuple[float, float]] = None,
+                       disband_at: Optional[Tuple[float, float]] = None,
+                       wait_follower_s: float = 300.0,
+                       tail_direct: bool = False) -> None:
+        """长机带队飞一条航线。**只管空中段**，起降由调用方自己决定。
+
+        Args:
+            route: 航线（世界坐标）。
+            spacing_m: 目标纵向间距。
+            start_xy: 从哪儿起步（默认自己当前位置换算成的起飞点）。编队段从
+                半路开始时要给，否则僚机算出来的起始站位会跑到场外。
+            final_xy: 航线跑完再飞到哪儿（默认 route[0]）。
+            disband_at: 给了就按"**僚机过了这个航点**"解散；不给按"长机飞回
+                自己起飞点上空"解散。
+            wait_follower_s: 等僚机到站位的上限，等不到也照飞。
+            tail_direct: 最后一段（飞往 final_xy 那一段）走直线。
+                **解散就发生在这一段上**——disband_at 的判据是"长机已经离开
+                那个航点 spacing+lag 米"，所以长机走到这一段中途才解散，剩下
+                的路本质上是"解散后各自回家"。前提同 `goto_world()` 的
+                direct：必须算过这条直线的余量。
+
+        每个航点停 hold_s 秒并把机头转到下一段航向，航段内航向不变；每段起步
+        先压限速、等僚机也过了这个航点再分档放回巡航（见 LEG_SLOW_MPS）。
+        """
+        import threading
+        self.open_inbox(self.EV_READY, self.EV_IN_POSITION)
+        hx, hy, _ = self.local_to_world(0.0, 0.0, 0.0)
+        start = tuple(start_xy) if start_xy is not None else (hx, hy)
+        tail = tuple(final_xy) if final_xy is not None else tuple(route[0])
+        wps = list(route)
+        if tuple(wps[-1]) != tail:
+            wps.append(tail)
+        plan = list(wps) if math.hypot(start[0] - wps[0][0], start[1] - wps[0][1]) <= 0.3 \
+            else [start] + list(wps)
+        # 航线**立刻发**，不等僚机报到。收件箱在 DroneSDK 构造时就建好了
+        # （见那里的说明），不存在"发早了被丢"的问题；反过来等 READY 会在僚机
+        # 起飞慢时白等一整个超时，实测两边互等各 60 秒。
+        try:
+            self.send_to_teammate(self.EV_ROUTE_PLAN, route=[list(p) for p in plan])
+        except Exception as exc:
+            self._progress(f'航线没送到僚机（{exc}），僚机将保持入列时的朝向')
+        self._progress('等僚机到起始站位并转向…')
+        try:
+            self.wait_event(self.EV_IN_POSITION, wait_follower_s)
+            self._progress('僚机已到位，起步')
+        except TimeoutError:
+            self._progress(f'等了 {wait_follower_s:.0f} 秒没等到僚机到位，直接起步')
+
+        state = {'stop': False, 'sent': False}
+        stop_watch = self._start_disband_watch(state, spacing_m, disband_at)
+        cruise = None
+        legs = list(zip([start] + wps[:-1], wps))
+        try:
+            for i, (frm, to) in enumerate(legs, start=1):
+                fx, fy, _ = self.world_to_local(frm[0], frm[1], agl_m)
+                tx, ty, tz = self.world_to_local(to[0], to[1], agl_m)
+                leg_len = math.hypot(tx - fx, ty - fy)
+                if leg_len < self.ROUTE_SKIP_M:
+                    self._progress(f'航点 {i}/{len(legs)} 已经在脚下'
+                                   f'（差 {leg_len:.2f} m < {self.ROUTE_SKIP_M:.1f} m），跳过')
+                    continue
+                heading = math.atan2(ty - fy, tx - fx)
+                self._progress(f'航点 {i}/{len(legs)}: ({to[0]}, {to[1]})，'
+                               f'航向 {math.degrees(heading):.0f}°（停 {hold_s:.0f} 秒转向）')
+                t0 = time.time()
+                self.face_yaw(heading)
+                left = hold_s - (time.time() - t0)
+                if left > 0:
+                    time.sleep(left)
+                if not state['sent']:
+                    self._wait_follower_settled(f'航点 {i}/{len(legs)}')
+                if tail_direct and i == len(legs):
+                    # 尾段直飞：解散就在这一段中途发生，后半程本就是各自回家。
+                    # 不压起步限速——那套压的是规划器的 max_vel，对直飞无效。
+                    self._direct_leg(tx, ty, tz)
+                    continue
+                if leg_len >= self.LEG_SLOW_MIN_LEG_M:
+                    cruise = self._slow_leg_start((fx, fy), (tx, ty), spacing_m,
+                                                  f'航点 {i}/{len(legs)}', cruise)
+                with self.fixed_altitude(tz):
+                    self._goto_with_retry(tx, ty, tz, f'航点 {i}/{len(legs)}')
+        finally:
+            stop_watch()
+            if cruise is not None:
+                try:
+                    self.set_max_vel(cruise)
+                except Exception:
+                    pass
+            if not state['sent']:
+                try:
+                    self.send_to_teammate(self.EV_ROUTE_DONE)
+                    self._progress('航线已飞完，补发编队解散通知')
+                except Exception:
+                    pass
+
+    def follow_formation(self, spacing_m: float = 4.0, agl_m: float = 2.0,
+                         join: str = 'station', route_wait_s: float = 60.0,
+                         done_wait_s: float = 600.0) -> None:
+        """僚机跟队。**只管空中段**，起降由调用方自己决定。
+
+        Args:
+            join: `'station'` 先飞到"航线起点后方 spacing 米"的站位点再入列
+                （编队从头开始时用）；`'nearest'` 就地入列（任务流程里僚机刚
+                做完事就在长机附近，再飞一趟站位点纯属绕路）。
+        """
+        self.open_inbox(self.EV_ROUTE_PLAN, self.EV_ROUTE_DONE)
+        self.send_to_teammate(self.EV_READY)
+        route: List[Tuple[float, float]] = []
+        try:
+            d = self.wait_event(self.EV_ROUTE_PLAN, route_wait_s)
+            route = [tuple(p) for p in d.get('route', [])]
+        except TimeoutError:
+            self._progress('没收到长机航线，跳过预站位')
+
+        if join == 'station' and len(route) >= 2:
+            (lx0, ly0), (nx0, ny0) = route[0], route[1]
+            heading = math.atan2(ny0 - ly0, nx0 - lx0)
+            sx = lx0 - math.cos(heading) * spacing_m
+            sy = ly0 - math.sin(heading) * spacing_m
+            self._progress(f'起始站位 ({sx:.2f}, {sy:.2f})，在长机起飞点后方 '
+                           f'{spacing_m:.1f} 米')
+            try:
+                self.goto_world(sx, sy, agl_m)
+                self.face_yaw(heading)
+            except Exception as exc:
+                self._progress(f'站位点飞不过去（{exc}），就当前位置入列')
+        else:
+            self._progress('就地入列（跳过预站位）')
+
+        self.start_formation_follow(follow_distance_m=spacing_m, altitude_agl_m=agl_m,
+                                    turn_in_place=True, leg_route=route or None)
+        self.send_to_teammate(self.EV_IN_POSITION)
+        self.wait_event(self.EV_ROUTE_DONE, done_wait_s)
+        self.stop_formation_follow()
+
+    # ---- lead_formation 的三个内部件 ----
+
+    def _wait_follower_settled(self, tag: str, tol_m: float = 0.5,
+                               max_wait_s: float = 8.0) -> float:
+        """长机在航点上等僚机收拢到队形位置。返回实际等了多久。
+
+        判据是僚机自报的落后量（`teammate_formation_lag()`）。只判"不落后太多"、
+        不判 |lag|——落后能靠僚机追上来消掉，太近却没法后退（参考点只前进不后退）。
+        读不到就不等，退回没有握手的行为。
+        """
+        if self.teammate_formation_lag() is None:
+            return 0.0
+        t0 = time.time()
+        while time.time() - t0 < max_wait_s:
+            lag = self.teammate_formation_lag()
+            if lag is None:
+                break
+            if lag <= tol_m:
+                waited = time.time() - t0
+                self._progress(f'{tag}：僚机已入位（落后 {lag:+.2f} m），'
+                               f'等了 {waited:.1f} 秒后起步')
+                return waited
+            time.sleep(0.1)
+        self._progress(f'{tag}：等了 {time.time() - t0:.1f} 秒僚机仍落后，按超时起步')
+        return time.time() - t0
+
+    def _slow_leg_start(self, corner: Tuple[float, float], end: Tuple[float, float],
+                        spacing_m: float, tag: str, cruise: Optional[float]) -> float:
+        """每段起步压限速，等**僚机也过了这个航点**再分档放回巡航。返回巡航限速值。
+
+        "僚机已过点"的判据：僚机沿轨迹落在长机后方 `spacing + lag` 米，而本段
+        是直线，所以"长机离拐点的直线距离 ≥ spacing + lag"就等价于它已走过拐点。
+        长机自己就能算，不需要僚机额外上报。
+
+        限速只在飞机**停着的时候**压下去；放速度那一下也要赶在终端减速段之前
+        （LEG_RAMP_MUST_START_M），因为改限速会逼规划器重做时间分配，在减速段
+        重算刹车剖面会冲过头。
+        """
+        import threading
+        if not hasattr(self, 'set_max_vel'):
+            return cruise or 1.0
+        try:
+            old = self.set_max_vel(self.LEG_SLOW_MPS)
+        except Exception as exc:
+            self._progress(f'{tag}：起步限速没设上（{exc}），按原速起步')
+            return cruise or 1.0
+        cruise = cruise if cruise is not None else old
+        cx0, cy0 = corner
+        ex, ey = end
+        self._progress(f'{tag}：起步限速 {self.LEG_SLOW_MPS} m/s，'
+                       f'等僚机也过这个航点再分档放回 {cruise} m/s')
+
+        def _restore() -> None:
+            t0 = time.time()
+            time.sleep(1.0)
+            why = '压满下限'
+            while time.time() - t0 < 30.0:
+                try:
+                    px, py, _ = self.get_local_position()
+                except Exception:
+                    break
+                remain = math.hypot(px - ex, py - ey)
+                if remain <= self.LEG_RAMP_MUST_START_M:
+                    why = f'剩余 {remain:.2f} m 已到必须放速度的距离'
+                    break
+                lag = self.teammate_formation_lag()
+                need = spacing_m + 0.5 + max(0.0, lag or 0.0)
+                gone = math.hypot(px - cx0, py - cy0)
+                if gone >= need:
+                    why = f'僚机已过点（长机离拐点 {gone:.2f} m ≥ {need:.2f} m）'
+                    break
+                time.sleep(0.1)
+            self._progress(f'{tag}：{why}，开始分档放速度')
+            v = self.LEG_SLOW_MPS
+            try:
+                while v < cruise - 1e-3:
+                    v = min(cruise, v + self.LEG_RAMP_STEP_MPS)
+                    self.set_max_vel(v)
+                    if v < cruise - 1e-3:
+                        time.sleep(self.LEG_RAMP_PERIOD_S)
+            except Exception as exc:
+                self._progress(f'{tag}：限速没恢复（{exc}）')
+
+        threading.Thread(target=_restore, daemon=True).start()
+        return cruise
+
+    def _start_disband_watch(self, state: Dict[str, Any], spacing_m: float,
+                             disband_at: Optional[Tuple[float, float]]):
+        """后台盯着什么时候该解散编队，到了就发 EV_ROUTE_DONE。返回停止函数。
+
+        两种判据：
+          · disband_at 给了：**僚机过了那个航点**就解散。长机拿不到僚机位置，但
+            拿得到它自报的落后量——僚机落在长机后方 spacing+lag 米，本段是直线，
+            所以"长机离该点 ≥ spacing+lag"等价于僚机已过点。要先判长机自己过点，
+            不然刚起步时离得也很远，会当场误触发。
+          · 不给：长机飞回**自己起飞点**上空就解散。要先判"已经出发过"，不然
+            起飞那一刻就在起飞点上，立刻误触发。
+        """
+        import threading
+        hx, hy, _ = self.local_to_world(0.0, 0.0, 0.0)
+        tgt = tuple(disband_at) if disband_at is not None else (hx, hy)
+        lx, ly, _lz = self.world_to_local(tgt[0], tgt[1], 2.0)
+        by_follower = disband_at is not None
+
+        def _loop() -> None:
+            passed = False
+            departed = False
+            while not state['stop'] and not state['sent']:
+                try:
+                    cx, cy, _ = self.get_local_position()
+                except Exception:
+                    time.sleep(0.2)
+                    continue
+                d = math.hypot(cx - lx, cy - ly)
+                if by_follower:
+                    if not passed:
+                        if d <= self.PASSED_M:
+                            passed = True
+                            self._progress(f'已过航点 ({tgt[0]:.1f}, {tgt[1]:.1f})，'
+                                           f'开始等僚机过点')
+                        time.sleep(0.2)
+                        continue
+                    lag = self.teammate_formation_lag()
+                    if lag is None:
+                        # 读不到就按"没有额外落后"算，但**必须说出来**：原来这里
+                        # 是 `lag or 0.0` 静默退化，日志上分不出"量到 0"和"根本
+                        # 没量到"，而后者会让解散早触发（僚机其实还没到点）。
+                        if not state.get('warned_lag'):
+                            state['warned_lag'] = True
+                            self._progress('⚠️ 读不到僚机自报落后量，解散判据按 '
+                                           f'{spacing_m:.1f} m 算，可能偏早')
+                    need = spacing_m + max(0.0, lag or 0.0)
+                    if d >= need:
+                        if self._fire_disband(
+                                state, f'僚机已过航点 ({tgt[0]:.1f}, {tgt[1]:.1f})'):
+                            return
+                else:
+                    if not departed:
+                        if d >= 5.0:
+                            departed = True
+                    elif d <= self.PASSED_M:
+                        if self._fire_disband(
+                                state, f'已飞回自己起飞点上空（离 {d:.1f} m）'):
+                            return
+                time.sleep(0.2)
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+
+        def _stop() -> None:
+            state['stop'] = True
+            t.join(timeout=2.0)
+        return _stop
+
+    def _fire_disband(self, state: Dict[str, Any], why: str) -> bool:
+        """发解散通知。**发成功才置 sent**，返回是否送达。
+
+        原来是先置位再发：`send_to_teammate` 是带 ACK 的可靠通道，收不到确认
+        会抛异常（45 秒超时），一旦抛了 sent 已经是 True，于是
+        `lead_formation` 的 `finally` 里那句 `if not state['sent']: 补发`
+        判不成立，**兜底被自己堵死**，僚机只能干等满 done_wait_s（600 秒）。
+        而日志上还照打"编队解散"，排查时会被带偏。
+        """
+        try:
+            self.send_to_teammate(self.EV_ROUTE_DONE)
+        except Exception as exc:
+            self._progress(f'⚠️ 解散通知没送到僚机（{exc}），稍后重试')
+            return False
+        state['sent'] = True
+        self._progress(f'{why}，编队解散')
+        return True
+
+    # ---- 抓放与精准降落 ----
+    #: 机械抓的 PWM。真机实测值：800=抓紧、2000=松开。
+    GRIP_CLOSE_PWM = 800
+    GRIP_OPEN_PWM = 2000
+    GRIP_TRAVEL_S = 2.0           # 舵机没有位置反馈，只能等
+    #: land_on() 的分步下降参数
+    LAND_ON_TIMEOUT_S = 30.0      # 边瞄边降这一段的总时限，到点就交给普通降落
+    LAND_ON_STEP_M = 0.8          # 每步降多少：降一点就重新解算一次目标位置
+    LAND_ON_HANDOFF_M = 0.7       # 降到离地这么高就交给普通降落（再低下视看不全标志）
+    LAND_ON_HANDOFF_TOL_M = 0.15  # 悬停本身有起伏，死等"严格低于"会一直卡在上面
+
+    def grip(self, release: bool = False, label: str = '') -> None:
+        """驱动机械抓。release=False 抓紧，True 松开。
+
+        仿真里飞控不一定配了舵机输出，动不了就打印、继续飞完流程，不中断任务。
+        """
+        pwm = self.GRIP_OPEN_PWM if release else self.GRIP_CLOSE_PWM
+        what = label or ('松开' if release else '抓取')
+        try:
+            self.set_servos({s: pwm for s in sorted(self.servos)})
+        except Exception as exc:
+            self._progress(f'{what}：舵机没动（{exc}）——真机需要飞控配好 MAIN7/MAIN9')
+            return
+        time.sleep(self.GRIP_TRAVEL_S)
+        self._progress(f'{what}完成')
+
+    def land_on(self, class_id: str, what: str = '目标') -> None:
+        """边瞄准边降落到底：每降一小段就把目标位置重新解算一次，直接命令
+        "目标正上方、低一点"那个位置——水平修正和下降在同一条指令里完成；
+        降到交接高度后交给普通降落收尾。
+
+        为什么不用 `precision_land_and_confirm()`：那是"对准一点、下降一点、
+        再对准"的分级下降，从 2.5 米下来要 40 秒以上，30 秒时限内根本走不完，
+        每次都走超时兜底（2026-09-23 实测），等于精度只做了一半。这里是连续
+        修正，同一时间既对准也下降；最后 0.7 米交给 land()，那一段本来就只能
+        垂直下降，再修也无意义。
+        """
+        deadline = time.monotonic() + self.LAND_ON_TIMEOUT_S
+        while time.monotonic() < deadline:
+            _, _, z = self.get_local_position()
+            try:
+                t = self.locate_target(class_id, timeout=2.0, samples=3)
+            except DetectionTimeoutError:
+                self._progress(f'下降中看不到{what}了，就地转普通降落')
+                break
+            agl = z - t.z
+            if agl <= self.LAND_ON_HANDOFF_M + self.LAND_ON_HANDOFF_TOL_M:
+                self._progress(f'已降到离地 {agl:.2f} m，交给普通降落')
+                break
+            nxt = max(self.LAND_ON_HANDOFF_M, agl - self.LAND_ON_STEP_M)
+            self._progress(f'对准{what} ({t.x:.2f}, {t.y:.2f}) 并降到离地 {nxt:.2f} m'
+                           f'（当前 {agl:.2f} m）')
+            self.goto_direct(t.x, t.y, t.z + nxt)
+        else:
+            self._progress(f'边瞄准边降落用满 {self.LAND_ON_TIMEOUT_S:.0f} 秒，转普通降落')
+        self.land_or_confirm()
+
+    def fetch_from(self, wxy: Tuple[float, float], class_id: str,
+                   what: str = '物资', agl_m: float = 2.0,
+                   sound: Optional[str] = None, direct: bool = False) -> None:
+        """飞到物资点 -> 边瞄边降到底 -> 抓取 -> 起飞回巡航高度。
+
+        Args:
+            sound: 声光播报内容。**播报点在落地之后、舵机动作之前**——裁判
+                听到的那一声要对上"正在抓"这个瞬间；写在 `fetch_from()`
+                前面会提前十几秒（还在飞往物资点的路上就播了）。
+        """
+        self.goto_world(wxy[0], wxy[1], agl_m, what=what + '点', direct=direct)
+        self.land_on(class_id, what)
+        self._progress(f'已降落在{what}点，开始抓取')
+        if sound:
+            self.play_sound_light(sound)
+        self.grip(release=False, label='抓取' + what)
+        self.takeoff(height_m=agl_m)
+
+    def release_at(self, wxy: Tuple[float, float], class_id: str,
+                   what: str = '物资', agl_m: float = 2.0,
+                   sound: Optional[str] = None, direct: bool = False) -> None:
+        """飞到物资点 -> 边瞄边降到底 -> 松开 -> 起飞回巡航高度。
+
+        Args:
+            sound: 同 `fetch_from()`，落地后、舵机动作前播报。
+        """
+        self.goto_world(wxy[0], wxy[1], agl_m, what=what + '点', direct=direct)
+        self.land_on(class_id, what)
+        self._progress(f'已降落在{what}点，开始释放')
+        if sound:
+            self.play_sound_light(sound)
+        self.grip(release=True, label='释放' + what)
+        self.takeoff(height_m=agl_m)
+
+    # ---- 视觉搜索与对准 ----
+    #: 相机内参。640x480、HFOV 80°，跟 camera_info 一致。
+    IMAGE_W, IMAGE_H = 640, 480
+    FOCAL_PX = 381.35             # = (IMAGE_W/2)/tan(HFOV/2)
+    TAG_SIZE_M = 0.5              # AprilTag 实际边长，用来按框宽估距离
+    AIM_TOL_M = 0.12              # 横向/垂直差这么多以内算对准
+    AIM_MAX_TRIES = 5
+    AIM_SETTLE_S = 1.5
+    AIM_Z_MIN_M, AIM_Z_MAX_M = 0.8, 4.0
+
+    def aim_at(self, class_id: str, camera: str = 'front',
+               face_yaw_deg: Optional[float] = None, what: str = '目标') -> bool:
+        """把目标**挪到画面正中**：横向平移 + 升降，机头朝向全程不变。返回是否对上。
+
+        Args:
+            face_yaw_deg: 给了就先把机头转到这个朝向再对准。**正对立面的场景
+                一定要给**——本方法是"锁住当前朝向只做平移"的，朝向不对的话
+                画面里居中了、机身却斜着，弹丸打出去也是斜的。
+
+        为什么不用 `center_on_target()`：那条路走 precision_servo_node，而它
+        只认**下视**相机的检测（源码里 `if '_camera_down_' not in frame_id: return`），
+        贴在立面上、走前视的目标永远收敛不了。
+
+        为什么垂直方向靠改高度而不是俯仰相机：前视/下视是两个**固定安装**的
+        相机，没有俯仰自由度，只能整机升降。
+
+        **下视相机走的是另一条路**（`center_on_target()`）：上面那套几何只对
+        前视成立——它把画面纵轴当成世界的"高低"。下视看地面时，画面纵轴是机体
+        的**前后**方向，不是高度。按前视那套算，目标在画面上方会被当成"要爬
+        高"，一爬高距离变远、框变小、偏差照旧，永远收敛不了。
+        2026-10-01 实测（任务2lite 投弹前对准地面火情）：横向 5 轮收敛到
+        -0.08 m，纵向始终 +0.33 m 左右，距离从 2.40 m 一路爬到 3.23 m，
+        五轮耗尽、飞机白白升高 0.8 m。precision_servo_node 本来就是给下视
+        写的闭环，这种情形直接交给它。
+        """
+        if face_yaw_deg is not None:
+            self.face_yaw(math.radians(face_yaw_deg))
+        if camera == 'down':
+            try:
+                self.center_on_target(class_id, timeout=40.0)
+            except Exception as exc:
+                self._progress(f'没对上{what}（{exc}），按当前位置继续')
+                return False
+            self._progress(f'{what}已对准（下视，走 precision_servo 闭环）')
+            return True
+        yaw0 = self.get_current_yaw()
+        for i in range(1, self.AIM_MAX_TRIES + 1):
+            try:
+                det = self.wait_for_detection(class_id, timeout=4.0, camera=camera)
+            except Exception:
+                self._progress(f'第{i}轮对准：{camera}相机看不到{what}')
+                time.sleep(self.AIM_SETTLE_S)
+                continue
+            dx = math.atan2(det.bbox_x - self.IMAGE_W / 2.0, self.FOCAL_PX)
+            dy = math.atan2(det.bbox_y - self.IMAGE_H / 2.0, self.FOCAL_PX)
+            dist = self.FOCAL_PX * self.TAG_SIZE_M / max(1.0, det.bbox_width)
+            lat = dist * math.tan(dx)       # >0：目标在飞机右侧
+            dz = -dist * math.tan(dy)       # 目标在画面下方 -> 要降高度
+            self._progress(f'第{i}轮对准：{what}在画面 ({det.bbox_x:.0f},{det.bbox_y:.0f})，'
+                           f'框宽 {det.bbox_width:.0f}px -> 距离约 {dist:.2f} m，'
+                           f'横向 {lat:+.2f} m，高度 {dz:+.2f} m')
+            if abs(lat) <= self.AIM_TOL_M and abs(dz) <= self.AIM_TOL_M:
+                self._progress(f'{what}已对准（横向 {lat:+.2f} m，垂直 {dz:+.2f} m）')
+                return True
+            cx, cy, cz = self.get_local_position()
+            rx, ry = math.sin(yaw0), -math.cos(yaw0)      # 机头右手方向
+            _, _, z_lo = self.world_to_local(0.0, 0.0, self.AIM_Z_MIN_M)
+            _, _, z_hi = self.world_to_local(0.0, 0.0, self.AIM_Z_MAX_M)
+            self.goto_direct(cx + rx * lat, cy + ry * lat,
+                             min(max(cz + dz, z_lo), z_hi))
+            self.face_yaw(yaw0)             # 平移可能带偏朝向，复位
+            time.sleep(self.AIM_SETTLE_S)
+        self._progress(f'{self.AIM_MAX_TRIES} 轮仍没对准{what}，按当前状态继续')
+        return False
+
+    def search_along(self, leg_end: Tuple[float, float], class_id: str,
+                     camera: str = 'down', agl_m: float = 2.0,
+                     timeout_s: float = 420.0, what: str = '目标'
+                     ) -> Optional[Tuple[float, float]]:
+        """从当前位置飞向 leg_end，**边飞边找**；看到就刹停、对准、解算坐标。
+
+        返回目标的**世界坐标** (x, y)；整段飞完都没看到、或解算失败返回 None。
+
+        goto 是阻塞的，所以把航段放后台线程飞、主线程盯检测，一发现就
+        `cancel_goto()` 停在当场，避免飞过头。
+        """
+        import threading
+        ex, ey, ez = self.world_to_local(leg_end[0], leg_end[1], agl_m)
+        done = threading.Event()
+
+        def _fly() -> None:
+            try:
+                with self.fixed_altitude(ez):
+                    self.goto(ex, ey, ez)
+            except Exception as exc:
+                self._progress(f'搜索航段结束（{exc}）')
+            finally:
+                done.set()
+
+        threading.Thread(target=_fly, daemon=True).start()
+        seen = False
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            try:
+                self.wait_for_detection(class_id, timeout=0.5, camera=camera)
+            except Exception:
+                if done.is_set():
+                    break
+                continue
+            self._progress(f'发现{what}，停车对准')
+            self.cancel_goto()
+            time.sleep(1.0)                 # 等刹停，别带着速度去对准
+            seen = True
+            break
+        if not seen:
+            return None
+        try:
+            self.center_on_target(class_id, timeout=40.0)
+            t = self.locate_target(class_id, timeout=5.0)
+        except Exception as exc:
+            self._progress(f'对准/解算失败（{exc}）')
+            return None
+        wx, wy = self.local_to_world(t.x, t.y, 0.0)[:2]
+        self._progress(f'{what}世界坐标 ({wx:.2f}, {wy:.2f})')
+        return float(wx), float(wy)
+
+    # ---- 巡检拍摄 ----
+    #: snapshot() 默认存这儿。选手想换目录就 `sdk.PHOTO_DIR = '/logs/xxx'`
+    #: （实例属性会盖掉类属性），不用每次调用都带参数。/logs 是挂给地面站的。
+    PHOTO_DIR = '/logs/照片'
+
+    def snapshot(self, tag: str, camera: str = 'front',
+                 directory: Optional[str] = None) -> Optional[str]:
+        """拍一张交付照片存进 /logs 并打印路径（"回传"就是存进这个挂载目录）。
+
+        **拍不到不让任务失败**：照片是交付物，不是流程前提。
+
+        **不发声光事件**：声光事件是固定枚举（见 `_sound_light_port.py` 的
+        SOUND_LIGHT_EVENTS），表里没有"拍照"，自造事件名会直接抛 ValueError
+        把整个任务打断——首次跑任务3 就是这么挂的。
+        """
+        d = directory or self.PHOTO_DIR
+        path = f"{d}/{self.namespace}_{time.strftime('%H%M%S')}_{tag}.png"
+        try:
+            self.capture_photo(path, camera=camera)
+        except Exception as exc:
+            self._progress(f'拍照失败 {tag}（{exc}），流程继续')
+            return None
+        try:
+            x, y, _ = self.get_local_position()
+            wx, wy = self.local_to_world(x, y, 0.0)[:2]
+            where = (f'（位置 ({wx:.2f}, {wy:.2f})，'
+                     f'朝向 {math.degrees(self.get_current_yaw()):.0f}°）')
+        except Exception:
+            where = ''
+        self._progress(f'拍照回传 {tag}：{path}{where}')
+        return path
+
+    #: look_for() 的参数。检测节点约 7 Hz，标志在画面里的话一两帧就出结果；
+    #: 等 6 秒纯属在没有目标的地方白耗。留一次短重试是因为转向刚到位时画面
+    #: 可能还在稳，给一帧缓冲。
+    LOOK_TIMEOUT_S = 3.0
+    LOOK_TRIES = 2
+    LOOK_SETTLE_S = 1.0
+
+    def look_for(self, class_id: str, camera: str = 'front',
+                 tries: Optional[int] = None, timeout_s: Optional[float] = None,
+                 what: str = '目标') -> Optional[Any]:
+        """在**当前位置、当前朝向**找一次目标。找到返回 Detection，没找到返回 None。
+
+        跟 `wait_for_detection()` 的区别：那个找不到会抛异常，这个返回 None
+        ——巡检时"这栋楼没有火情"是正常结果，不是错误。
+        """
+        n = self.LOOK_TRIES if tries is None else tries
+        t = self.LOOK_TIMEOUT_S if timeout_s is None else timeout_s
+        for i in range(1, n + 1):
+            try:
+                det = self.wait_for_detection(class_id, timeout=t, camera=camera)
+                self._progress(f'原地看到{what}')
+                return det
+            except Exception:
+                if i < n:
+                    time.sleep(self.LOOK_SETTLE_S)
+        return None
+
+    def patrol(self, stations: List[Tuple[Any, ...]], class_id: Optional[str] = None,
+               agl_m: float = 2.0, on_found: Optional[Any] = None,
+               scan_sound: Optional[str] = None, found_sound: Optional[str] = None,
+               once: bool = True) -> bool:
+        """逐站巡检：飞到观察位 -> 转到指定机头朝向 -> 拍交付照片 -> （该查就查）。
+
+        返回**整轮下来有没有找到过目标**。
+
+        Args:
+            stations: `[(标签, (wx, wy), 观察位名, 机头朝向°, 这站要不要查), ...]`。
+                连续两站是同一个观察位时不重复飞，只原地转向（任务3 的 M 点
+                要先朝南拍 3# 楼、再原地转 180° 查 2# 楼）。
+            on_found: `on_found(det, 标签)`。找到目标时调用，**这一站的照片由它
+                负责拍**——要等它把目标对准到画面正中再拍，火情在画面边上
+                等于没拍到。它很可能把飞机挪走（比如前移到发射点），所以回来
+                之后不再认为飞机还在观察位上。
+            once: 找到一次之后，后面要查的站只补拍照片、不再跑识别。任务3 里
+                火情只可能有一处，灭完了就不必在剩下的楼前再等识别超时。
+        """
+        at, found = None, False
+        for tag, pt, pt_name, yaw_deg, detect in stations:
+            if at != pt_name:
+                self.fly_route([(float(pt[0]), float(pt[1]))], agl_m=agl_m,
+                               names=[pt_name])
+                at = pt_name
+            self._progress(f'在 {pt_name} 点转到 {yaw_deg:.0f}° 巡检 {tag}')
+            self.face_yaw(math.radians(yaw_deg))
+            # 不查的站、或已经处置过的站：转到位就拍。照片是硬性交付物
+            # （每栋楼必须有一张），不能让后面的识别失败把它带掉。
+            if not detect or (found and once):
+                self.snapshot(tag)
+                if detect:
+                    self._progress(f'{tag} 已处置过，只拍照不再查')
+                continue
+            if scan_sound:
+                self.play_sound_light(scan_sound)
+            det = self.look_for(class_id, camera='front', what=tag)
+            if det is None:
+                self.set_agl(agl_m)      # 查的过程里可能升降过，回观察高度再拍
+                self.snapshot(tag)
+                self._progress(f'{tag} 没有目标，继续巡检')
+                continue
+            found = True
+            if found_sound:
+                self.play_sound_light(found_sound)
+            if on_found is not None:
+                on_found(det, tag)
+            at = None                    # on_found 很可能把飞机挪走了
+        return found
+
+    # ---- 原地机动 ----
+    def own_pad(self) -> Tuple[float, float]:
+        """自己起降点的世界坐标。起飞时飞机就在起降点上，局部原点换过去就是。"""
+        wx, wy, _ = self.local_to_world(0.0, 0.0, 0.0)
+        return (round(float(wx), 2), round(float(wy), 2))
+
+    def progress(self, text: str) -> None:
+        """往日志里打一行带机号前缀的进度。选手程序里 `print(f'[{ns}] ...')`
+        满篇都是，用这个就不必每次自己拼前缀、也不会漏 flush=True。"""
+        self._progress(text)
+
+    def set_agl(self, agl_m: float) -> None:
+        """原地升降到指定离地高度，水平位置不动（直线、不经规划器）。"""
+        cx, cy, _ = self.get_local_position()
+        _, _, lz = self.world_to_local(0.0, 0.0, agl_m)
+        self._progress(f'回到离地高度 {agl_m:.1f} m')
+        self.goto_direct(cx, cy, lz)
+
+    def step_forward(self, meters: float, what: str = '落脚点'
+                     ) -> Tuple[float, float, float]:
+        """沿**当前机头方向**平移 meters 米，返回落脚点的 (世界x, 世界y, 离地高度)。
+
+        返回的第三个值是**离地高度**，可以直接喂给 `goto_world()`——别拿局部
+        系的 z 当 AGL 传给队友，两机的 odom 原点不在同一处。
+        """
+        cx, cy, cz = self.get_local_position()
+        yaw = self.get_current_yaw()
+        tx, ty = cx + meters * math.cos(yaw), cy + meters * math.sin(yaw)
+        self._progress(f'沿机头前移 {meters:.1f} m 到{what}')
+        self.goto_direct(tx, ty, cz)
+        wx, wy = self.local_to_world(tx, ty, 0.0)[:2]
+        return float(wx), float(wy), float(self.get_agl())
+
+    # ---- 发射机构 ----
+    #: 发射弹丸的舵机行程。2000=发射位、800=装填/复位（跟机械抓是同一组舵机，
+    #: 只是语义不同：抓放是"保持"，发射是"推出去再复位"）。
+    LAUNCH_FIRE_PWM = 2000
+    LAUNCH_LOAD_PWM = 800
+    LAUNCH_TRAVEL_S = 2.0
+
+    def shoot(self, shots: int = 1, interval_s: float = 1.0,
+              label: str = '发射', sound: Optional[str] = None) -> None:
+        """发射弹丸：舵机推到发射位、等到位、再复位装填。shots>1 就连发。
+
+        没配舵机的飞机（`sdk.servos` 为空）只打印提示，不中断流程。
+
+        Args:
+            sound: 第一发之前播的声光事件。连发只播一次。
+        """
+        if sound:
+            self.play_sound_light(sound)
+        for i in range(1, shots + 1):
+            tag = label if shots == 1 else f'{label} {i}/{shots}'
+            if not self.servos:
+                self._progress(f'{tag}：这架飞机没有配置舵机，跳过（见 SERVO_CONFIG）')
+            else:
+                try:
+                    self.set_servos({sv: self.LAUNCH_FIRE_PWM
+                                     for sv in sorted(self.servos)})
+                    time.sleep(self.LAUNCH_TRAVEL_S)
+                    self.set_servos({sv: self.LAUNCH_LOAD_PWM
+                                     for sv in sorted(self.servos)})
+                    time.sleep(self.LAUNCH_TRAVEL_S)
+                    self._progress(f'{tag}完成')
+                except Exception as exc:
+                    self._progress(f'{tag}：舵机没动（{exc}）')
+            if i < shots and interval_s > 0:
+                time.sleep(interval_s)
+
+    # ---- 把占着的点让给队友 ----
+    #: 离让出的点多远算"让开了"。这个门限只是**提前放行**用的——真正保证放行的
+    #: 是"已经飞到下一个落脚点"那一路（任何 goto_world/fly_route 到达都算）。
+    #: 2026-09-30 实测：火情随机到 1# 东单元时发射点 (14.40,17.33)，而侦察机的
+    #: 下一个落脚点是 G(17,16)，两点只差 2.92 m，3.0 的门限永远满足不了，
+    #: watchdog 要耗满超时才放行，队友白等两分钟。所以降到 2.0 并加了到达那一路。
+    SPOT_CLEAR_M = 2.0
+    SPOT_CLEAR_WAIT_S = 120.0
+    SPOT_POLL_S = 0.2
+
+    def yield_spot(self, spot_xy: Tuple[float, float], event: str,
+                   timeout_s: Optional[float] = None) -> None:
+        """宣告"我马上让开这个点"，**真的让开了**就给队友发一次 event。
+
+        为什么需要：队友被要求飞到"我现在站的那个点"，而那个点上此刻正杵着
+        我。ego_planner 看到目标点被占，会把轨迹终点推到障碍边缘、飞机原地
+        不动，5 秒后被 goto() 判成不可达——2026-09-30 实测任务机收到破窗通知
+        立刻出发（07:26:51.74），侦察机同一瞬间才开始离开（07:26:51.94），
+        6 秒后任务机就挂了。
+
+        调用方的动作顺序不用改（照常"发射完就走"），只是多发一条"我让开了"，
+        队友收到这条才真的飞进去。
+
+        两条放行路径，先到哪条算哪条：
+          · 距离门限：后台线程盯着，离 `SPOT_CLEAR_M` 远就放行（提前放行）；
+          · **到达下一个落脚点**：之后任何 `goto_world()`/`fly_route()` 到点就
+            放行。这是主路径——下一个落脚点有可能离让出的点很近，光靠门限
+            放不了行。
+        超时也放行并在日志里说清楚，不然队友会一直等。
+        """
+        import threading
+        sx, sy = float(spot_xy[0]), float(spot_xy[1])
+        wait_s = self.SPOT_CLEAR_WAIT_S if timeout_s is None else timeout_s
+        state = {'sent': False}
+        self._spot_watch = state
+
+        def _send(why: str) -> None:
+            if state['sent']:
+                return
+            state['sent'] = True
+            try:
+                self.send_to_teammate(event)
+                self._progress(f'{why}，通知队友进场')
+            except Exception as exc:
+                self._progress(f'"已让开"没送到队友（{exc}）')
+
+        state['send'] = _send
+
+        def _loop() -> None:
+            t0 = time.time()
+            while time.time() - t0 < wait_s and not state['sent']:
+                try:
+                    cx, cy, _ = self.get_local_position()
+                    wx, wy = self.local_to_world(cx, cy, 0.0)[:2]
+                except Exception:
+                    time.sleep(self.SPOT_POLL_S)
+                    continue
+                d = math.hypot(wx - sx, wy - sy)
+                if d >= self.SPOT_CLEAR_M:
+                    _send(f'已离开让出的点（{d:.1f} m ≥ {self.SPOT_CLEAR_M:.1f} m）')
+                    return
+                time.sleep(self.SPOT_POLL_S)
+            # 走到这儿说明两条路都没触发，属于异常，但也要放行。
+            _send(f'等了 {wait_s:.0f} 秒仍没离开让出的点（超时兜底）')
+
+        threading.Thread(target=_loop, daemon=True).start()
+
+    def _spot_clear_arrived(self, where: str) -> None:
+        """到达任何一个落脚点 —— 不管离让出的点多远，位置都已经腾出来了。
+
+        `yield_spot()` 的主放行路径，由 `goto_world()` / `_goto_with_retry()`
+        自动调用，选手不用管。
+        """
+        state = getattr(self, '_spot_watch', None)
+        if state and not state['sent']:
+            state['send'](f'已飞到{where}，让出的点已腾出')
+
+    # ---- 选手程序的 main() ----
+    @staticmethod
+    def run(leader: Any, follower: Any, description: Optional[str] = None,
+            spacing_m: float = 4.0) -> None:
+        """选手程序的 main()：解析命令行 -> 建 SDK -> 按角色分派 -> 收尾。
+
+        三个单任务程序的 `main()` 本来一字不差地重复同样 14 行 argparse，
+        收到这里。用法：
+
+            if __name__ == '__main__':
+                DroneSDK.run(leader=recon, follower=supply)
+
+        `--spacing` 存成 `sdk.spacing_m`，任务函数直接读。`--route` 老运行器会
+        传给编队那一支，这里一并吃掉，免得 lite 版因为多一个参数就起不来。
+        """
+        import argparse
+        ap = argparse.ArgumentParser(description=description)
+        ap.add_argument('--namespace', required=True)
+        ap.add_argument('--role', required=True,
+                        choices=('leader', 'follower', 'recon', 'supply'))
+        ap.add_argument('--teammate', required=True)
+        ap.add_argument('--spacing', type=float, default=spacing_m)
+        ap.add_argument('--route', nargs='*')
+        args = ap.parse_args()
+        is_leader = args.role in ('leader', 'recon')
+        sdk = DroneSDK(namespace=args.namespace,
+                       role='recon' if is_leader else 'supply',
+                       teammate_namespace=args.teammate)
+        sdk.spacing_m = float(args.spacing)
+        try:
+            (leader if is_leader else follower)(sdk)
+        finally:
+            sdk.shutdown()
 
     def shutdown(self) -> None:
         """选手程序整体退出时应该调用一次：先归还`reliability.py`占用的
