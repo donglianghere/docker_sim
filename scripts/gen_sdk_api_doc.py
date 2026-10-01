@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""生成选手版 SDK API 参考（.docx）。
+"""生成选手版 SDK API 参考：**每个选手程序一份**。
 
-    python3 scripts/gen_sdk_api_doc.py            # 写 API参考.docx + API参考.md
+    python3 scripts/gen_sdk_api_doc.py            # 每个选手程序一份 .md + .docx
     python3 scripts/gen_sdk_api_doc.py --check    # 只检查分类有没有漏，不写文件
 
-**只收录四个选手程序真正用过的 API**，不是全部 80 个。用过哪些是从
-contestant_template/*_lite.py 里用 AST 扫出来的，程序改了重新跑一遍就同步——
-不手工维护名单，手工名单迟早跟代码对不上。
+每份只收录**那一个程序真正用过的 API**，不是全部 80 个，也不是四个程序的并集。
+用过哪些是从程序源码里用 AST 扫出来的，程序改了重新跑一遍就同步——不手工
+维护名单，手工名单迟早跟代码对不上。
+
+**条目按程序里出现的先后排，并标出首次用到的行号**：对着代码从上往下读，
+文档顺序正好能对上，不用在分类目录里来回找。
 
 签名和说明同样从 capabilities.py 读。分类表是人工定的（机器分不出该放哪类），
 扫出来的 API 如果没进分类表会直接报错，而不是悄悄漏掉。
@@ -22,8 +25,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'src', 'contest_sdk', 'contest_sdk', 'capabilities.py')
 PROGS = os.path.join(ROOT, 'contestant_template', '*_lite.py')
-OUT_DOCX = os.path.join(ROOT, 'contestant_template', 'API参考.docx')
-OUT_MD = os.path.join(ROOT, 'contestant_template', 'API参考.md')
+OUTDIR = os.path.join(ROOT, 'contestant_template', 'API参考')
 
 CATEGORIES = [
     ('程序入口', ['run', 'spacing_m']),
@@ -59,15 +61,25 @@ PITFALLS = {
 
 
 def used_apis():
-    """四个选手程序里 sdk.X / DroneSDK.X 用到的名字 -> 用在哪几个程序。"""
+    """{程序文件名: [(API 名, 首次用到的行号), ...]}，按行号排序。"""
     out = {}
     for f in sorted(glob.glob(PROGS)):
-        name = os.path.basename(f)
+        first = {}
         for n in ast.walk(ast.parse(io.open(f, encoding='utf-8').read())):
             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
                     and n.value.id in ('sdk', 'DroneSDK'):
-                out.setdefault(n.attr, set()).add(name.replace('_lite.py', ''))
+                if n.attr not in first or n.lineno < first[n.attr]:
+                    first[n.attr] = n.lineno
+        out[os.path.basename(f)] = sorted(first.items(), key=lambda kv: kv[1])
     return out
+
+
+def category_of(name):
+    for cat, names in CATEGORIES:
+        if name in names:
+            return cat
+    return '其它'
+
 
 
 def collect():
@@ -147,118 +159,98 @@ def _plain(text):
     return re.sub(r'\*\*([^*]+)\*\*', r'\1', text).replace('`', '')
 
 
-def build(api, used):
+def build_md(api, prog, items):
+    # 属性（PHOTO_DIR / spacing_m）没有 docstring，它们的说明写在 PITFALLS 里。
+    # 这时该当正文用，不该标成红色警告——那是给"有说明、另外还有坑"的方法留的。
+    """一个程序一份 Markdown，条目按程序里出现的先后排。"""
+    L = [f'# {prog} 用到的 SDK API\n',
+         f'> 这个程序用到 **{len(items)} 个** API（SDK 全部能力有 80 个，'
+         f'其余是底层/备用接口，这个程序没用到）。\n'
+         f'> 条目按**程序里出现的先后**排，括号里是首次用到的行号——'
+         f'对着 `{prog}` 从上往下读，顺序能对上。\n'
+         f'> 本文档由 `scripts/gen_sdk_api_doc.py` 自动生成，**不要手改**。\n',
+         '\n## 速查\n', '| 行 | API | 分类 | 做什么 |', '|---|---|---|---|']
+    for name, line in items:
+        desc = _plain(api[name]['summary'] or PITFALLS.get(name, ''))[:52]
+        L.append(f'| {line} | [`{name}`](#{name.lower()}) | {category_of(name)} | {desc} |')
+    L.append('\n## 逐个说明\n')
+    for name, line in items:
+        info = api[name]
+        L.append(f'<a id="{name.lower()}"></a>')
+        L.append(f'### `{info["sig"]}`\n')
+        L.append(f'*{prog} 第 {line} 行首次用到 · {category_of(name)}*'
+                 + ('  ·  *staticmethod*' if info['static'] else '') + '\n')
+        body = info['summary'] or (PITFALLS.get(name, '') if not info['args'] else '')
+        if body:
+            L.append(body + '\n')
+        if info['args']:
+            L.append('**参数**\n')
+            for a in info['args']:
+                L.append(f'- {a}')
+            L.append('')
+        if name in PITFALLS and body != PITFALLS[name]:
+            L.append(f'> ⚠️ {PITFALLS[name]}\n')
+    return '\n'.join(L) + '\n'
+
+
+def build_docx(api, prog, items):
+    """同样内容的 .docx。docstring 的 **粗体** / `等宽` 转成 Word 真实格式。"""
     from docx import Document
     from docx.shared import Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     d = Document()
-    for st, sz in (('Normal', 10.5),):
-        d.styles[st].font.size = Pt(sz)
-        d.styles[st].font.name = '微软雅黑'
+    d.styles['Normal'].font.size = Pt(10.5)
+    d.styles['Normal'].font.name = '微软雅黑'
 
-    d.add_heading('contest_sdk API 参考（选手版）', 0)
+    d.add_heading(f'{prog} 用到的 SDK API', 0)
     p = d.add_paragraph()
-    p.add_run('只收录四个选手程序真正用过的 API。').bold = True
-    p.add_run(f'共 {len(used)} 个，SDK 全部能力有 80 个，其余是底层/备用接口，'
-              '写任务一般用不到。本文档由 scripts/gen_sdk_api_doc.py 自动生成，不要手改。')
+    p.add_run(f'这个程序用到 {len(items)} 个 API。').bold = True
+    p.add_run('SDK 全部能力有 80 个，其余是底层/备用接口，这个程序没用到。'
+              '条目按程序里出现的先后排，括号里是首次用到的行号——对着源码'
+              '从上往下读，顺序能对上。本文档自动生成，不要手改。')
 
-    d.add_heading('怎么开始', level=1)
-    d.add_paragraph('命令行解析、建 SDK、按角色分派、收尾，一句就够：', style='Intense Quote')
-    c = d.add_paragraph()
-    c.add_run("if __name__ == '__main__':\n    DroneSDK.run(leader=recon, follower=supply)"
-              ).font.name = 'Consolas'
-
-    d.add_heading('速查表', level=1)
-    t = d.add_table(rows=1, cols=3)
+    d.add_heading('速查', level=1)
+    t = d.add_table(rows=1, cols=4)
     t.style = 'Light Grid Accent 1'
-    for i, h in enumerate(('方法', '用在哪个程序', '做什么')):
+    for i, h in enumerate(('行', 'API', '分类', '做什么')):
         t.rows[0].cells[i].paragraphs[0].add_run(h).bold = True
-    for cat, names in CATEGORIES:
-        for m in names:
-            if m not in used:
-                continue
-            r = t.add_row().cells
-            r[0].paragraphs[0].add_run(api[m]['sig'].split('(')[0]).font.name = 'Consolas'
-            r[1].text = '、'.join(sorted(used[m]))
-            r[2].text = _plain(api[m]['summary'] or PITFALLS.get(m, ''))[:60]
+    for name, line in items:
+        r = t.add_row().cells
+        r[0].text = str(line)
+        r[1].paragraphs[0].add_run(name).font.name = 'Consolas'
+        r[2].text = category_of(name)
+        r[3].text = _plain(api[name]['summary'] or PITFALLS.get(name, ''))[:52]
 
     d.add_page_break()
     d.add_heading('逐个说明', level=1)
-    for cat, names in CATEGORIES:
-        shown = [m for m in names if m in used]
-        if not shown:
-            continue
-        d.add_heading(cat, level=2)
-        for m in shown:
-            info = api[m]
-            h = d.add_paragraph()
-            run = h.add_run(info['sig'])
-            run.bold = True
-            run.font.name = 'Consolas'
-            run.font.size = Pt(11)
-            if info['static']:
-                h.add_run('  （staticmethod）').italic = True
-            if info['summary']:
-                _rich(d.add_paragraph(), info['summary'])
+    for name, line in items:
+        info = api[name]
+        h = d.add_paragraph()
+        r = h.add_run(info['sig'])
+        r.bold = True
+        r.font.name = 'Consolas'
+        r.font.size = Pt(11)
+        meta = d.add_paragraph()
+        mr = meta.add_run(f'第 {line} 行首次用到 · {category_of(name)}'
+                          + ('  ·  staticmethod' if info['static'] else ''))
+        mr.italic = True
+        mr.font.size = Pt(9)
+        body = info['summary'] or (PITFALLS.get(name, '') if not info['args'] else '')
+        if body:
+            _rich(d.add_paragraph(), body)
+        if info['args']:
+            d.add_paragraph().add_run('参数').bold = True
             for a in info['args']:
                 ap = d.add_paragraph(style='List Bullet')
                 ap.paragraph_format.left_indent = Pt(24)
                 _rich(ap, a)
-            if m in PITFALLS:
-                w = d.add_paragraph()
-                w.add_run('⚠ ').font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
-                _rich(w, PITFALLS[m])
-                for r in w.runs:
-                    r.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
-            u = d.add_paragraph()
-            u.add_run('用在：' + '、'.join(sorted(used[m]))).italic = True
-            u.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        if name in PITFALLS and body != PITFALLS[name]:
+            w = d.add_paragraph()
+            w.add_run('⚠ ')
+            _rich(w, PITFALLS[name])
+            for rr in w.runs:
+                rr.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
     return d
-
-
-def build_md(api, used):
-    """同样的内容输出一份 Markdown。docstring 本来就是 Markdown 风格的行内
-    标记（**粗体**、`等宽`），这里原样保留，不像 docx 那样要转成格式。"""
-    L = ['# contest_sdk API 参考（选手版）\n',
-         f'> **只收录四个选手程序真正用过的 API**，共 {len(used)} 个。'
-         f'SDK 全部能力有 80 个，其余是底层/备用接口，写任务一般用不到。\n'
-         '> 本文档由 `scripts/gen_sdk_api_doc.py` 自动生成，**不要手改**；'
-         '改了选手程序或 SDK 重新跑一遍即可。\n',
-         '\n## 怎么开始\n',
-         '命令行解析、建 SDK、按角色分派、收尾，一句就够：\n',
-         "```python\nif __name__ == '__main__':\n"
-         "    DroneSDK.run(leader=recon, follower=supply)\n```\n",
-         '\n## 速查表\n',
-         '| 方法 | 用在哪个程序 | 做什么 |', '|---|---|---|']
-    for cat, names in CATEGORIES:
-        for m in names:
-            if m not in used:
-                continue
-            nm = api[m]['sig'].split('(')[0]
-            desc = _plain(api[m]['summary'] or PITFALLS.get(m, ''))[:60]
-            L.append(f'| [`{nm}`](#{nm.lower()}) | {"、".join(sorted(used[m]))} | {desc} |')
-    L.append('\n## 逐个说明\n')
-    for cat, names in CATEGORIES:
-        shown = [m for m in names if m in used]
-        if not shown:
-            continue
-        L.append(f'\n### {cat}\n')
-        for m in shown:
-            info = api[m]
-            L.append(f'<a id="{m.lower()}"></a>')
-            L.append(f'**`{info["sig"]}`**'
-                     + ('  *(staticmethod)*' if info['static'] else '') + '\n')
-            if info['summary']:
-                L.append(info['summary'] + '\n')
-            for a in info['args']:
-                L.append(f'- {a}')
-            if info['args']:
-                L.append('')
-            if m in PITFALLS:
-                L.append(f'> ⚠️ {PITFALLS[m]}\n')
-            L.append(f'*用在：{"、".join(sorted(used[m]))}*\n')
-    return '\n'.join(L) + '\n'
 
 
 def main():
@@ -268,10 +260,11 @@ def main():
     args = ap.parse_args()
 
     api, used = collect(), used_apis()
+    allnames = {n for items in used.values() for n, _ in items}
     listed = {m for _, ms in CATEGORIES for m in ms}
-    missing = sorted(set(used) - listed)
-    unknown = sorted(set(used) - set(api))
-    stale = sorted(listed - set(used))
+    missing = sorted(allnames - listed)
+    unknown = sorted(allnames - set(api))
+    stale = sorted(listed - allnames)
     if missing or unknown:
         if missing:
             print(f'★NG  选手程序用了但没进分类表：{missing}', file=sys.stderr)
@@ -281,13 +274,15 @@ def main():
     if stale:
         print(f'注意  分类表里这些已经没有程序在用，已跳过：{stale}', file=sys.stderr)
     if args.check:
-        print(f'OK   {len(used)} 个在用 API 全部有分类')
+        print(f'OK   {len(allnames)} 个在用 API 全部有分类')
         return 0
-    build(api, used).save(OUT_DOCX)
-    io.open(OUT_MD, 'w', encoding='utf-8').write(build_md(api, used))
-    cats = sum(1 for c, ms in CATEGORIES if any(m in used for m in ms))
-    for f in (OUT_DOCX, OUT_MD):
-        print(f'已生成 {os.path.relpath(f, ROOT)}（{len(used)} 个在用 API，{cats} 个分类）')
+    os.makedirs(OUTDIR, exist_ok=True)
+    for prog, items in used.items():
+        stem = prog[:-3]
+        io.open(os.path.join(OUTDIR, stem + '.md'), 'w',
+                encoding='utf-8').write(build_md(api, prog, items))
+        build_docx(api, prog, items).save(os.path.join(OUTDIR, stem + '.docx'))
+        print(f'已生成 API参考/{stem}.md 和 .docx（{len(items)} 个 API）')
     return 0
 
 
