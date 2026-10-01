@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # 一键仿真：主机开机后跑这一个脚本就够了。
 #
-#   ./run.sh              # 默认跑编队飞行
-#   ./run.sh 任务2         # 地面火情：侦查 -> 取物资 -> 投弹 -> 编队返航
-#   ./run.sh 任务3         # 高层火情：巡检拍摄 -> 协同灭火 -> 编队返回
-#   ./run.sh 综合           # 三轮连贯：编队 + 两种火情（火情随机、两轮不重复）
+# 参数就是**要跑的程序文件名**（本目录里的 .py，.py 可省略，可 Tab 补全）：
 #
-#   以上四个场景各有一份"简化版"：编队lite / 任务2lite / 任务3lite / 综合lite。
-#   行为相同，实现搬进了 SDK（选手代码少一个数量级）。老版一行没动，两版并存。
-#   ./run.sh 任务3 --keep  # 结束后保留选手容器，便于翻日志
-#   ./run.sh --no-sync     # 跑本目录里手改过的版本，不从仓库同步
+#   ./run.sh formation         # 编队飞行
+#   ./run.sh groundfire        # 地面火情：侦查 -> 取物资 -> 投弹 -> 编队返航
+#   ./run.sh highrise          # 高层火情：巡检拍摄 -> 协同灭火 -> 编队返回
+#   ./run.sh mission           # 三轮连贯：编队 + 两种火情（火情随机、两轮不重复）
+#
+#   以上四个各有一份"简化版"，加 _lite：formation_lite / groundfire_lite /
+#   highrise_lite / mission_lite。行为相同，实现搬进了 SDK（选手代码少一个
+#   数量级）。老版一行没动，两版并存。
+#
+#   ./run.sh                   # 不给就跑 formation.py
+#   ./run.sh highrise --keep   # 结束后保留选手容器，便于翻日志
+#   ./run.sh --no-sync         # 跑本目录里手改过的版本，不从仓库同步
+#
+# 用文件名当参数，是因为它本来就是唯一且无歧义的标识：不用再维护一张
+# "场景名 -> 文件名"的映射表，加新程序也不用动这个脚本。
 #
 # 它做这些事（按顺序）：
 #   1. 检查 docker / 镜像 / X11
@@ -31,7 +39,7 @@ set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"          # docker_sim 仓库根
 
-SCENE=编队
+SCRIPT=formation.py
 SPACING=4.0
 RESTART=1
 KEEP=0
@@ -39,34 +47,16 @@ SYNC=1
 TIMEOUT_S=1500
 while [ $# -gt 0 ]; do
     case "$1" in
-        编队|formation)  SCENE=编队;  shift ;;
-        任务2|task2)     SCENE=任务2; shift ;;
-        任务3|task3)     SCENE=任务3; shift ;;
-        综合|mission)    SCENE=综合; shift ;;
-        编队lite|lite)   SCENE=编队lite; shift ;;
-        任务2lite)       SCENE=任务2lite; shift ;;
-        任务3lite)       SCENE=任务3lite; shift ;;
-        综合lite)        SCENE=综合lite; shift ;;
         --spacing)       SPACING="$2"; shift 2 ;;
         --no-restart)    RESTART=0; shift ;;
         --no-sync)       SYNC=0; shift ;;
         --keep)          KEEP=1; shift ;;
         --timeout)       TIMEOUT_S="$2"; shift 2 ;;
-        -h|--help)       sed -n '2,20p' "$0"; exit 0 ;;
-        *) echo "未知参数: $1（用 --help 看用法）" >&2; exit 2 ;;
+        -h|--help)       sed -n '2,26p' "$0"; exit 0 ;;
+        -*) echo "未知参数: $1（用 --help 看用法）" >&2; exit 2 ;;
+        *)               SCRIPT="${1%.py}.py"; shift ;;   # 程序文件名，.py 可省
     esac
 done
-
-case "$SCENE" in
-    编队)  SCRIPT=formation.py ;;
-    任务2) SCRIPT=groundfire.py ;;
-    任务3) SCRIPT=highrise.py ;;
-    综合) SCRIPT=mission.py ;;
-    编队lite) SCRIPT=formation_lite.py ;;
-    任务2lite) SCRIPT=groundfire_lite.py ;;
-    任务3lite) SCRIPT=highrise_lite.py ;;
-    综合lite) SCRIPT=mission_lite.py ;;
-esac
 
 # 航线（世界坐标）。只有 formation.py 吃 --route；两个任务脚本的航点写在自己
 # 代码里，传了也没用，所以下面只给编队那一支传。
@@ -101,8 +91,15 @@ echo $$ >&9
 cleanup() { [ "$KEEP" = "1" ] && return 0; docker rm -f "$C_LEADER" "$C_FOLLOWER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+[ -f "$HERE/monitor.py" ] || { echo "!! 本目录缺 monitor.py !!" >&2; exit 1; }
+if [ ! -f "$HERE/$SCRIPT" ]; then
+    echo "!! 本目录没有 $SCRIPT。可跑的程序：" >&2
+    ( cd "$HERE" && ls -1 *.py | grep -v '^monitor\.py$\|^referee\.py$' | sed 's/^/     /' ) >&2
+    exit 1
+fi
+
 echo "=============================================="
-echo " 一键仿真：$SCENE（$SCRIPT）"
+echo " 一键仿真：$SCRIPT"
 echo " 目录 $HERE"
 echo "=============================================="
 
@@ -116,9 +113,6 @@ for img in "$IMAGE" flight-stack:latest sim-world:latest; do
     docker image inspect "$img" >/dev/null 2>&1 || {
         echo "!! 镜像 $img 不存在。先在 $ROOT 下 build（见 docker-compose.yml 顶部说明） !!" >&2
         exit 1; }
-done
-for f in "$SCRIPT" monitor.py; do
-    [ -f "$HERE/$f" ] || { echo "!! 本目录缺 $f !!" >&2; exit 1; }
 done
 
 # X11：容器里的 Gazebo/RViz/监视窗口都要往宿主机的 X server 上画。
@@ -207,7 +201,8 @@ log "Gazebo 界面 ${gz_n:-0} 个、RViz ${rv_n:-0} 个"
 # "任务结束"判据，会在半道退出（用户 2026-09-30 发现"监控也自己掉了"）。
 # 侦察机只在整个任务结束时才降落，拿它当判据最准。
 MON_END=""
-case "$SCENE" in 综合|综合lite) MON_END="--end-on-all-land" ;; esac
+# mission*.py 是多轮流程，收尾判据要用"两机都降落"（见 monitor.py 里的说明）
+case "$SCRIPT" in mission*.py) MON_END="--end-on-all-land" ;; esac
 MON_OUT="/logs/${SCRIPT%.py}_formation.png"
 MON_LOG="/logs/${SCRIPT%.py}_monitor.log"
 log "启动监视窗口（报告将存到 runtime_logs/$(basename "$MON_OUT")）"
@@ -224,7 +219,8 @@ docker exec -d -e DISPLAY="$DISPLAY" "$FSNX01" bash -lc "
 # ---- 5.5 综合任务：起"出题裁判" ----
 # 它负责把两处火情标识先从 world 里删掉，等侦察机过 G 点再把本轮抽中的那个
 # 生成回来（两轮不重复）。只有综合任务需要——三个单任务的火情是固定摆好的。
-if [ "$SCENE" = "综合" ] || [ "$SCENE" = "综合lite" ]; then
+case "$SCRIPT" in mission*.py) NEED_REFEREE=1 ;; *) NEED_REFEREE=0 ;; esac
+if [ "$NEED_REFEREE" = "1" ]; then
     log "启动出题裁判（火情随机出现，两轮不重复）"
     docker cp "$HERE/referee.py" "$SIMWORLD:/tmp/referee.py" >/dev/null 2>&1 || true
     docker exec -d "$SIMWORLD" bash -lc "
@@ -255,7 +251,8 @@ COMMON=(--network host
         -v "$LOGDIR:/logs"
         -e PYTHONPATH="$PYPATH")
 EXTRA=()
-[ "$SCENE" = "编队" ] && EXTRA=(--route "$ROUTE")   # lite 版航线写在程序里，不吃 --route
+# 只有老版 formation.py 吃 --route；其余程序的航点写在自己代码里
+[ "$SCRIPT" = "formation.py" ] && EXTRA=(--route "$ROUTE")
 
 log "启动选手程序：$SCRIPT（长机=$LEADER 僚机=$FOLLOWER 间距=${SPACING}米）"
 docker run -d --name "$C_LEADER" "${COMMON[@]}" "$IMAGE" \
@@ -292,7 +289,7 @@ docker run --rm -v "$LOGDIR:/logs" --entrypoint chown "$IMAGE" \
     -R "$(id -u):$(id -g)" /logs >/dev/null 2>&1 || true
 
 echo
-echo "================ $SCENE 结果 ================"
+echo "================ $SCRIPT 结果 ================"
 rc=0
 for c in "$C_LEADER" "$C_FOLLOWER"; do
     code="$(docker inspect -f '{{.State.ExitCode}}' "$c" 2>/dev/null || echo '?')"
