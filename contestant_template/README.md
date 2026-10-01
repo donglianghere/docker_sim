@@ -13,7 +13,7 @@
 ## 从哪开始看
 
 1. `formation_lite.py` —— 38 行，最短的一个完整双机任务，看懂它就懂了骨架
-2. [`../src/contest_sdk/API参考.md`](../src/contest_sdk/API参考.md) —— 80 个方法分 12 类，顶部有"常用的 20 个"
+2. [`API参考.md`](API参考.md) —— 80 个方法分 12 类，顶部有"常用的 20 个"
 3. `mission_lite.py` —— 最全的一个，三轮编排、两种火情、跨机握手都在里面
 
 想知道某个动作底层到底怎么做的，去 `normal/` 看对应的详细版。
@@ -36,11 +36,11 @@
 
 ```bash
 # 飞之前：航线安全。算每一段离所有障碍的余量，用 goto_direct 时尤其要跑
-python3 ../scripts/check_route.py --route "3,3 3,22 17,22 17,16"
+python3 tools/check_route.py --route "3,3 3,22 17,22 17,16"
 
 # 飞之后：时间线
-python3 ../scripts/timeline.py --events     # 两机事件并排，排编队死锁用
-python3 ../scripts/timeline.py --problems   # 只看异常
+python3 tools/timeline.py --events     # 两机事件并排，排编队死锁用
+python3 tools/timeline.py --problems   # 只看异常
 ```
 
 静态自检不用手动跑——`run.sh` 每次起飞前会自动查一遍程序所在目录，不通过就不飞。
@@ -52,12 +52,16 @@ python3 ../scripts/timeline.py --problems   # 只看异常
 
 ```
 .
-├── run.sh / stop.sh        跑 / 清理，都在这儿
-├── *_lite.py               四个选手程序
-├── normal/                 详细版：同样四个任务，实现摊开写，每个决定都注明了为什么
-├── archive/                旧场景 fire_drill_room 的示例，坐标系不同，跑不了
-└── contestant_network.sh   共用网络配置，仓库外的 start_*.sh 靠它，别挪别改名
+├── run.sh / stop.sh   跑 / 清理
+├── *_lite.py          四个选手程序，在这儿改
+├── normal/            详细版：同样四个任务，实现摊开写，每个决定都注明了为什么
+├── tools/             飞前查航线、飞后看时间线
+├── API参考.md          SDK 80 个方法，自动生成，不要手改
+└── README.md          本文件
 ```
+
+这个目录里**只有选手要用的东西**。仿真设施（docker-compose、监视、裁判、
+SDK 源码）都在上一层仓库里，不用关心。
 
 `normal/` 和 `*_lite.py` **行为完全相同**，用的也是同一组跨机事件名，所以可以
 混搭（lite 长机配 normal 僚机也能飞）。

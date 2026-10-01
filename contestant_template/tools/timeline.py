@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """飞行时间线：把两机日志里真正要紧的那几十行捞出来，按时间并排。
 
-    python3 scripts/timeline.py                      # 读 sim_leader / sim_follower 容器
-    python3 scripts/timeline.py --events             # 只看跨机事件（排死锁用）
-    python3 scripts/timeline.py --from a.log b.log   # 读保存下来的日志
+    python3 tools/timeline.py                      # 读 sim_leader / sim_follower 容器
+    python3 tools/timeline.py --events             # 只看跨机事件（排死锁用）
+    python3 tools/timeline.py --from a.log b.log   # 读保存下来的日志
 
 **为什么要有这个**：排查时的动作几乎总是
 `docker logs sim_leader | grep -E "航点|解散|声光|..."`，而选手不知道该 grep

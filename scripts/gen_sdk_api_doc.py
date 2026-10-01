@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """从 capabilities.py 生成 SDK API 参考（Markdown）。
 
-    python3 scripts/gen_sdk_api_doc.py            # 写 src/contest_sdk/API参考.md
+    python3 scripts/gen_sdk_api_doc.py            # 写 contestant_template/API参考.md
     python3 scripts/gen_sdk_api_doc.py --check    # 只检查分类有没有漏，不写文件
 
 签名和一句话说明**从源码读**，不手抄——手抄的文档迟早跟代码对不上。
@@ -17,7 +17,9 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'src', 'contest_sdk', 'contest_sdk', 'capabilities.py')
-OUT = os.path.join(ROOT, 'src', 'contest_sdk', 'API参考.md')
+#: 生成到**选手目录**——这份文档是给选手看的，放在他们打开的那个
+#: 文件夹里，不用跨目录找。
+OUT = os.path.join(ROOT, 'contestant_template', 'API参考.md')
 
 #: 第一梯队：一个典型任务基本只用这些。顺序就是任务里的先后。
 COMMON = ['run', 'takeoff', 'fly_route', 'goto_world', 'hold_at', 'return_home',

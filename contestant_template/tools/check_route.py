@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """航线安全检查：算每一段离**所有**障碍的余量，飞之前跑。
 
-    python3 scripts/check_route.py --route "3,3 3,22 17,22 17,16"
-    python3 scripts/check_route.py --route "17,16 17,3 3,3" --direct
+    python3 tools/check_route.py --route "3,3 3,22 17,22 17,16"
+    python3 tools/check_route.py --route "17,16 17,3 3,3" --direct
 
 两个问题分开答：
 
@@ -23,8 +23,21 @@ import math
 import os
 import sys
 
-DEFAULT_LAYOUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              'src', 'contest_mission', 'config', 'sample_room_layout.yaml')
+def _find_layout():
+    """往上找布局文件。本脚本在选手目录的 tools/ 下，布局在仓库的
+    src/contest_mission/config/ 里——往上逐级找，这样整个选手目录被挪到
+    别处也还能工作，不写死相对层数。"""
+    d = os.path.dirname(os.path.abspath(__file__))
+    rel = os.path.join('src', 'contest_mission', 'config', 'sample_room_layout.yaml')
+    for _ in range(6):
+        p = os.path.join(d, rel)
+        if os.path.exists(p):
+            return p
+        d = os.path.dirname(d)
+    return rel          # 找不到就交给 --layout 或报错
+
+
+DEFAULT_LAYOUT = _find_layout()
 INFLATE_M = 0.8      # ego_planner 的膨胀半径，算净宽时两边各扣这么多
 SAMPLES = 801
 
