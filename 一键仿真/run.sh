@@ -27,13 +27,11 @@
 #   5. 跑选手程序（长机僚机各一个容器）
 #   6. 收尾：让监视存图、修正日志属主、打印结果
 #
-# 这个目录里的 5 个文件就是实际跑起来的那 5 个：三个任务程序 + 监视程序 +
-# 本脚本。外部依赖只剩 contestant_template/utils.py 一个模块（公共工具箱：
-# land_or_confirm / transfer_to / descend_onto / fire_launcher）——2026-09-30
-# 把原先散在两个**已过时**示例里的 descend_onto、fire_launcher 搬进去了，
-# 那两个示例的任务流程还用着老场景 fire_drill_room 的坐标，不该再被依赖。
-# 脚本把本目录挂成 /workspace（优先）、contestant_template 挂成 /deps 补那一个
-# 模块，所以**跑的是本目录这几份**，不是 contestant_template 里的。
+# 这个目录里的 .py 就是实际跑起来的那几份——启动前自动从 contestant_template
+# 同步：lite 版来自顶层，normal 版（formation/groundfire/highrise/mission）和
+# 它们依赖的 utils.py 来自 contestant_template/normal/。同步后在本目录是平铺的，
+# 整个目录挂成 /workspace，所以 normal 版的 `import utils` 就地解析，不用再
+# 另挂 /deps。要跑本目录里手改过的版本就加 --no-sync。
 set -eo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,11 +135,17 @@ fi
 # 要跑本目录里手改过的版本就加 --no-sync。
 if [ "$SYNC" = "1" ]; then
     n=0
-    for f in formation.py groundfire.py highrise.py mission.py \
-             formation_lite.py groundfire_lite.py highrise_lite.py mission_lite.py; do
+    # lite 版在 contestant_template/ 顶层，详细版（normal）在 normal/ 子目录，
+    # utils.py 只有 normal 版用得上。同步到本目录后都是平铺的。
+    for f in formation_lite.py groundfire_lite.py highrise_lite.py mission_lite.py; do
         src="$ROOT/contestant_template/$f"
         [ -f "$src" ] || continue
         cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }
+    done
+    for f in formation.py groundfire.py highrise.py mission.py utils.py; do
+        src="$ROOT/contestant_template/normal/$f"
+        [ -f "$src" ] || continue
+        cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 normal/$f"; n=$((n+1)); }
     done
     for f in monitor.py referee.py; do
         src="$ROOT/scripts/$f"
@@ -235,19 +239,19 @@ if [ "$NEED_REFEREE" = "1" ]; then
 fi
 
 # ---- 6. 跑选手程序 ----
-# 本目录挂 /workspace（优先），contestant_template 挂 /deps 补三个依赖模块；
+# 本目录挂 /workspace。normal 版程序要 import utils/formation/highrise，这些
+# 已经跟着同步到本目录了，所以 /workspace 一个就够，不再另挂 /deps；
 # /etc/localtime 挂进去，照片时间戳和统计里的时刻才是本地时间（否则是 UTC）。
 # PYTHONPATH 必须**在镜像原值后面追加**，不能直接覆盖：镜像 ENV 里带着
 # /opt/quadrotor_msgs_install/...，`-e PYTHONPATH=/workspace:/deps` 会把它整个
 # 顶掉，飞起来就是 ModuleNotFoundError: No module named 'quadrotor_msgs'。
 BASE_PYPATH="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" \
                | sed -n 's/^PYTHONPATH=//p' | head -1)"
-PYPATH="/workspace:/deps${BASE_PYPATH:+:$BASE_PYPATH}"
+PYPATH="/workspace${BASE_PYPATH:+:$BASE_PYPATH}"
 PYPATH="${PYPATH%:}"      # 镜像原值自带尾部冒号，空条目会把 CWD 也塞进 sys.path
 COMMON=(--network host
         -v /etc/localtime:/etc/localtime:ro
         -v "$HERE:/workspace"
-        -v "$ROOT/contestant_template:/deps:ro"
         -v "$LOGDIR:/logs"
         -e PYTHONPATH="$PYPATH")
 EXTRA=()

@@ -1,5 +1,11 @@
-# 选手容器的网络参数（被 运行仿真.sh 和 /home/robots/ai_uav/start_*.sh 用 source 引入，
-# 不单独运行）。
+# 选手容器的网络参数（用 source 引入，不单独运行）。
+#
+# ⚠️ 仓库外有三个脚本用**绝对路径** source 这个文件，别挪别改名：
+#     /home/robots/ai_uav/start_contestant_task.sh
+#     /home/robots/ai_uav/start_contestant_shell.sh
+#     /home/robots/ai_uav/start_sound_light_server.sh   ← 声光常驻程序靠它
+# 原来还有 contestant_template/运行仿真.sh 也 source 它，那套旧入口已于
+# 2026-10-01 删除（统一用 一键仿真/run.sh）。
 #
 # 仿真和真机用两个不同的 ROS_DOMAIN_ID，互相隔离，选手代码不会连错目标：
 #   仿真 = 21：镜像自带的 DDS 配置只走本机回环（lo），跟同一台电脑上的仿真容器通信。

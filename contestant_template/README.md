@@ -1,83 +1,57 @@
 # 选手代码目录
 
-你要动的只有 `我的任务.py`。其余文件分三类：**公共工具箱**、**四个考核程序**、
-**四个简化版**。
+**顶层四个 `*_lite.py` 就是选手程序。** 它们短到能一眼看完，飞行编排之外的
+东西全在 SDK 里。
+
+| 文件 | 行数 | 任务 |
+|---|---|---|
+| `formation_lite.py` | 38 | 编队飞行 |
+| `groundfire_lite.py` | 64 | 地面火情：侦查 → 取物资 → 投弹 → 编队返航 |
+| `highrise_lite.py` | 107 | 高层火情：巡检拍摄 → 协同灭火 → 编队返回 |
+| `mission_lite.py` | 197 | 综合：三轮连贯，编队 + 两种火情（随机、两轮不重复） |
 
 ## 从哪开始看
 
-| 想做什么 | 看哪个 |
-|---|---|
-| 写自己的任务 | `我的任务.py`（固定文件名，不要改名） |
-| 查 SDK 有哪些能力 | [`../src/contest_sdk/API参考.md`](../src/contest_sdk/API参考.md)，顶部有"常用的 20 个" |
-| 看一个完整任务怎么写 | `formation_lite.py`（38 行）是最短的，`mission_lite.py` 是最全的 |
-| 看某个动作的底层细节 | 对应的老版（`formation.py` 等），里面写满了踩坑记录 |
+1. `formation_lite.py` —— 38 行，最短的一个完整双机任务，看懂它就懂了骨架
+2. [`../src/contest_sdk/API参考.md`](../src/contest_sdk/API参考.md) —— 80 个方法分 12 类，顶部有"常用的 20 个"
+3. `mission_lite.py` —— 最全的一个，三轮编排、两种火情、跨机握手都在里面
 
-## 文件清单
-
-**公共工具箱**（被下面的程序 import，别删）
-
-- `utils.py` —— `land_or_confirm` / `transfer_to` / `descend_onto` / `fire_launcher`
-
-**四个考核程序**（样题场景 `sample_room`，写得详细，每个决定都注明了为什么）
-
-| 文件 | 任务 |
-|---|---|
-| `formation.py` | 编队飞行 |
-| `groundfire.py` | 地面火情：侦查 → 取物资 → 投弹 → 编队返航 |
-| `highrise.py` | 高层火情：巡检拍摄 → 协同灭火 → 编队返回 |
-| `mission.py` | 综合：三轮连贯，编队 + 两种火情（火情随机、两轮不重复） |
-
-**四个简化版**（`*_lite.py`，行为跟上面**完全相同**，实现搬进了 SDK）
-
-| 文件 | 行数 | 对应老版 |
-|---|---|---|
-| `formation_lite.py` | 38 | 841 |
-| `groundfire_lite.py` | 64 | 284 |
-| `highrise_lite.py` | 107 | 747 |
-| `mission_lite.py` | 197 | 617 |
-
-两版用的是**同一组跨机事件名**，所以可以混搭（lite 长机配老版僚机也能飞）。
-
-**启动脚本**
-
-- `运行仿真.sh` / `运行仿真.bat` / `运行真机.sh` —— 跑 `我的任务.py` 用
-- `contestant_network.sh` —— 网络配置，容器启动时要用，别动
+想知道某个动作底层到底怎么做的，去 `normal/` 看对应的详细版。
 
 ## 怎么跑
 
-跑自己的 `我的任务.py`：
-
-```bash
-bash 运行仿真.sh
-```
-
-跑上面八个程序里的任何一个，用仓库根的一键脚本（参数就是文件名）：
-
 ```bash
 cd ../一键仿真
-./run.sh formation_lite        # .py 可省，能 Tab 补全
-./run.sh mission
-./stop.sh                      # 一键清理
+./run.sh formation_lite        # 参数就是程序文件名，.py 可省，能 Tab 补全
+./run.sh mission_lite
+./stop.sh                      # 一键清理所有仿真容器
+./run.sh mission_lite --keep   # 跑完保留容器，便于翻日志
 ```
 
-## 飞之前先跑这两样
+把自己写的程序放进 `一键仿真/` 就能同样跑：`./run.sh 我的程序`。
+
+## 飞之前 / 飞之后
 
 ```bash
-# 航线安全：算每一段离所有障碍的余量。打算用 goto_direct 时尤其要跑
+# 飞之前：航线安全。算每一段离所有障碍的余量，用 goto_direct 时尤其要跑
 python3 ../scripts/check_route.py --route "3,3 3,22 17,22 17,16"
 
-# 静态自检：抓"调了不存在的函数"这类 py_compile 抓不到、一飞就崩的错
-python3 ../scripts/check_python_static.py 我的任务.py
-```
+# 飞之前：静态自检。抓"调了 SDK 没有的方法"这类一飞就崩的错
+python3 ../scripts/check_python_static.py formation_lite.py
 
-飞完了看时间线：
-
-```bash
+# 飞之后：时间线
 python3 ../scripts/timeline.py --events     # 两机事件并排，排编队死锁用
 python3 ../scripts/timeline.py --problems   # 只看异常
 ```
 
-## archive/
+## 目录
 
-旧场景 `fire_drill_room` 的示例，**坐标系跟现在的样题场景不一样，不能直接跑**。
-留着是因为里面有些写法仍有参考价值。见 [`archive/README.md`](archive/README.md)。
+```
+.                      四个 *_lite.py —— 选手程序
+├── normal/            详细版：同样四个任务，但把实现摊开写，每个决定都注明了为什么
+├── archive/           旧场景 fire_drill_room 的示例，坐标系不同，跑不了
+└── contestant_network.sh   共用网络配置，仓库外的 start_*.sh 靠它，别挪别改名
+```
+
+`normal/` 和 `*_lite.py` **行为完全相同**，用的也是同一组跨机事件名，所以可以
+混搭（lite 长机配 normal 僚机也能飞）。
