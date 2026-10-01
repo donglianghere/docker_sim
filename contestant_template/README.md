@@ -10,20 +10,60 @@
 | `highrise_lite.py` | 107 | 高层火情：巡检拍摄 → 协同灭火 → 编队返回 |
 | `mission_lite.py` | 197 | 综合：三轮连贯，编队 + 两种火情（随机、两轮不重复） |
 
-## 参数不用记
+## 参数不用记：让编辑器提示
 
-本目录带了 `pyrightconfig.json` 和 `.vscode/settings.json`，用 VS Code
-（或任何支持 pyright/pylance 的编辑器）打开**这个目录**，打 `sdk.` 就会弹出
-全部方法；鼠标悬停能看到完整签名、每个参数的说明和踩过的坑。写错参数名当场
-标红。
+### 怎么开起来
+
+**1. 装 VS Code，再装 Python 扩展**（扩展市场搜 `Python`，微软出的那个，
+会连带装上 Pylance——真正提供补全的是它）。
+
+**2. 用 VS Code 打开 `docker_sim` 仓库目录，或者直接打开本目录**，两个都行，
+配置文件两边都放了。
+
+**3. 打开任意一个 `*_lite.py`，右下角状态栏确认解释器选的是 python3**
+（点一下可以切换；选哪个 python3 都行，这里只做静态分析、不真的运行）。
+
+### 效果
 
 ```python
-def recon(sdk: DroneSDK):      # ← 这个标注不能省，省了编辑器就不知道 sdk 是什么
-    sdk.                       # ← 这里会弹出全部方法
+def recon(sdk: DroneSDK):
+    sdk.          # ← 打到这个点，自动弹出全部方法列表
 ```
 
-`contest_sdk` 装在 docker 镜像里、宿主机上没有，但**静态分析不执行代码**，
-所以宿主机不装 ROS 也照样补全。
+- **悬停在方法名上** → 浮出完整签名、一句话说明、每个参数的意思、踩过的坑
+- **打完左括号** → 参数提示条跟着出来，当前打到第几个参数会高亮
+- **参数名写错** → 当场红波浪线，比如 `sdk.takeoff(bogus=1)` 报
+  `No parameter named "bogus"`
+- **传错类型** → 同样当场标出来
+
+### 两个前提，缺一个就没有提示
+
+**① 函数参数必须标注类型。** 这是最容易漏的一条：
+
+```python
+def recon(sdk):              # ✗ 编辑器不知道 sdk 是什么，打 sdk. 什么都没有
+def recon(sdk: DroneSDK):    # ✓
+```
+
+**② 工作区根目录要有配置文件。** 配置只在**工作区根目录**生效，所以仓库根和
+本目录各放了一份 `pyrightconfig.json` + `.vscode/settings.json`。开到别的
+目录（比如只开 `normal/`）就会报 `"DroneSDK" is unknown import symbol`，
+那说明开错目录了，不是代码有问题。
+
+### 为什么宿主机没装 ROS 也能用
+
+`contest_sdk` 装在 docker 镜像里，宿主机上确实没有。但**静态分析只读源码、
+不执行代码**，配置里的 `extraPaths` 指向仓库里的 SDK 源码
+（`src/contest_sdk`），所以不需要宿主机能真正 import 它。
+
+### 命令行也能查
+
+```bash
+pip install pyright        # 第一次装
+cd contestant_template && pyright        # 查一遍自己的程序
+```
+
+`run.sh` 起飞前也会顺带跑一次（装了才跑，**只提示不拦飞行**）。
 
 ## 从哪开始看
 
