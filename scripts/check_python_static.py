@@ -5,6 +5,9 @@
    函数里用就是运行时 NameError。只看"模块里有没有定义过"抓不到这个。
 2. 模块级未定义名字（漏 import）。
 3. 被 create_subscription/create_timer 引用但不存在的 self._on_* 回调。
+4. 选手程序里调用了 SDK 没有的方法（`sdk.xxx()`）——按 capabilities.py 的
+   DroneSDK 真实成员表核对。2026-10-01 踩的：凭记忆写了 `sdk.own_pad()` /
+   `sdk.progress()`，两个都不存在，而前三类检查全过（它们只看 self.*）。
 
 实际踩过的：tf2_ros 漏 import（节点起不来）、PoseStamped 只在另一个方法里
 局部 import（订阅那行运行时 NameError）、批量替换代码时把 _on_range 方法
@@ -14,6 +17,7 @@
 """
 import ast
 import builtins
+import os
 import sys
 
 SAFE = set(dir(builtins)) | {'__file__', '__name__', '__doc__', 'self', 'cls'}
@@ -85,6 +89,52 @@ def scopes(tree):
                         stack.append((m, visible | bound_names(m)))
 
 
+SDK_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       'src', 'contest_sdk', 'contest_sdk', 'capabilities.py')
+
+
+def sdk_members(src_path=SDK_SRC):
+    """DroneSDK 的真实成员名集合。按 AST 读源码，不 import——宿主机上通常没装
+    这个包（它在 contestant-sdk 镜像里），靠 import 的话这条检查永远跑不起来。
+
+    返回 None 表示找不到源码，调用方就跳过这条检查。
+    """
+    try:
+        tree = ast.parse(open(src_path, encoding='utf-8').read())
+    except Exception:
+        return None
+    cls = next((n for n in tree.body
+                if isinstance(n, ast.ClassDef) and n.name == 'DroneSDK'), None)
+    if cls is None:
+        return None
+    out = set()
+    for n in ast.walk(cls):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(n.name)
+        elif isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Store) \
+                and isinstance(n.value, ast.Name) and n.value.id in ('self', 'sdk'):
+            # self.x = ... 是实例属性；sdk.x = ... 是 DroneSDK.run 替选手设的
+            out.add(n.attr)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            out.add(n.id)      # 类属性（常量）
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+    return out
+
+
+def check_sdk_calls(tree, members):
+    """选手程序里 `sdk.xxx` 读到的名字，必须是 DroneSDK 的成员，或者本文件
+    自己给 sdk 挂上去的（`sdk.PHOTO_DIR = ...` 这种有意的实例属性覆盖）。"""
+    own = {n.attr for n in ast.walk(tree)
+           if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Store)
+           and isinstance(n.value, ast.Name) and n.value.id == 'sdk'}
+    used = {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load)
+            and isinstance(n.value, ast.Name) and n.value.id == 'sdk'}
+    bad = sorted(a for a in used - members - own if not a.startswith('__'))
+    return [f'SDK 没有这些成员={bad}'] if bad else []
+
+
 def check(path):
     src = open(path, encoding='utf-8').read()
     # ast.parse 查不出全部语法错：compile() 才做符号表检查，"global 声明在使用
@@ -116,6 +166,13 @@ def check(path):
     missing = sorted(a for a in referenced if a.startswith('_on_') and a not in defined)
     if missing:
         problems.append(f'缺失回调={missing}')
+
+    # 第 4 类：sdk.xxx 核对。只对真的用了 contest_sdk 的文件做，而且不查
+    # capabilities.py 自己（那里面的 sdk 是 DroneSDK.run 里的局部变量）。
+    if 'contest_sdk' in src and not path.endswith('capabilities.py'):
+        members = sdk_members()
+        if members:
+            problems += check_sdk_calls(tree, members)
     return problems
 
 

@@ -5,6 +5,9 @@
 #   ./run.sh 任务2         # 地面火情：侦查 -> 取物资 -> 投弹 -> 编队返航
 #   ./run.sh 任务3         # 高层火情：巡检拍摄 -> 协同灭火 -> 编队返回
 #   ./run.sh 综合           # 三轮连贯：编队 + 两种火情（火情随机、两轮不重复）
+#
+#   以上四个场景各有一份"简化版"：编队lite / 任务2lite / 任务3lite / 综合lite。
+#   行为相同，实现搬进了 SDK（选手代码少一个数量级）。老版一行没动，两版并存。
 #   ./run.sh 任务3 --keep  # 结束后保留选手容器，便于翻日志
 #   ./run.sh --no-sync     # 跑本目录里手改过的版本，不从仓库同步
 #
@@ -40,6 +43,10 @@ while [ $# -gt 0 ]; do
         任务2|task2)     SCENE=任务2; shift ;;
         任务3|task3)     SCENE=任务3; shift ;;
         综合|mission)    SCENE=综合; shift ;;
+        编队lite|lite)   SCENE=编队lite; shift ;;
+        任务2lite)       SCENE=任务2lite; shift ;;
+        任务3lite)       SCENE=任务3lite; shift ;;
+        综合lite)        SCENE=综合lite; shift ;;
         --spacing)       SPACING="$2"; shift 2 ;;
         --no-restart)    RESTART=0; shift ;;
         --no-sync)       SYNC=0; shift ;;
@@ -55,6 +62,10 @@ case "$SCENE" in
     任务2) SCRIPT=groundfire.py ;;
     任务3) SCRIPT=highrise.py ;;
     综合) SCRIPT=mission.py ;;
+    编队lite) SCRIPT=formation_lite.py ;;
+    任务2lite) SCRIPT=groundfire_lite.py ;;
+    任务3lite) SCRIPT=highrise_lite.py ;;
+    综合lite) SCRIPT=mission_lite.py ;;
 esac
 
 # 航线（世界坐标）。只有 formation.py 吃 --route；两个任务脚本的航点写在自己
@@ -72,6 +83,21 @@ C_LEADER=sim_leader
 C_FOLLOWER=sim_follower
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
+
+# ---- 互斥锁：同一时刻只允许一个 run.sh 操作这套仿真 ----
+# 两个 run.sh 并行会互相拆对方的容器（compose down 是全局的），现象是飞到
+# 一半仿真突然没了、或者监视/裁判连到了另一轮的飞机上。2026-10-01 收尾时
+# 发现上一轮摔机后 run.sh 还在后台等一个永远等不到的容器，就是靠这个锁
+# 能第一时间看出来。
+LOCK=/tmp/docker_sim_run.lock
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    holder="$(cat "$LOCK" 2>/dev/null)"
+    echo "!! 已经有一个 run.sh 在跑这套仿真（PID ${holder:-未知}）。" >&2
+    echo "   等它结束，或者 kill ${holder:-<PID>} 之后再来。" >&2
+    exit 1
+fi
+echo $$ >&9
 cleanup() { [ "$KEEP" = "1" ] && return 0; docker rm -f "$C_LEADER" "$C_FOLLOWER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -117,7 +143,8 @@ fi
 # 要跑本目录里手改过的版本就加 --no-sync。
 if [ "$SYNC" = "1" ]; then
     n=0
-    for f in formation.py groundfire.py highrise.py mission.py; do
+    for f in formation.py groundfire.py highrise.py mission.py \
+             formation_lite.py groundfire_lite.py highrise_lite.py mission_lite.py; do
         src="$ROOT/contestant_template/$f"
         [ -f "$src" ] || continue
         cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }
@@ -180,7 +207,7 @@ log "Gazebo 界面 ${gz_n:-0} 个、RViz ${rv_n:-0} 个"
 # "任务结束"判据，会在半道退出（用户 2026-09-30 发现"监控也自己掉了"）。
 # 侦察机只在整个任务结束时才降落，拿它当判据最准。
 MON_END=""
-[ "$SCENE" = "综合" ] && MON_END="--end-on-leader-land"
+case "$SCENE" in 综合|综合lite) MON_END="--end-on-all-land" ;; esac
 MON_OUT="/logs/${SCRIPT%.py}_formation.png"
 MON_LOG="/logs/${SCRIPT%.py}_monitor.log"
 log "启动监视窗口（报告将存到 runtime_logs/$(basename "$MON_OUT")）"
@@ -197,7 +224,7 @@ docker exec -d -e DISPLAY="$DISPLAY" "$FSNX01" bash -lc "
 # ---- 5.5 综合任务：起"出题裁判" ----
 # 它负责把两处火情标识先从 world 里删掉，等侦察机过 G 点再把本轮抽中的那个
 # 生成回来（两轮不重复）。只有综合任务需要——三个单任务的火情是固定摆好的。
-if [ "$SCENE" = "综合" ]; then
+if [ "$SCENE" = "综合" ] || [ "$SCENE" = "综合lite" ]; then
     log "启动出题裁判（火情随机出现，两轮不重复）"
     docker cp "$HERE/referee.py" "$SIMWORLD:/tmp/referee.py" >/dev/null 2>&1 || true
     docker exec -d "$SIMWORLD" bash -lc "
@@ -228,7 +255,7 @@ COMMON=(--network host
         -v "$LOGDIR:/logs"
         -e PYTHONPATH="$PYPATH")
 EXTRA=()
-[ "$SCENE" = "编队" ] && EXTRA=(--route "$ROUTE")
+[ "$SCENE" = "编队" ] && EXTRA=(--route "$ROUTE")   # lite 版航线写在程序里，不吃 --route
 
 log "启动选手程序：$SCRIPT（长机=$LEADER 僚机=$FOLLOWER 间距=${SPACING}米）"
 docker run -d --name "$C_LEADER" "${COMMON[@]}" "$IMAGE" \
@@ -275,7 +302,9 @@ for c in "$C_LEADER" "$C_FOLLOWER"; do
 done
 echo
 echo "报告图：runtime_logs/$(basename "$MON_OUT")"
-[ -d "$LOGDIR/任务3照片" ] && echo "照片：  runtime_logs/任务3照片/"
+for d in 任务2照片 任务3照片 综合任务照片; do
+    [ -d "$LOGDIR/$d" ] && echo "照片：  runtime_logs/$d/ （$(ls -1 "$LOGDIR/$d" | wc -l) 张）"
+done
 [ "$KEEP" = "1" ] && echo "（--keep：选手容器保留，docker logs $C_LEADER 看完整日志）"
 echo "=============================================="
 exit "$rc"
