@@ -32,12 +32,37 @@ C_ROUTE = "#2ca02c"
 C_PAD = "#333333"
 C_FIRE = "#d62728"
 C_SUPPLY = "#7f4fbf"
+C_OBS = "#0b7a5a"      # 高层巡检观察位 M/N
+
+
+
+def read_observation_points(highrise_path):
+    """从 highrise.py 解析出观察位 M/N。
+
+    不在这儿另写一份坐标：权威值是 highrise.py 的 POINT_M / POINT_N
+    （INSPECT_STATIONS 里引用），写死在图里迟早跟飞行代码对不上。
+    解析不到就返回空，图照画，只是少两个标注。
+    """
+    try:
+        import ast
+        tree = ast.parse(open(highrise_path, encoding="utf-8").read())
+        out = {}
+        for n in tree.body:
+            if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name):
+                if n.targets[0].id in ("POINT_M", "POINT_N"):
+                    out[n.targets[0].id[-1]] = ast.literal_eval(n.value)
+        return out
+    except Exception as exc:
+        print(f"[画样题场景示意图] 读不到观察位（{exc}），图里不标 M/N")
+        return {}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--layout", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--highrise", default="contestant_template/highrise.py",
+                    help="解析观察位 M/N 用，见 read_observation_points")
     args = ap.parse_args()
     L = yaml.safe_load(open(args.layout, encoding="utf-8"))
 
@@ -67,9 +92,12 @@ def main():
         if key in _seen:
             continue
         _seen.add(key)
+        # F 是虚拟点、夹在 E->F->G 两条线中间，标注往下排，别压在航线上
+        dx, dy, va = (0, -10, "top") if w["id"] == "F" else (9, 6, "baseline")
         ax.annotate(f"航点{w['id']}\n({w['x']:.0f},{w['y']:.0f})",
-                    (w["x"], w["y"]), textcoords="offset points", xytext=(9, 6),
-                    fontsize=9, color=C_ROUTE, fontweight="bold")
+                    (w["x"], w["y"]), textcoords="offset points", xytext=(dx, dy),
+                    fontsize=9, color=C_ROUTE, fontweight="bold",
+                    ha="center" if w["id"] == "F" else "left", va=va)
 
     # ---- 立柱（含正东孪生柱）----
     S = L["pillar_size"]
@@ -86,17 +114,48 @@ def main():
                     xytext=(-6, 8), fontsize=8.5, color=C_PILLAR,
                     fontweight="bold", ha="right")
 
-    # ---- 高层着火点（贴在某根柱子的某个面）----
+    # ---- 高层着火点：8 个随机候选窗口 ----
+    # 2026-09-30 起高层火情是**随机**的（layout 的 fire_apriltag_random）：
+    # 1#/2# 两栋楼 x 二楼/三楼 x 西/东单元，共 8 个候选，每轮抽一个。
+    # 候选位置是算出来的，不是写死的——跟 scenario_reset_node 和世界生成脚本
+    # 用的是同一份 yaml 和同一套几何，不会各说各话。
+    fr = L.get("fire_apriltag_random") or {}
     fam = L["fire_apriltag_marker"]
-    fp = next(q for q in L["pillars"] if q["id"] == fam["pillar_id"])
     d = fam["mount_standoff_m"]
-    off = {"-y": (0, -d), "+y": (0, d), "-x": (-d, 0), "+x": (d, 0)}[fam["face"].lower()]
-    fx, fy = fp["x"] + off[0], fp["y"] + off[1]
-    ax.plot(fx, fy, marker="s", ms=9, color=C_FIRE, zorder=7)
-    ax.annotate(f"高层着火点 h={L['fire_apriltag_height_m']}m\n"
-                f"贴 {fam['pillar_id'].replace('pillar_','')}# 的 {fam['face']} 面",
-                (fx, fy), textcoords="offset points", xytext=(10, -22),
-                fontsize=8.5, color=C_FIRE, fontweight="bold")
+    if fr.get("enabled"):
+        sp = float((L.get("floor_rings") or {}).get("spacing_m", 1.0))
+        cands = []
+        for b_id in fr.get("buildings", []):
+            bp = next(q for q in L["pillars"] if q["id"] == b_id)
+            for floor in fr.get("floors", []):
+                for unit in (0, 1):
+                    cands.append((bp["x"] + (S if unit else 0.0), bp["y"] - d,
+                                  (floor - 1) * sp + sp / 2.0,
+                                  b_id.replace("pillar_", ""), floor,
+                                  "西" if unit == 0 else "东"))
+        for cx_, cy_, cz_, bid, fl, un in cands:
+            ax.plot(cx_, cy_, marker="s", ms=7, mfc="none", mec=C_FIRE, mew=1.6, zorder=7)
+        # 标注挂在每栋楼下方一次，别每个候选都写一行糊成一团
+        for b_id in fr.get("buildings", []):
+            bp = next(q for q in L["pillars"] if q["id"] == b_id)
+            ax.annotate(f"{b_id.replace('pillar_','')}# 高层着火点候选\n"
+                        f"2/3 层 × 西/东单元 共 4 处\n"
+                        f"h={'/'.join(str((f-1)*sp+sp/2) for f in fr.get('floors', []))}m，"
+                        f"朝 {fam['face']} 面",
+                        (bp["x"] + S / 2, bp["y"] - d), textcoords="offset points",
+                        xytext=(0, -14), fontsize=8, color=C_FIRE,
+                        fontweight="bold", ha="center", va="top")
+        ax.plot([], [], marker="s", ms=7, mfc="none", mec=C_FIRE, mew=1.6,
+                ls="none", label="高层着火点候选（每轮随机取1）")
+    else:
+        fp = next(q for q in L["pillars"] if q["id"] == fam["pillar_id"])
+        off = {"-y": (0, -d), "+y": (0, d), "-x": (-d, 0), "+x": (d, 0)}[fam["face"].lower()]
+        fx, fy = fp["x"] + off[0], fp["y"] + off[1]
+        ax.plot(fx, fy, marker="s", ms=9, color=C_FIRE, zorder=7)
+        ax.annotate(f"高层着火点 h={L['fire_apriltag_height_m']}m\n"
+                    f"贴 {fam['pillar_id'].replace('pillar_','')}# 的 {fam['face']} 面",
+                    (fx, fy), textcoords="offset points", xytext=(10, -22),
+                    fontsize=8.5, color=C_FIRE, fontweight="bold")
 
     # ---- 障碍圆柱 ----
     c = L["obstacle_cylinder"]
@@ -127,6 +186,16 @@ def main():
         ax.annotate(f"{label} ({g['x']:.0f},{g['y']:.0f})\nAprilTag ID{g['apriltag_id']}",
                     (g["x"], g["y"]), textcoords="offset points", xytext=(10, 6),
                     fontsize=8.5, color=color, fontweight="bold")
+
+    # ---- 高层巡检观察位 M / N ----
+    for name, (ox, oy) in read_observation_points(args.highrise).items():
+        ax.plot(ox, oy, marker="^", ms=10, color=C_OBS, zorder=6)
+        # y=16 这条线上挤着 E、G、地面火情点，观察位标注一律往下排，别横着放
+        ax.annotate(f"观察位{name}\n({ox:.0f},{oy:.0f})",
+                    (ox, oy), textcoords="offset points", xytext=(0, -11),
+                    fontsize=8.5, color=C_OBS, fontweight="bold",
+                    ha="center", va="top")
+    ax.plot([], [], marker="^", ms=10, color=C_OBS, ls="none", label="高层巡检观察位")
 
     # ---- 起降点 ----
     for pad in L["takeoff_landing_pads"]:
