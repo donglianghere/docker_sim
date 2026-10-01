@@ -46,6 +46,9 @@ from contest_sdk import DroneSDK
 
 CRUISE_AGL_M = formation.CRUISE_AGL_M
 SPACING_M = 4.0
+# 地面火情扑灭后的交付照片存这儿。高层轮的巡检照片仍走 highrise.PHOTO_DIR
+# （/logs/任务3照片），那条路没动。
+PHOTO_DIR = '/logs/综合任务照片'
 
 ROUTE_A = (3.0, 3.0)
 ROUTE_B = (3.0, 22.0)
@@ -198,7 +201,7 @@ def pick_up_extinguisher(sdk):
 
 
 def drop_on_fire(sdk, fx, fy):
-    """飞到通报的火情坐标上方，对准，投放。抄自 groundfire.supply()。"""
+    """飞到通报的火情坐标上方，对准，投放，拍照回传。抄自 groundfire.supply()。"""
     _goto_world(sdk, fx, fy, '地面火情点')
     try:
         sdk.center_on_target(GROUND_FIRE, timeout=40.0)
@@ -207,6 +210,10 @@ def drop_on_fire(sdk, fx, fy):
         print(f'[{sdk.namespace}] 没对上火情标识（{exc}），按通报坐标投放', flush=True)
     sdk.play_sound_light('任务机投放灭火弹')
     _drive_servos(sdk, DROP_PWM, '投放')
+    # 扑灭后拍一张下视照片回传，作为灭火完成的交付凭证（用户 2026-10-01）。
+    # 理由同 groundfire.py 里那段：下视、拍不到不中断、不发声光事件。
+    sdk.PHOTO_DIR = PHOTO_DIR
+    sdk.snapshot('地面火情已扑灭', camera='down')
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ from contest_sdk.exceptions import ActionFailedError
 
 CRUISE_AGL_M = formation.CRUISE_AGL_M      # 2.0，跟编队段保持同一个巡航高度
 SPACING_M = 4.0
+PHOTO_DIR = '/logs/任务2照片'       # 拍照存这儿（/logs 是挂给地面站的目录）
 
 ROUTE_A = (3.0, 3.0)
 ROUTE_B = (3.0, 22.0)
@@ -244,6 +245,12 @@ def supply(sdk):
         print(f'[{sdk.namespace}] 没对上火情标识（{exc}），按通报坐标投放', flush=True)
     sdk.play_sound_light('任务机投放灭火弹')
     _drive_servos(sdk, DROP_PWM, '投放')
+    # 扑灭后拍一张照片回传，作为灭火完成的交付凭证（用户 2026-10-01）。用**下视**：
+    # 这会儿飞机就悬在火情点上方，火情标识在下视画面正中。snapshot() 自带
+    # “拍不到也不让任务失败”，并且**不发声光事件**——声光事件是固定枚举，
+    # 自造一个“拍照”会直接抛 ValueError 把整个任务打断。
+    sdk.PHOTO_DIR = PHOTO_DIR
+    sdk.snapshot('地面火情已扑灭', camera='down')
     sdk.send_to_teammate(EV_DROPPED)
     print(f'[{sdk.namespace}] 已通知侦察机', flush=True)
 
