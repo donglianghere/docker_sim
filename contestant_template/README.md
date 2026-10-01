@@ -20,15 +20,17 @@
 
 ## 怎么跑
 
+**所有操作都在这个目录里完成，不用切目录。**
+
 ```bash
-cd ../一键仿真
 ./run.sh formation_lite        # 参数就是程序文件名，.py 可省，能 Tab 补全
-./run.sh mission_lite
-./stop.sh                      # 一键清理所有仿真容器
 ./run.sh mission_lite --keep   # 跑完保留容器，便于翻日志
+./stop.sh                      # 一键清理所有仿真容器
+./stop.sh --check              # 只看现在还剩什么，不动手
 ```
 
-把自己写的程序放进 `一键仿真/` 就能同样跑：`./run.sh 我的程序`。
+自己写的程序放在本目录就能同样跑：`./run.sh 我的程序`。
+`run.sh` 按名字先在本目录找，找不到再去 `normal/`。
 
 ## 飞之前 / 飞之后
 
@@ -36,20 +38,24 @@ cd ../一键仿真
 # 飞之前：航线安全。算每一段离所有障碍的余量，用 goto_direct 时尤其要跑
 python3 ../scripts/check_route.py --route "3,3 3,22 17,22 17,16"
 
-# 飞之前：静态自检。抓"调了 SDK 没有的方法"这类一飞就崩的错
-python3 ../scripts/check_python_static.py formation_lite.py
-
 # 飞之后：时间线
 python3 ../scripts/timeline.py --events     # 两机事件并排，排编队死锁用
 python3 ../scripts/timeline.py --problems   # 只看异常
 ```
 
+静态自检不用手动跑——`run.sh` 每次起飞前会自动查一遍程序所在目录，不通过就不飞。
+
+```bash
+```
+
 ## 目录
 
 ```
-.                      四个 *_lite.py —— 选手程序
-├── normal/            详细版：同样四个任务，但把实现摊开写，每个决定都注明了为什么
-├── archive/           旧场景 fire_drill_room 的示例，坐标系不同，跑不了
+.
+├── run.sh / stop.sh        跑 / 清理，都在这儿
+├── *_lite.py               四个选手程序
+├── normal/                 详细版：同样四个任务，实现摊开写，每个决定都注明了为什么
+├── archive/                旧场景 fire_drill_room 的示例，坐标系不同，跑不了
 └── contestant_network.sh   共用网络配置，仓库外的 start_*.sh 靠它，别挪别改名
 ```
 

@@ -9,7 +9,7 @@
 # **不碰**其他项目的容器（gcs-*、contest_task_* 这些），只认本套仿真的名字。
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # 选手目录
 ROOT="$(cd "$HERE/.." && pwd)"
 LOCK=/tmp/docker_sim_run.lock
 SIMWORLD=docker_sim-sim-world-1

@@ -1,0 +1,30 @@
+# apriltag_ros参数配置，格式照抄apriltag_ros自带的
+# /opt/ros/humble/share/apriltag_ros/cfg/tags_36h11.yaml，按本项目场景改了
+# family/size/detector几处默认值。
+#
+# ⚠️ size: 0.16这个值是占位（16cm边长，常见AprilTag打印尺寸），不是赛项
+# 实际降落标志物的真实尺寸——正式部署前必须换成实测的真实边长（米），否则
+# 位姿解算里的距离/深度会按比例整体错误（AprilTag从单张图像解算6D位姿依赖
+# "已知边长"这个先验，边长错了位置估计跟着错，角度/姿态部分不受影响）。
+/**:
+    ros__parameters:
+        # 2026-08-22改成compressed——原始未压缩Image在1280x720下发布只能到
+        # ~1Hz(rclpy序列化2.76MB字节数组本身的开销，换RMW也没用，见
+        # image_publisher_node.py文件头/read_hw.md对应小节)，image_publisher_node
+        # 现在发布的是JPEG压缩后的CompressedImage，这里要跟发布端保持一致，
+        # 否则apriltag_ros会去订阅"raw"transport对应的原始话题（根本没人发布）
+        image_transport: compressed
+        family: 36h11           # 最常用、抗干扰能力较强的tag family，除非赛项另有指定标志物规格
+        size: 0.16               # 占位值(米)，务必换成真实标定尺寸，见上面注释
+        max_hamming: 0
+        qos_profile: default
+
+        detector:
+            threads: 2            # Jetson Orin NX有富余CPU核，给2线程不算激进
+            decimate: 2.0         # 降采样加速检测，标准做法，对检测距离有轻微影响
+            blur: 0.0
+            refine: True
+            sharpening: 0.25
+            debug: False
+
+        pose_estimation_method: "pnp"

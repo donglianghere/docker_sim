@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vision_stack</name>
+  <version>0.0.1</version>
+  <description>
+    机载视觉感知：YOLO目标识别+QR识别+AprilTag精准降落+视频回传地面站。
+    独立于flight-stack-hw部署（跟原因见docs/视觉感知vision-stack方案.md），
+    只跟flight-stack共享ROS_DOMAIN_ID做话题级别的互通。这个包目前有YOLO
+    目标识别（camera_capture+手写TensorRT推理）+QR识别两条链路，AprilTag走
+    单独的apriltag_ros包（不在vision_stack包内），视频回传是后续阶段。
+  </description>
+  <maintainer email="todo@todo.todo">todo</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>vision_msgs</depend>
+  <depend>python3-pyzbar</depend>
+  <depend>sensor_msgs</depend>
+  <exec_depend>apriltag_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

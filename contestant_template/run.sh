@@ -14,7 +14,6 @@
 #
 #   ./run.sh                   # 不给就跑 formation.py
 #   ./run.sh highrise --keep   # 结束后保留选手容器，便于翻日志
-#   ./run.sh --no-sync         # 跑本目录里手改过的版本，不从仓库同步
 #
 # 用文件名当参数，是因为它本来就是唯一且无歧义的标识：不用再维护一张
 # "场景名 -> 文件名"的映射表，加新程序也不用动这个脚本。
@@ -27,27 +26,26 @@
 #   5. 跑选手程序（长机僚机各一个容器）
 #   6. 收尾：让监视存图、修正日志属主、打印结果
 #
-# 这个目录里的 .py 就是实际跑起来的那几份——启动前自动从 contestant_template
-# 同步：lite 版来自顶层，normal 版（formation/groundfire/highrise/mission）和
-# 它们依赖的 utils.py 来自 contestant_template/normal/。同步后在本目录是平铺的，
-# 整个目录挂成 /workspace，所以 normal 版的 `import utils` 就地解析，不用再
-# 另挂 /deps。要跑本目录里手改过的版本就加 --no-sync。
+# 程序按名字在本目录找，找不到再去 normal/：
+#     ./                你自己写的程序 + 四个 *_lite.py
+#     ./normal/         详细版四个 + utils.py
+# 找到之后，程序**所在的那个目录**被整个挂成容器里的 /workspace，所以同目录
+# 的依赖（normal 版的 utils.py、彼此之间的 import）就地解析。
+# monitor.py / referee.py 直接从 scripts/ 取。
 set -eo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"          # docker_sim 仓库根
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # 选手目录 = 本脚本所在目录
+ROOT="$(cd "$HERE/.." && pwd)"                       # docker_sim 仓库根（仿真设施）
 
 SCRIPT=formation.py
 SPACING=4.0
 RESTART=1
 KEEP=0
-SYNC=1
 TIMEOUT_S=1500
 while [ $# -gt 0 ]; do
     case "$1" in
         --spacing)       SPACING="$2"; shift 2 ;;
         --no-restart)    RESTART=0; shift ;;
-        --no-sync)       SYNC=0; shift ;;
         --keep)          KEEP=1; shift ;;
         --timeout)       TIMEOUT_S="$2"; shift 2 ;;
         -h|--help)       sed -n '2,26p' "$0"; exit 0 ;;
@@ -89,12 +87,7 @@ echo $$ >&9
 cleanup() { [ "$KEEP" = "1" ] && return 0; docker rm -f "$C_LEADER" "$C_FOLLOWER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-[ -f "$HERE/monitor.py" ] || { echo "!! 本目录缺 monitor.py !!" >&2; exit 1; }
-if [ ! -f "$HERE/$SCRIPT" ]; then
-    echo "!! 本目录没有 $SCRIPT。可跑的程序：" >&2
-    ( cd "$HERE" && ls -1 *.py | grep -v '^monitor\.py$\|^referee\.py$' | sed 's/^/     /' ) >&2
-    exit 1
-fi
+[ -f "$ROOT/scripts/monitor.py" ] || { echo "!! 缺 scripts/monitor.py !!" >&2; exit 1; }
 
 echo "=============================================="
 echo " 一键仿真：$SCRIPT"
@@ -121,43 +114,38 @@ if command -v xhost >/dev/null; then
 fi
 log "DISPLAY=$DISPLAY"
 
-# ---- 2. 静态自检：语法之外，还查"调用了不存在的函数"这类运行时才炸的错 ----
+# ---- 2. 定位程序：按名字去源目录找，不保留副本 ----
+# 2026-10-01：以前 run.sh 住在单独的"一键仿真"目录里，程序要先同步一份副本
+# 过去才能跑——两份真相，同步只是在给它打补丁，而且每次改代码都得来回 cd。
+# 现在脚本跟程序待在同一个目录，按名字就地解析。
+# 查找顺序（先找到先用）：
+#   1. ./        —— 你自己写的程序，和四个 *_lite.py
+#   2. ./normal/ —— 详细版四个 + utils.py
+# 程序所在的那个目录会被整个挂成容器里的 /workspace，所以同目录的依赖
+# （normal 版的 utils.py、彼此之间的 import）就地解析，不用另挂。
+for d in "$HERE" "$HERE/normal"; do
+    [ -f "$d/$SCRIPT" ] && { SRCDIR="$d"; break; }
+done
+if [ -z "${SRCDIR:-}" ]; then
+    echo "!! 找不到 $SCRIPT。可跑的程序：" >&2
+    for d in "$HERE" "$HERE/normal"; do
+        # `|| true`：第一个目录（本目录）通常没有 .py，ls 失败会被
+        # `set -eo pipefail` 当成致命错误，列举还没开始就退出了。
+        ( cd "$d" 2>/dev/null && ls -1 *.py 2>/dev/null \
+          | grep -v '^monitor\.py$\|^referee\.py$\|^utils\.py$' \
+          | sed "s|^|     ${d#$ROOT/}/|" ) >&2 || true
+    done
+    exit 1
+fi
+log "程序：${SRCDIR#$ROOT/}/$SCRIPT"
+
+# ---- 2.5 静态自检：语法之外，还查"调用了不存在的函数"这类运行时才炸的错 ----
 if [ -f "$ROOT/scripts/check_python_static.py" ]; then
-    if ! python3 "$ROOT/scripts/check_python_static.py" "$HERE"/*.py; then
-        echo "!! 本目录的程序静态自检不通过，先修好再飞 !!" >&2
+    if ! python3 "$ROOT/scripts/check_python_static.py" "$SRCDIR"/*.py; then
+        echo "!! ${SRCDIR#$ROOT/} 里的程序静态自检不通过，先修好再飞 !!" >&2
         exit 1
     fi
 fi
-# ---- 2.5 从仓库同步最新版到本目录 ----
-# 本目录这 4 个 .py 是 contestant_template/ 和 scripts/ 的副本，开发都在源头改，
-# 副本不同步就会悄悄跑旧代码。所以**每次启动自动同步**，而不是靠人记得拷贝
-# （用户已经两次要求"把最新版放进去"了，说明手工同步迟早要漏）。
-# 要跑本目录里手改过的版本就加 --no-sync。
-if [ "$SYNC" = "1" ]; then
-    n=0
-    # lite 版在 contestant_template/ 顶层，详细版（normal）在 normal/ 子目录，
-    # utils.py 只有 normal 版用得上。同步到本目录后都是平铺的。
-    for f in formation_lite.py groundfire_lite.py highrise_lite.py mission_lite.py; do
-        src="$ROOT/contestant_template/$f"
-        [ -f "$src" ] || continue
-        cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }
-    done
-    for f in formation.py groundfire.py highrise.py mission.py utils.py; do
-        src="$ROOT/contestant_template/normal/$f"
-        [ -f "$src" ] || continue
-        cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 normal/$f"; n=$((n+1)); }
-    done
-    for f in monitor.py referee.py; do
-        src="$ROOT/scripts/$f"
-        [ -f "$src" ] && { cmp -s "$src" "$HERE/$f" || { cp "$src" "$HERE/$f"; echo "   同步 $f"; n=$((n+1)); }; }
-    done
-    src=""
-    [ -f "$src" ] && { cmp -s "$src" "$HERE/monitor.py" || { cp "$src" "$HERE/monitor.py"; echo "   同步 monitor.py"; n=$((n+1)); }; }
-    [ "$n" = "0" ] && log "本目录已是最新版" || log "已从仓库同步 $n 个文件"
-else
-    log "--no-sync：用本目录现有的版本，不从仓库同步"
-fi
-
 # ---- 3. 起仿真 ----
 docker rm -f "$C_LEADER" "$C_FOLLOWER" >/dev/null 2>&1 || true
 if [ "$RESTART" = "1" ]; then
@@ -210,7 +198,7 @@ case "$SCRIPT" in mission*.py) MON_END="--end-on-all-land" ;; esac
 MON_OUT="/logs/${SCRIPT%.py}_formation.png"
 MON_LOG="/logs/${SCRIPT%.py}_monitor.log"
 log "启动监视窗口（报告将存到 runtime_logs/$(basename "$MON_OUT")）"
-docker cp "$HERE/monitor.py" "$FSNX01:/tmp/monitor.py" >/dev/null 2>&1 || true
+docker cp "$ROOT/scripts/monitor.py" "$FSNX01:/tmp/monitor.py" >/dev/null 2>&1 || true
 docker exec -d -e DISPLAY="$DISPLAY" "$FSNX01" bash -lc "
     source /opt/ros/humble/setup.bash
     export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
@@ -226,7 +214,7 @@ docker exec -d -e DISPLAY="$DISPLAY" "$FSNX01" bash -lc "
 case "$SCRIPT" in mission*.py) NEED_REFEREE=1 ;; *) NEED_REFEREE=0 ;; esac
 if [ "$NEED_REFEREE" = "1" ]; then
     log "启动出题裁判（火情随机出现，两轮不重复）"
-    docker cp "$HERE/referee.py" "$SIMWORLD:/tmp/referee.py" >/dev/null 2>&1 || true
+    docker cp "$ROOT/scripts/referee.py" "$SIMWORLD:/tmp/referee.py" >/dev/null 2>&1 || true
     docker exec -d "$SIMWORLD" bash -lc "
         source /opt/ros/humble/setup.bash
         export ROS_DOMAIN_ID=21 ROS_LOCALHOST_ONLY=0 \
@@ -240,7 +228,7 @@ fi
 
 # ---- 6. 跑选手程序 ----
 # 本目录挂 /workspace。normal 版程序要 import utils/formation/highrise，这些
-# 已经跟着同步到本目录了，所以 /workspace 一个就够，不再另挂 /deps；
+# 程序所在目录整个挂成 /workspace，同目录的依赖就地解析；
 # /etc/localtime 挂进去，照片时间戳和统计里的时刻才是本地时间（否则是 UTC）。
 # PYTHONPATH 必须**在镜像原值后面追加**，不能直接覆盖：镜像 ENV 里带着
 # /opt/quadrotor_msgs_install/...，`-e PYTHONPATH=/workspace:/deps` 会把它整个
@@ -251,7 +239,7 @@ PYPATH="/workspace${BASE_PYPATH:+:$BASE_PYPATH}"
 PYPATH="${PYPATH%:}"      # 镜像原值自带尾部冒号，空条目会把 CWD 也塞进 sys.path
 COMMON=(--network host
         -v /etc/localtime:/etc/localtime:ro
-        -v "$HERE:/workspace"
+        -v "$SRCDIR:/workspace:ro"
         -v "$LOGDIR:/logs"
         -e PYTHONPATH="$PYPATH")
 EXTRA=()
