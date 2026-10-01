@@ -15,7 +15,7 @@ POINT_A, POINT_D = (3.0, 3.0), (17.0, 3.0)
 CRUISE_AGL_M = 2.0
 
 
-def leader(sdk):
+def leader(sdk: DroneSDK):
     """长机：起飞 -> 带队跑航线 -> 回 A 点悬停待命（不降落）。"""
     sdk.takeoff(height_m=CRUISE_AGL_M)
     # disband_at=D（航线最后一个航点，也是两机分头回家的分岔口）。不给的话
@@ -27,7 +27,7 @@ def leader(sdk):
     sdk.announce('侦察机任务完成')
 
 
-def follower(sdk):
+def follower(sdk: DroneSDK):
     """僚机：起飞 -> 入列跟队 -> 解散后回自己起降点降落。"""
     sdk.takeoff(height_m=CRUISE_AGL_M)
     sdk.follow_formation(spacing_m=sdk.spacing_m, agl_m=CRUISE_AGL_M, join='station')

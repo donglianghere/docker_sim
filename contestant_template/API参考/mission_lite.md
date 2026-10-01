@@ -47,7 +47,7 @@
 自己起降点的世界坐标。起飞时飞机就在起降点上，局部原点换过去就是。
 
 <a id="lead_formation"></a>
-### `lead_formation(route: List[Tuple[float, float]], spacing_m: float=4.0, agl_m: float=2.0, hold_s: float=2.0, start_xy: Optional[Tuple[float, float]]=None, final_xy: Optional[Tuple[float, float]]=None, disband_at: Optional[Tuple[float, float]]=None, wait_follower_s: float=300.0, tail_direct: bool=False)`
+### `lead_formation(route: Sequence[Tuple[float, float]], spacing_m: float=4.0, agl_m: float=2.0, hold_s: float=2.0, start_xy: Optional[Tuple[float, float]]=None, final_xy: Optional[Tuple[float, float]]=None, disband_at: Optional[Tuple[float, float]]=None, wait_follower_s: float=300.0, tail_direct: bool=False)`
 
 *mission_lite.py 第 50 行首次用到 · 编队*
 
@@ -217,7 +217,7 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 - timeout_s: 兜底超时（秒）。不给用 SPOT_CLEAR_WAIT_S（120 秒）。 两条放行路径都没触发时，到点也会放行并在日志里说清楚—— 不然队友会一直等下去。
 
 <a id="patrol"></a>
-### `patrol(stations: List[Tuple[Any, ...]], class_id: Optional[str]=None, agl_m: float=2.0, on_found: Optional[Any]=None, scan_sound: Optional[str]=None, found_sound: Optional[str]=None, once: bool=True)`
+### `patrol(stations: Sequence[Tuple[Any, ...]], class_id: Optional[str]=None, agl_m: float=2.0, on_found: Optional[Any]=None, scan_sound: Optional[str]=None, found_sound: Optional[str]=None, once: bool=True)`
 
 *mission_lite.py 第 83 行首次用到 · 视觉：识别与对准*
 
@@ -234,7 +234,7 @@ run() 把命令行 --spacing 存成这个属性，任务函数直接读。
 - once: 找到一次之后，后面要查的站只补拍照片、不再跑识别。任务3 里 火情只可能有一处，灭完了就不必在剩下的楼前再等识别超时。
 
 <a id="fly_route"></a>
-### `fly_route(waypoints: List[Tuple[float, float]], agl_m: float=2.0, hold_s: float=2.0, names: Optional[List[str]]=None)`
+### `fly_route(waypoints: Sequence[Tuple[float, float]], agl_m: float=2.0, hold_s: float=2.0, names: Optional[List[str]]=None)`
 
 *mission_lite.py 第 85 行首次用到 · 航线飞行*
 

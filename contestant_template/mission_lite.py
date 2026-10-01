@@ -40,7 +40,7 @@ SUPPLY_EVENTS = (EV_KIND, EV_GROUND, EV_HIGH, EV_BREACHED, EV_SPOT_CLEAR)
 # ---------------------------------------------------------------------------
 # 侦察机 NX01
 # ---------------------------------------------------------------------------
-def _formation_home_recon(sdk, last):
+def _formation_home_recon(sdk: DroneSDK, last):
     """从 G 起编队返航，任务机过 D 点就解散。
 
     last=True（第 3 轮）：**不去 A 点了**，编队终点直接设成自己的起降点，
@@ -56,7 +56,7 @@ def _formation_home_recon(sdk, last):
         sdk.hold_at(ROUTE_A[0], ROUTE_A[1], agl_m=CRUISE_AGL_M)
 
 
-def _ground_round_recon(sdk, fire_xy, last):
+def _ground_round_recon(sdk: DroneSDK, fire_xy, last):
     """地面火情轮：通报 -> 回 G 点等任务机投弹 -> 编队返航。"""
     sdk.announce('侦察机发现地面火情')
     sdk.announce('侦察机通报地面火情')   # 先播报再发事件，否则跟"任务机起飞"抢顺序
@@ -66,7 +66,7 @@ def _ground_round_recon(sdk, fire_xy, last):
     _formation_home_recon(sdk, last)
 
 
-def _high_round_recon(sdk, last):
+def _high_round_recon(sdk: DroneSDK, last):
     """高层火情轮：三栋楼巡检拍照 -> 发现火情就协同灭火 -> 回 G 编队返航。"""
     def on_fire(_det, bldg):
         sdk.aim_at(HIGH_FIRE, camera='front', what='高层火情')
@@ -88,7 +88,7 @@ def _high_round_recon(sdk, last):
     _formation_home_recon(sdk, last)
 
 
-def recon(sdk):
+def recon(sdk: DroneSDK):
     """侦察机：编队 -> 判断并处置第一种火情 -> 处置另一种 -> 回起飞点降落。"""
     sdk.PHOTO_DIR = PHOTO_DIR
     sdk.open_inbox(*RECON_EVENTS)
@@ -133,7 +133,7 @@ def recon(sdk):
 # ---------------------------------------------------------------------------
 # 任务机 NX02
 # ---------------------------------------------------------------------------
-def _ground_round_supply(sdk):
+def _ground_round_supply(sdk: DroneSDK):
     """地面火情轮：起飞 -> 取灭火弹 -> 投放 -> 拍照回传 -> 编队返航。"""
     d = sdk.wait_event(EV_GROUND, 420.0)
     sdk.takeoff(height_m=CRUISE_AGL_M)
@@ -149,7 +149,7 @@ def _ground_round_supply(sdk):
     # 灭火弹已经投到火点上了，没东西可还，直接回家
 
 
-def _high_round_supply(sdk):
+def _high_round_supply(sdk: DroneSDK):
     """高层火情轮：起飞取器材 -> E 点待命 -> 破窗后进场发射 -> 编队返航 -> 还器材。"""
     d = sdk.wait_event(EV_HIGH, 420.0)
     sdk.takeoff(height_m=CRUISE_AGL_M)
@@ -172,7 +172,7 @@ def _high_round_supply(sdk):
                    direct=True)
 
 
-def supply(sdk):
+def supply(sdk: DroneSDK):
     """任务机：编队 -> 按侦察机通报的种类处置两轮火情 -> 每轮都回起降点降落。"""
     sdk.PHOTO_DIR = PHOTO_DIR
     sdk.open_inbox(*SUPPLY_EVENTS)

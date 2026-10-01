@@ -1,0 +1,16 @@
+// 让编辑器看见 SDK —— 有了这个文件，在本目录写程序时打 `sdk.` 就会弹出
+// 全部方法；鼠标悬停能看到完整签名、每个参数的说明和踩过的坑。参数不用记。
+//
+// 两点说明：
+//   1. contest_sdk 装在 docker 镜像里，宿主机上没有，所以这里指向仓库里的源码；
+//   2. 静态分析**不执行代码**，宿主机没装 rclpy 也照样补全。
+//
+// VS Code 用户还可以看 .vscode/settings.json（同样的 extraPaths）。
+{
+  "extraPaths": ["../src/contest_sdk"],
+  "include": ["."],
+  "exclude": ["**/__pycache__", "API参考", "normal"],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "typeCheckingMode": "basic"
+}

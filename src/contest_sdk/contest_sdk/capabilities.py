@@ -45,7 +45,8 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import (Any, Callable, Dict, List, Literal, Optional, Sequence,
+                    Tuple, overload)
 
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
@@ -3595,7 +3596,7 @@ class DroneSDK:
     #: 三个阈值的关系：ROUTE_SKIP_M(0.3) < FLY_ROUTE_ACCEPT_M(0.7) < PASSED_M(1.2)。
     PASSED_M = 1.2
 
-    def fly_route(self, waypoints: List[Tuple[float, float]],
+    def fly_route(self, waypoints: Sequence[Tuple[float, float]],
                   agl_m: float = 2.0, hold_s: float = 2.0,
                   names: Optional[List[str]] = None) -> None:
         """按航点序列飞：**每个航点先把机头转到下一段方向、停住，再走**，
@@ -3816,6 +3817,14 @@ class DroneSDK:
             self.on_teammate_event(ev, _on)
             self._progress(f"收件箱已注册：'{ev}'")
 
+    @overload
+    def wait_event(self, event: str, timeout_s: float = ..., clear: bool = ...,
+                   required: 'Literal[True]' = ...) -> Dict[str, Any]: ...
+
+    @overload
+    def wait_event(self, event: str, timeout_s: float = ..., clear: bool = ...,
+                   *, required: 'Literal[False]') -> Optional[Dict[str, Any]]: ...
+
     def wait_event(self, event: str, timeout_s: float = 300.0,
                    clear: bool = True, required: bool = True
                    ) -> Optional[Dict[str, Any]]:
@@ -3855,7 +3864,7 @@ class DroneSDK:
         """这个事件到了没有（不阻塞、不取走）。等多个事件里先到的那个时用。"""
         return hasattr(self, '_inbox') and event in self._inbox_seen
 
-    def wait_any_event(self, events: List[str], timeout_s: float = 300.0
+    def wait_any_event(self, events: Sequence[str], timeout_s: float = 300.0
                        ) -> Tuple[str, Dict[str, Any]]:
         """等这几个事件里**先到的那一个**，返回 (事件名, 数据)。
 
@@ -3892,7 +3901,7 @@ class DroneSDK:
     LEG_RAMP_STEP_MPS = 0.25
     LEG_RAMP_PERIOD_S = 1.0
 
-    def lead_formation(self, route: List[Tuple[float, float]], spacing_m: float = 4.0,
+    def lead_formation(self, route: Sequence[Tuple[float, float]], spacing_m: float = 4.0,
                        agl_m: float = 2.0, hold_s: float = 2.0,
                        start_xy: Optional[Tuple[float, float]] = None,
                        final_xy: Optional[Tuple[float, float]] = None,
@@ -4441,7 +4450,14 @@ class DroneSDK:
     # ---- 巡检拍摄 ----
     #: snapshot() 默认存这儿。选手想换目录就 `sdk.PHOTO_DIR = '/logs/xxx'`
     #: （实例属性会盖掉类属性），不用每次调用都带参数。/logs 是挂给地面站的。
-    PHOTO_DIR = '/logs/照片'
+    #: 标注成 str 而不是让它推断成 Literal['/logs/照片']——不标的话编辑器会
+    #: 认为只能赋这一个值，选手换目录时报类型错。
+    PHOTO_DIR: str = '/logs/照片'
+
+    #: `run()` 把命令行 `--spacing` 存到这里，任务函数直接读。
+    #: **必须在类上声明**：只在 run() 里 `sdk.spacing_m = ...` 的话，类型
+    #: 信息里没有这个属性，选手打 `sdk.spacing_m` 编辑器会报"属性不存在"。
+    spacing_m: float = 4.0
 
     def snapshot(self, tag: str, camera: str = 'front',
                  directory: Optional[str] = None) -> Optional[str]:
@@ -4503,7 +4519,7 @@ class DroneSDK:
                     time.sleep(self.LOOK_SETTLE_S)
         return None
 
-    def patrol(self, stations: List[Tuple[Any, ...]], class_id: Optional[str] = None,
+    def patrol(self, stations: Sequence[Tuple[Any, ...]], class_id: Optional[str] = None,
                agl_m: float = 2.0, on_found: Optional[Any] = None,
                scan_sound: Optional[str] = None, found_sound: Optional[str] = None,
                once: bool = True) -> bool:

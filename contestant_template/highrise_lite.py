@@ -32,7 +32,7 @@ EV_DONE, EV_INSPECT_DONE = 'extinguish_done', 'inspect_done'
 EV_SPOT_CLEAR, EV_HOME = 'spot_clear', 'supply_landed_home'
 
 
-def recon(sdk):
+def recon(sdk: DroneSDK):
     """侦察机：巡检拍照 -> 遇火情插一轮协同灭火 -> 到 G 等 -> 编队返回 A 点。"""
     sdk.PHOTO_DIR = PHOTO_DIR
     sdk.open_inbox(EV_AT_E, EV_DONE, EV_HOME)
@@ -67,7 +67,7 @@ def recon(sdk):
     sdk.announce('侦察机任务完成')
 
 
-def supply(sdk):
+def supply(sdk: DroneSDK):
     """任务机：等通报 -> 取器材 -> E 点待命 -> 破窗后进场发射 -> 编队返回 -> 放器材 -> 降落。
 
     写成循环：1#/2# 两栋都可能着火，侦察机可能通报两次。

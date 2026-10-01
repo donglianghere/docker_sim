@@ -149,10 +149,17 @@ def collect():
             api[n.name] = {'sig': f'{n.name}({sig})', 'summary': summary, 'args': args,
                            'static': any(isinstance(d, ast.Name) and d.id == 'staticmethod'
                                          for d in n.decorator_list)}
-    for n in ast.walk(cls):      # 类属性（PHOTO_DIR 这种）
+    for n in ast.walk(cls):      # 类属性。两种写法都要认：
+        #   PHOTO_DIR = '...'        -> ast.Assign
+        #   PHOTO_DIR: str = '...'   -> ast.AnnAssign（加类型标注之后是这种）
+        tgt = None
         if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name):
-            api.setdefault(n.targets[0].id, {'sig': n.targets[0].id, 'summary': '',
-                                             'args': [], 'static': False})
+            tgt = n.targets[0].id
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            tgt = n.target.id
+        if tgt:
+            api.setdefault(tgt, {'sig': tgt, 'summary': '',
+                                 'args': [], 'static': False})
     for n in ast.walk(cls):      # 实例属性（spacing_m）
         if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Store) \
                 and isinstance(n.value, ast.Name) and n.value.id in ('self', 'sdk'):

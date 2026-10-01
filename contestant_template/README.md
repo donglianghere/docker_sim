@@ -10,6 +10,21 @@
 | `highrise_lite.py` | 107 | 高层火情：巡检拍摄 → 协同灭火 → 编队返回 |
 | `mission_lite.py` | 197 | 综合：三轮连贯，编队 + 两种火情（随机、两轮不重复） |
 
+## 参数不用记
+
+本目录带了 `pyrightconfig.json` 和 `.vscode/settings.json`，用 VS Code
+（或任何支持 pyright/pylance 的编辑器）打开**这个目录**，打 `sdk.` 就会弹出
+全部方法；鼠标悬停能看到完整签名、每个参数的说明和踩过的坑。写错参数名当场
+标红。
+
+```python
+def recon(sdk: DroneSDK):      # ← 这个标注不能省，省了编辑器就不知道 sdk 是什么
+    sdk.                       # ← 这里会弹出全部方法
+```
+
+`contest_sdk` 装在 docker 镜像里、宿主机上没有，但**静态分析不执行代码**，
+所以宿主机不装 ROS 也照样补全。
+
 ## 从哪开始看
 
 1. `formation_lite.py` —— 38 行，最短的一个完整双机任务，看懂它就懂了骨架

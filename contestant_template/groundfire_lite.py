@@ -17,7 +17,7 @@ PHOTO_DIR = '/logs/任务2照片'
 EV_FIRE, EV_DROPPED = 'ground_fire_found', 'extinguisher_dropped'
 
 
-def recon(sdk):
+def recon(sdk: DroneSDK):
     """侦察机：航点飞行 -> G->E 边飞边找火情 -> 通报 -> 回 G 等 -> 编队返航。"""
     sdk.open_inbox(EV_DROPPED)
     sdk.takeoff(height_m=CRUISE_AGL_M)
@@ -40,7 +40,7 @@ def recon(sdk):
     sdk.announce('侦察机任务完成')
 
 
-def supply(sdk):
+def supply(sdk: DroneSDK):
     """任务机：等通报 -> 取灭火弹 -> 投放 -> 拍照回传 -> 编队返航 -> 降落。"""
     sdk.PHOTO_DIR = PHOTO_DIR
     sdk.open_inbox(EV_FIRE)

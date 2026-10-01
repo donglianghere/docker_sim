@@ -146,6 +146,13 @@ if [ -f "$ROOT/scripts/check_python_static.py" ]; then
         exit 1
     fi
 fi
+# 装了 pyright 就顺便做一次类型检查（参数名写错、传错类型这类）。
+# 没装就跳过——它是可选的，不该成为飞行的硬依赖。
+if command -v pyright >/dev/null 2>&1 && [ -f "$HERE/pyrightconfig.json" ]; then
+    if ! ( cd "$HERE" && pyright --outputjson >/dev/null 2>&1 ); then
+        echo "（pyright 发现类型问题，不拦飞行；细看跑一次 cd $HERE && pyright）" >&2
+    fi
+fi
 # ---- 3. 起仿真 ----
 docker rm -f "$C_LEADER" "$C_FOLLOWER" >/dev/null 2>&1 || true
 if [ "$RESTART" = "1" ]; then
