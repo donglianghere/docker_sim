@@ -111,6 +111,16 @@ fi
 "$ROOT/scripts/check_env.sh" real || die "环境检查未通过（见上），处理后再跑"
 
 # ---- 3. 两机可达性与机载栈就绪 ----
+# 本脚本只检查机载栈、不代起（机载栈归各机 control_server 管，生命周期比一次
+# 飞行长，重起还要重锁原点）。但报错时要把补救命令打出来，跟下面视觉那步一致，
+# 不然人得翻手册才知道敲什么。
+hint_stack() {   # hint_stack <ip> <flight|vision>
+    echo "   起它：地面站界面点按钮，或" >&2
+    echo "     curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \\" >&2
+    echo "          -d '{\"stack\":\"$2\",\"action\":\"up\",\"confirm\":true}' \\" >&2
+    echo "          http://$1:8890/stack" >&2
+}
+
 for ip in "$LEADER_IP" "$FOLLOWER_IP"; do
     ping -c1 -W2 "$ip" >/dev/null 2>&1 || die "飞机 $ip 不可达（检查 WiFi 和飞机电源）"
 done
@@ -118,18 +128,33 @@ log "两机网络可达"
 
 for ip in "$LEADER_IP" "$FOLLOWER_IP"; do
     st=$(curl -s --noproxy '*' --max-time 8 "http://$ip:8890/status" 2>/dev/null || true)
-    [ -n "$st" ] || die "飞机 $ip 的 control_server(8890) 没响应——机载栈可能没起"
+    if [ -z "$st" ]; then
+        echo "!! 飞机 $ip 的 control_server(8890) 没响应" >&2
+        echo "   它是开机自启的，没响应说明服务本身挂了（不是容器没起）。上机查：" >&2
+        echo "     ssh nvidia@$ip 'systemctl status uav-control-server --no-pager -l | head -20'" >&2
+        echo "     ssh nvidia@$ip 'sudo systemctl restart uav-control-server'" >&2
+        die "机载管控服务不可用，已中止"
+    fi
     # /status 直接给 flight_up / vision_up / namespace，比"端口有响应"硬得多
     ns=$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null)
     fu=$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("flight_up"))' 2>/dev/null)
     vu=$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("vision_up"))' 2>/dev/null)
-    [ "$fu" = "True" ] || die "飞机 $ip 的 flight-stack 没起（/status: flight_up=$fu）"
-    [ "$vu" = "True" ] || die "飞机 $ip 的 vision-stack 没起（/status: vision_up=$vu）"
+    if [ "$fu" != "True" ]; then
+        echo "!! 飞机 $ip 的 flight-stack 没起（/status: flight_up=$fu）" >&2
+        hint_stack "$ip" flight
+        die "机载飞行栈未就绪，已中止"
+    fi
+    if [ "$vu" != "True" ]; then
+        echo "!! 飞机 $ip 的 vision-stack 没起（/status: vision_up=$vu）" >&2
+        hint_stack "$ip" vision
+        echo "   注意：容器起来之后检测节点还没跑，再执行 ./vision_real.sh up" >&2
+        die "机载视觉栈未就绪，已中止"
+    fi
     log "  $ip: namespace=$ns  flight_up=$fu  vision_up=$vu"
 done
 # 命名空间别装错机：两机 .namespace 配反过的话，话题全错位且不报错
-ns1=$(curl -s --noproxy '*' --max-time 8 "http://$LEADER_IP:8890/status" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null)
-ns2=$(curl -s --noproxy '*' --max-time 8 "http://$FOLLOWER_IP:8890/status" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null)
+ns1=$(curl -s --noproxy '*' --max-time 8 "http://$LEADER_IP:8890/status" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null || true)
+ns2=$(curl -s --noproxy '*' --max-time 8 "http://$FOLLOWER_IP:8890/status" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null || true)
 [ "$ns1" = "$LEADER" ] || die "长机 IP $LEADER_IP 报的命名空间是 $ns1，期望 $LEADER（.namespace 配反了？）"
 [ "$ns2" = "$FOLLOWER" ] || die "僚机 IP $FOLLOWER_IP 报的命名空间是 $ns2，期望 $FOLLOWER"
 log "两机机载栈就绪，命名空间对应正确"
@@ -164,6 +189,7 @@ if [ "${ready:-0}" -lt 2 ]; then
         echo "          -d '{\"cam\":\"cam0\",\"mode\":\"yolo\"}' http://$ip:8890/vision/mode" >&2
         echo "     （cam1 同理，两路都要起）" >&2
     done
+    echo "   四条一起起的捷径： ./vision_real.sh up && ./vision_real.sh status" >&2
     die "视觉未就绪，已中止（这一步不拦住的话，火情相关动作会静默超时）"
 fi
 log "视觉就绪（$ready 条检测话题）"

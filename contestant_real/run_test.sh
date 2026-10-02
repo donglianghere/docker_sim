@@ -88,14 +88,39 @@ purge_stale
 "$ROOT/scripts/check_env.sh" real || die "环境检查未通过"
 
 ping -c1 -W2 "$IP" >/dev/null 2>&1 || die "飞机 $IP 不可达"
-st="$(curl -s --noproxy '*' --max-time 8 "http://$IP:8890/status" 2>/dev/null)"
-[ -n "$st" ] || die "飞机 $IP 的 control_server 没响应"
+# 只检查机载栈、不代起（理由同 run_real.sh）。报错时把补救命令打出来。
+hint_stack() {   # hint_stack <ip> <flight|vision>
+    echo "   起它：地面站界面点按钮，或" >&2
+    echo "     curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \\" >&2
+    echo "          -d '{\"stack\":\"$2\",\"action\":\"up\",\"confirm\":true}' \\" >&2
+    echo "          http://$1:8890/stack" >&2
+}
+
+# `|| true` 不能省：set -e 下 curl 连不上(退出码7)会让这行赋值失败，脚本带着
+# 7 直接退出，下面那条"control_server 没响应"的提示根本到不了。
+st="$(curl -s --noproxy '*' --max-time 8 "http://$IP:8890/status" 2>/dev/null || true)"
+if [ -z "$st" ]; then
+    echo "!! 飞机 $IP 的 control_server(8890) 没响应" >&2
+    echo "   它是开机自启的，没响应说明服务本身挂了（不是容器没起）。上机查：" >&2
+    echo "     ssh nvidia@$IP 'systemctl status uav-control-server --no-pager -l | head -20'" >&2
+    echo "     ssh nvidia@$IP 'sudo systemctl restart uav-control-server'" >&2
+    die "机载管控服务不可用，已中止"
+fi
 ns_rep="$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null)"
 fu="$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("flight_up"))' 2>/dev/null)"
 vu="$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("vision_up"))' 2>/dev/null)"
 [ "$ns_rep" = "$NS" ] || die "$IP 报的命名空间是 $ns_rep，期望 $NS"
-[ "$fu" = "True" ] || die "$IP 的 flight-stack 没起"
-[ "$vu" = "True" ] || die "$IP 的 vision-stack 没起"
+if [ "$fu" != "True" ]; then
+    echo "!! $IP 的 flight-stack 没起（/status: flight_up=$fu）" >&2
+    hint_stack "$IP" flight
+    die "机载飞行栈未就绪，已中止"
+fi
+if [ "$vu" != "True" ]; then
+    echo "!! $IP 的 vision-stack 没起（/status: vision_up=$vu）" >&2
+    hint_stack "$IP" vision
+    echo "   注意：容器起来之后检测节点还没跑，再执行 ./vision_real.sh up" >&2
+    die "机载视觉栈未就绪，已中止"
+fi
 log "机载栈就绪：$ns_rep  flight_up=$fu  vision_up=$vu"
 
 # 视觉：t4/t5 不用视觉，其余三个必须有
@@ -114,7 +139,14 @@ case "$WHICH" in
                        sleep 2
                    done; echo "$n"' \
          2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | tail -1 || echo 0)"
-    [ "${n:-0}" -ge 1 ] || die "$NS 的 vision/detections 没有发布者——先 ./vision_real.sh up"
+    if [ "${n:-0}" -lt 1 ]; then
+        echo "!! $NS 的 vision/detections 没有发布者，机载检测节点没起" >&2
+        echo "     curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \\" >&2
+        echo "          -d '{\"cam\":\"cam0\",\"mode\":\"yolo\"}' http://$IP:8890/vision/mode" >&2
+        echo "     （cam1 同理，两路都要起）" >&2
+        echo "   捷径： ./vision_real.sh up && ./vision_real.sh status" >&2
+        die "视觉未就绪，已中止（不拦住的话火情相关动作会静默超时）"
+    fi
     log "视觉就绪"
     ;;
 esac
