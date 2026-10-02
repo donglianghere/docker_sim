@@ -65,7 +65,13 @@ SRCDIR="$HERE"
 [ -f "$HERE/$SCRIPT" ] || { SRCDIR="$HERE/normal"; [ -f "$SRCDIR/$SCRIPT" ] || die "找不到程序 $SCRIPT（已找 $HERE 和 $HERE/normal）"; }
 log "程序：$SRCDIR/$SCRIPT"
 
-# ---- 2. 两机可达性与机载栈就绪 ----
+# ---- 2. 仿真残留检查 ----
+# 仿真和真机主要靠 ROS_DOMAIN_ID 隔离（21 / 20），话题不会串；但声光常驻程序
+# 只有一个容器、只能在一个域，而且 Gazebo 很重会挤占 CPU。这两类隔离不了，
+# 必须在起飞前拦住。
+"$ROOT/scripts/check_env.sh" real || die "环境检查未通过（见上），处理后再跑"
+
+# ---- 3. 两机可达性与机载栈就绪 ----
 for ip in "$LEADER_IP" "$FOLLOWER_IP"; do
     ping -c1 -W2 "$ip" >/dev/null 2>&1 || die "飞机 $ip 不可达（检查 WiFi 和飞机电源）"
 done
@@ -89,13 +95,13 @@ ns2=$(curl -s --noproxy '*' --max-time 8 "http://$FOLLOWER_IP:8890/status" | pyt
 [ "$ns2" = "$FOLLOWER" ] || die "僚机 IP $FOLLOWER_IP 报的命名空间是 $ns2，期望 $FOLLOWER"
 log "两机机载栈就绪，命名空间对应正确"
 
-# ---- 3. 网络参数（真机模式）----
+# ---- 4. 网络参数（真机模式）----
 # shellcheck source=/dev/null
 source "$ROOT/scripts/contestant_network.sh"
 contestant_net_args real "$ROOT" "$HOME/.cache/contest_sdk" || die "真机网络参数生成失败"
 log "网络：$CONTESTANT_NET_DESC"
 
-# ---- 4. 视觉就绪判据（真机特有）----
+# ---- 5. 视觉就绪判据（真机特有）----
 # 机载的检测节点**不随栈自启**，要靠 POST /vision/mode 拉起，而且不持久化。
 # 不检查的话会出现"飞行栈一切正常、wait_for_detection 永远等不到"的静默失效。
 log "检查视觉就绪（四条检测话题都要有发布者）"
@@ -117,7 +123,7 @@ if [ "${ready:-0}" -lt 2 ]; then
 fi
 log "视觉就绪（$ready 条检测话题）"
 
-# ---- 5. 声光（只接地面站）----
+# ---- 6. 声光（只接地面站）----
 sl_dom=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' contestant-sound-light 2>/dev/null | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)
 if [ -z "$sl_dom" ]; then
     echo "（提示：声光常驻程序没在跑，播报不会出声。要开：./start_sound_light_server.sh --real /dev/ttyUSB0）" >&2
@@ -126,7 +132,7 @@ elif [ "$sl_dom" != "20" ]; then
     echo "   重起：./start_sound_light_server.sh --real /dev/ttyUSB0" >&2
 fi
 
-# ---- 6. 监视窗口 ----
+# ---- 7. 监视窗口 ----
 # 必开：任何飞行测试都要同时起编队监视。数据源是两机的 uwb/pose_abs。
 MON_OUT="/logs/${SCRIPT%.py}_real_formation.png"
 MON_LOG="/logs/${SCRIPT%.py}_real_monitor.log"
@@ -140,7 +146,7 @@ docker run -d --name "$C_MONITOR" --network host \
         --spacing "$SPACING" --out "$MON_OUT" >/dev/null 2>&1 \
     || echo "（监视没起来，不影响飞行）" >&2
 
-# ---- 7. 两个选手程序 ----
+# ---- 8. 两个选手程序 ----
 BASE_PYPATH="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" \
                | sed -n 's/^PYTHONPATH=//p' | head -1)"
 PYPATH="/workspace${BASE_PYPATH:+:$BASE_PYPATH}"; PYPATH="${PYPATH%:}"
@@ -176,7 +182,7 @@ while :; do
     sleep 5
 done
 
-# ---- 8. 收尾（只收地面站这边，机载栈不动）----
+# ---- 9. 收尾（只收地面站这边，机载栈不动）----
 docker exec "$C_MONITOR" pkill -INT -f monitor.py >/dev/null 2>&1 || true
 sleep 6
 docker run --rm -v "$LOGDIR:/logs" --entrypoint chown "$IMAGE" \
