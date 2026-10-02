@@ -78,7 +78,7 @@ flock -n 9 || die "已经有一个 run_real.sh 在跑（锁 $LOCK）。先等它
 
 # ---- 1. 找程序 ----
 SRCDIR="$HERE"
-[ -f "$HERE/$SCRIPT" ] || { SRCDIR="$HERE/normal"; [ -f "$SRCDIR/$SCRIPT" ] || die "找不到程序 $SCRIPT（已找 $HERE 和 $HERE/normal）"; }
+[ -f "$HERE/$SCRIPT" ] || die "找不到程序 $SCRIPT（本目录下可选：$(cd "$HERE" && ls *_lite.py 2>/dev/null | tr '\n' ' '))"
 log "程序：$SRCDIR/$SCRIPT"
 
 purge_stale

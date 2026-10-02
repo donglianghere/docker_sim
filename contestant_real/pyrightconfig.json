@@ -9,7 +9,7 @@
 {
   "extraPaths": ["../src/contest_sdk"],
   "include": ["."],
-  "exclude": ["**/__pycache__", "API参考", "normal"],
+  "exclude": ["**/__pycache__", "API参考"],
   "reportMissingImports": "none",
   "reportMissingModuleSource": "none",
   "typeCheckingMode": "basic"
