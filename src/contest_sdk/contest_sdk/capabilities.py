@@ -1424,6 +1424,8 @@ class DroneSDK:
     #: 建好之后保留（同一次飞行往往要拍好几张）。
     _CAMERA_TOPIC_SUFFIX = {'front': '_front_camera/image_raw',
                             'down': '_down_camera/image_raw'}
+    _CAMINFO_TOPIC_SUFFIX = {'front': '_front_camera/camera_info',
+                             'down': '_down_camera/camera_info'}
 
     def _ensure_image_sub(self, camera: str) -> None:
         if not hasattr(self, '_image_subs'):
@@ -1438,6 +1440,26 @@ class DroneSDK:
             self._latest_image[_c] = msg
 
         self._image_subs[camera] = self._node.create_subscription(_Image, topic, _on, 1)
+
+    def _ensure_caminfo_sub(self, camera: str) -> None:
+        """订阅该路相机的 camera_info，给 aim_at 取真实内参用。
+
+        懒订阅：只有真的要对准时才建，没用到的那一路不占资源。
+        QoS 用默认（深度 1）——内参是静态的，拿到最新一条就够。
+        """
+        if not hasattr(self, '_caminfo_subs'):
+            self._caminfo_subs: Dict[str, Any] = {}
+            self._latest_caminfo: Dict[str, Any] = {}
+        if camera in self._caminfo_subs:
+            return
+        from sensor_msgs.msg import CameraInfo as _CameraInfo
+        topic = f'{self.namespace}{self._CAMINFO_TOPIC_SUFFIX[camera]}'
+
+        def _on(msg: Any, _c: str = camera) -> None:
+            self._latest_caminfo[_c] = msg
+
+        self._caminfo_subs[camera] = self._node.create_subscription(
+            _CameraInfo, topic, _on, 1)
 
     #: 5x7 点阵字模，只覆盖时间戳要用的字符（数字、'-'、':'、空格）。
     #: 镜像里没有 PIL/cv2，画一行字不值得为此装一套图形库；时间戳只有这几个
@@ -4331,7 +4353,14 @@ class DroneSDK:
         self.takeoff(height_m=agl_m)
 
     # ---- 视觉搜索与对准 ----
-    #: 相机内参。640x480、HFOV 80°，跟 camera_info 一致。
+    #: 相机内参的**兜底值**（仿真 Gazebo 相机：640x480、HFOV 80°）。
+    #: 2026-10-03 起 aim_at 优先读 `{ns}_{cam}_camera/camera_info`，只有订不到
+    #: 时才用这里的常量——两边的话题名完全一致（仿真是 libgazebo_ros_camera 按
+    #: `<camera_name>` 发的，真机是 yolo_detector_node 按实测标定值发的），
+    #: 所以同一份代码在两边各自拿到正确的内参，不需要环境变量也不需要分支。
+    #: 为什么必须这么改：真机是 1280x720、fx≈1200，用这里的 640/381.35 算，
+    #: 画面正中的目标会被当成偏了 320 像素（约 41°），对准会往一边猛飞；
+    #: 距离也会偏小到约 1/3。
     IMAGE_W, IMAGE_H = 640, 480
     FOCAL_PX = 381.35             # = (IMAGE_W/2)/tan(HFOV/2)
     TAG_SIZE_M = 0.5              # AprilTag 实际边长，用来按框宽估距离
@@ -4339,6 +4368,27 @@ class DroneSDK:
     AIM_MAX_TRIES = 5
     AIM_SETTLE_S = 1.5
     AIM_Z_MIN_M, AIM_Z_MAX_M = 0.8, 4.0
+
+    def _camera_intrinsics(self, camera: str) -> Tuple[float, float, float]:
+        """返回 (fx, cx, cy)。优先用 `camera_info`，订不到就回退到类常量。
+
+        两边的话题名一致（`{ns}_{cam}_camera/camera_info`）：仿真由
+        libgazebo_ros_camera 按 `<camera_name>` 发，真机由 yolo_detector_node
+        按 2026-09-27 实测标定值发。所以同一份代码两边各自拿到对的值。
+        ⚠ 前视和下视**必须分别取**——实测两路主点差 31.9 px（装配决定），
+        套用另一路会把对准带偏。
+        """
+        self._ensure_caminfo_sub(camera)
+        info = getattr(self, '_latest_caminfo', {}).get(camera)
+        if info is None:
+            # 刚建订阅时还没收到；内参是静态话题，等一小会儿基本就到了。
+            # 等不到也不报错——回退到类常量，行为跟 2026-10-03 之前一致。
+            self._poll_until(
+                lambda: self._latest_caminfo.get(camera) is not None, 2.0)
+            info = self._latest_caminfo.get(camera)
+        if info is not None and len(info.k) >= 6 and info.k[0] > 0:
+            return float(info.k[0]), float(info.k[2]), float(info.k[5])
+        return self.FOCAL_PX, self.IMAGE_W / 2.0, self.IMAGE_H / 2.0
 
     def aim_at(self, class_id: str, camera: str = 'front',
                face_yaw_deg: Optional[float] = None, what: str = '目标') -> bool:
@@ -4372,9 +4422,10 @@ class DroneSDK:
                 self._progress(f'第{i}轮对准：{camera}相机看不到{what}')
                 time.sleep(self.AIM_SETTLE_S)
                 continue
-            dx = math.atan2(det.bbox_x - self.IMAGE_W / 2.0, self.FOCAL_PX)
-            dy = math.atan2(det.bbox_y - self.IMAGE_H / 2.0, self.FOCAL_PX)
-            dist = self.FOCAL_PX * self.TAG_SIZE_M / max(1.0, det.bbox_width)
+            fx, ccx, ccy = self._camera_intrinsics(camera)
+            dx = math.atan2(det.bbox_x - ccx, fx)
+            dy = math.atan2(det.bbox_y - ccy, fx)
+            dist = fx * self.TAG_SIZE_M / max(1.0, det.bbox_width)
             lat = dist * math.tan(dx)       # >0：目标在飞机右侧
             dz = -dist * math.tan(dy)       # 目标在画面下方 -> 要降高度
             self._progress(f'第{i}轮对准：{what}在画面 ({det.bbox_x:.0f},{det.bbox_y:.0f})，'
