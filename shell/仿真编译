@@ -1,0 +1,12 @@
+cd /home/robots/ai_uav/docker_sim && env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY COMPOSE_BAKE=false BUILD_JOBS=8 docker compose build flight-stack-nx01
+
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY docker build -f docker/Dockerfile.contestant-sdk -t contestant-sdk:latest .
+
+
+docker compose build flight-stack-nx01
+
+docker build -f docker/Dockerfile.contestant-sdk -t contestant-sdk:latest .
+
+docker compose build backend
+
+
