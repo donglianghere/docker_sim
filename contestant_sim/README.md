@@ -83,6 +83,9 @@ cd contestant_sim && pyright        # 查一遍自己的程序
 ./stop.sh                      # 一键清理所有仿真容器
 ./stop.sh --check              # 只看现在还剩什么，不动手
 
+./run_test.sh t4               # 仿真里跑单机测试（只起一架），见下
+./run_test.sh                  # 不给就列出可选的测试
+
 ./stop_all.sh                  # 关掉**一切**仿真相关栈：stop.sh 全部 + 声光栈
                                # + 选手调试容器（后两个只在它们处于仿真域 21
                                # 时才关；挂在真机域 20 的是别人在用，不动）
@@ -94,6 +97,28 @@ cd contestant_sim && pyright        # 查一遍自己的程序
 
 自己写的程序放在本目录就能同样跑：`./run.sh 我的程序`。
 `run.sh` 只在本目录按名字找。
+
+## 单机测试（`单机测试/`，用 `run_test.sh` 跑）
+
+五个单机专项测试，和 `../contestant_real/单机测试/` 下的**逐字节相同** ——
+坐标各取自己目录的 `venue.py`。先在仿真里把逻辑跑通，再上真机。
+
+```bash
+./run_test.sh t1              # 物资抓取（默认 NX02，带夹爪）
+./run_test.sh t3 --n          # 高层火情，用 N 点看 1# 楼
+./run_test.sh t4 --nx02       # 避障，指定用 NX02
+./run_test.sh t1 --restart    # 强制重起仿真（默认复用已在跑的）
+```
+
+**为什么不能用 `run.sh` 跑它们**：`run.sh` 无条件起两架（`sim_leader` +
+`sim_follower` 跑同一个程序），而这五个测试都是
+`DroneSDK.run(leader=test, follower=test)` —— 两架会同时飞向同一个点
+（t1 两架都去物资点，t2/t3 都去同一个火情位）。不是安全问题，是测试本身
+没意义。所以单机测试有自己的运行器。
+
+跟真机 `run_test.sh` 的区别：仿真栈归本脚本管（默认复用，`--restart` 才重起），
+就绪判据等 PX4 `Ready for takeoff` + flight-stack 节点，而且不需要
+`vision_real.sh` 那一步 —— 仿真的检测节点随 flight-stack 一起起。
 
 ## 飞之前 / 飞之后
 

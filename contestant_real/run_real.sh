@@ -94,9 +94,11 @@ if [ -d "$SIMDIR" ]; then
     drift=""
     # 比**所有** .py，不只 *_lite.py：basic_test.py 这类场地无关的测试
     # 程序两边也该逐字节相同。venue.py 本来就该不同，跳过。
-    for f in "$HERE"/*.py; do
+    # 顶层 + 单机测试/ 都比。venue.py 本来就该不同，跳过。
+    for f in "$HERE"/*.py "$HERE"/单机测试/*.py; do
+        [ -e "$f" ] || continue
+        b="${f#$HERE/}"                 # 保留相对路径，便于区分同名文件
         [ "$(basename "$f")" = venue.py ] && continue
-        b="$(basename "$f")"
         [ -f "$SIMDIR/$b" ] || continue
         cmp -s "$f" "$SIMDIR/$b" || drift="$drift $b"
     done
