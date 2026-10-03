@@ -26,11 +26,9 @@
 #   5. 跑选手程序（长机僚机各一个容器）
 #   6. 收尾：让监视存图、修正日志属主、打印结果
 #
-# 程序按名字在本目录找，找不到再去 normal/：
-#     ./                你自己写的程序 + 四个 *_lite.py
-#     ./normal/         详细版四个 + utils.py
-# 找到之后，程序**所在的那个目录**被整个挂成容器里的 /workspace，所以同目录
-# 的依赖（normal 版的 utils.py、彼此之间的 import）就地解析。
+# 程序按名字在本目录找：你自己写的程序，和四个 *_lite.py。
+# 本目录被整个挂成容器里的 /workspace，所以同目录的依赖（venue.py、彼此之间
+# 的 import）就地解析。
 # monitor.py / referee.py 直接从 scripts/ 取。
 set -eo pipefail
 
@@ -127,23 +125,18 @@ log "DISPLAY=$DISPLAY"
 # 2026-10-01：以前 run.sh 住在单独的"一键仿真"目录里，程序要先同步一份副本
 # 过去才能跑——两份真相，同步只是在给它打补丁，而且每次改代码都得来回 cd。
 # 现在脚本跟程序待在同一个目录，按名字就地解析。
-# 查找顺序（先找到先用）：
-#   1. ./        —— 你自己写的程序，和四个 *_lite.py
-#   2. ./normal/ —— 详细版四个 + utils.py
-# 程序所在的那个目录会被整个挂成容器里的 /workspace，所以同目录的依赖
-# （normal 版的 utils.py、彼此之间的 import）就地解析，不用另挂。
-for d in "$HERE" "$HERE/normal"; do
-    [ -f "$d/$SCRIPT" ] && { SRCDIR="$d"; break; }
-done
-if [ -z "${SRCDIR:-}" ]; then
+# 只在本目录找：你自己写的程序，和四个 *_lite.py。
+# 本目录会被整个挂成容器里的 /workspace，所以同目录的依赖（venue.py、彼此
+# 之间的 import）就地解析，不用另挂。
+SRCDIR=""
+[ -f "$HERE/$SCRIPT" ] && SRCDIR="$HERE"
+if [ -z "$SRCDIR" ]; then
     echo "!! 找不到 $SCRIPT。可跑的程序：" >&2
-    for d in "$HERE" "$HERE/normal"; do
-        # `|| true`：第一个目录（本目录）通常没有 .py，ls 失败会被
-        # `set -eo pipefail` 当成致命错误，列举还没开始就退出了。
-        ( cd "$d" 2>/dev/null && ls -1 *.py 2>/dev/null \
-          | grep -v '^monitor\.py$\|^referee\.py$\|^utils\.py$' \
-          | sed "s|^|     ${d#$ROOT/}/|" ) >&2 || true
-    done
+    # `|| true`：目录里一个 .py 都没有时 ls 失败，会被 `set -eo pipefail`
+    # 当成致命错误，列举还没开始就退出了。
+    ( cd "$HERE" && ls -1 *.py 2>/dev/null \
+      | grep -v '^monitor\.py$\|^referee\.py$\|^venue\.py$' \
+      | sed "s|^|     |" ) >&2 || true
     exit 1
 fi
 log "程序：${SRCDIR#$ROOT/}/$SCRIPT"
@@ -243,8 +236,8 @@ if [ "$NEED_REFEREE" = "1" ]; then
 fi
 
 # ---- 6. 跑选手程序 ----
-# 本目录挂 /workspace。normal 版程序要 import utils/formation/highrise，这些
-# 程序所在目录整个挂成 /workspace，同目录的依赖就地解析；
+# 本目录挂 /workspace。程序要 import venue，本目录整个挂成 /workspace，
+# 同目录的依赖就地解析；
 # /etc/localtime 挂进去，照片时间戳和统计里的时刻才是本地时间（否则是 UTC）。
 # PYTHONPATH 必须**在镜像原值后面追加**，不能直接覆盖：镜像 ENV 里带着
 # /opt/quadrotor_msgs_install/...，`-e PYTHONPATH=/workspace:/deps` 会把它整个

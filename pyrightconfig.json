@@ -6,8 +6,7 @@
   "extraPaths": ["./src/contest_sdk"],
   // 只查选手程序。整个仓库一起查会冒出大量跟选手无关的告警，淹掉真问题。
   "include": ["contestant_sim/*.py"],
-  "exclude": ["**/__pycache__", "contestant_sim/API参考",
-              "contestant_sim/normal", "contestant_sim/archive"],
+  "exclude": ["**/__pycache__", "contestant_sim/API参考"],
   "reportMissingImports": "none",
   "reportMissingModuleSource": "none",
   "typeCheckingMode": "basic"

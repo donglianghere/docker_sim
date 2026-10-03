@@ -47,7 +47,7 @@ def recon(sdk: DroneSDK):    # ✓
 
 **② 工作区根目录要有配置文件。** 配置只在**工作区根目录**生效，所以仓库根和
 本目录各放了一份 `pyrightconfig.json` + `.vscode/settings.json`。开到别的
-目录（比如只开 `normal/`）就会报 `"DroneSDK" is unknown import symbol`，
+目录（比如只开 `API参考/`）就会报 `"DroneSDK" is unknown import symbol`，
 那说明开错目录了，不是代码有问题。
 
 ### 为什么宿主机没装 ROS 也能用
@@ -60,7 +60,7 @@ def recon(sdk: DroneSDK):    # ✓
 
 ```bash
 pip install pyright        # 第一次装
-cd contestant_template && pyright        # 查一遍自己的程序
+cd contestant_sim && pyright        # 查一遍自己的程序
 ```
 
 `run.sh` 起飞前也会顺带跑一次（装了才跑，**只提示不拦飞行**）。
@@ -71,7 +71,7 @@ cd contestant_template && pyright        # 查一遍自己的程序
 2. `API参考/<程序名>.md`（或 `.docx`）—— **每个程序一份**，只列它用到的 API，按程序里出现的先后排、标了行号
 3. `mission_lite.py` —— 最全的一个，三轮编排、两种火情、跨机握手都在里面
 
-想知道某个动作底层到底怎么做的，去 `normal/` 看对应的详细版。
+想知道某个动作底层到底怎么做的，去 `API参考/<程序名>.md` 查那个 API 的签名和说明。
 
 ## 怎么跑
 
@@ -85,7 +85,7 @@ cd contestant_template && pyright        # 查一遍自己的程序
 ```
 
 自己写的程序放在本目录就能同样跑：`./run.sh 我的程序`。
-`run.sh` 按名字先在本目录找，找不到再去 `normal/`。
+`run.sh` 只在本目录按名字找。
 
 ## 飞之前 / 飞之后
 
@@ -109,7 +109,6 @@ python3 tools/timeline.py --problems   # 只看异常
 .
 ├── run.sh / stop.sh   跑 / 清理
 ├── *_lite.py          四个选手程序，在这儿改
-├── normal/            详细版：同样四个任务，实现摊开写，每个决定都注明了为什么
 ├── tools/             飞前查航线、飞后看时间线
 ├── API参考/           每个程序一份（.md + .docx），自动生成，不要手改
 └── README.md          本文件
@@ -117,6 +116,3 @@ python3 tools/timeline.py --problems   # 只看异常
 
 这个目录里**只有选手要用的东西**。仿真设施（docker-compose、监视、裁判、
 SDK 源码）都在上一层仓库里，不用关心。
-
-`normal/` 和 `*_lite.py` **行为完全相同**，用的也是同一组跨机事件名，所以可以
-混搭（lite 长机配 normal 僚机也能飞）。
