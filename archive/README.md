@@ -28,3 +28,9 @@
 
 `_repro_return.py` 是一个返航问题的复现脚本，它 `import 高楼火情绕飞版示例`，
 所以跟着一起放这儿。
+
+`utils.py` 不是示例，是上面六个示例共用的几个函数（`transfer_to`、
+`land_or_confirm`、`close_in_and_fire`）。它原来在 `contestant_sim/normal/` 下，
+2026-10-03 那个目录删掉时补了一份到这儿——不然这些示例里的 `utils.xxx` 调用
+就没有源码可查了。现在的选手程序不用它，对应能力都已经进了 SDK
+（`land_or_confirm` 的那套兜底见 `contest_sdk` 的 `return_home()`）。
