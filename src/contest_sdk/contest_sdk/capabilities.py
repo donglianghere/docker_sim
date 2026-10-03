@@ -1046,6 +1046,99 @@ class DroneSDK:
             raise DetectionTimeoutError(class_id=class_id, timeout_s=timeout, namespace=self.namespace)
         return holder['det']
 
+    #: `set_camera_mode()` 里 SDK 的相机名 -> control_server 的 cam 编号。
+    #: 这个对应关系由 `scripts/control_server.py` 的 CAMERA_DEFAULTS 表定死
+    #: （cam0=front=sensor_id 0=MJPEG 8080、cam1=down=sensor_id 1=8081），
+    #: 改那边就要同步改这里。
+    _CAMERA_TO_CAM = {'front': 'cam0', 'down': 'cam1'}
+
+    def set_camera_mode(self, camera: str, mode: str = 'yolo',
+                        wait: bool = True, timeout: float = 20.0) -> None:
+        """切换**自己这架飞机**某一路相机的检测模式。
+
+        用途：两路相机不同时用时，只开需要的那一路省机载 CPU。实测一个
+        `yolo_detector_node` 占约 12% 整机，单路比双路省约 9%。综合任务
+        `mission_lite` 的地面火情段只用下视、高层火情段只用前视，在阶段
+        边界切换即可——实测**切过去 4 秒就出数据**，而阶段之间本来就有十几秒
+        的转场飞行，切换可以和转场重叠、等于零额外耗时。
+
+        **仿真下是空操作**：仿真没有 `control_server`，检测节点随 flight-stack
+        一起起、本来就不用切。靠环境变量 `CONTEST_CONTROL_HOST` 是否存在来
+        判断（真机由 `run_real.sh`/`run_test.sh` 按机号注入），不存在就只打
+        一行日志直接返回。这样仿真和真机能跑**同一份**选手代码。
+
+        ⚠️ 失败**会抛异常**，不像 `announce()` 那样吞掉。因为切失败的后果是
+        后面的 `wait_for_detection()` 静默等到超时——那种失效很难反查，必须
+        在这里就响亮地断掉。
+
+        Args:
+            camera: `'front'`（前视，= control_server 的 cam0）或
+                `'down'`（下视，= cam1）。
+            mode: `'yolo'` 检测 / `'apriltag'` 只认标签 / `'raw'` 纯视频直通 /
+                `'stop'` 停掉这一路。同一路相机上这几种模式互斥。
+            wait: `mode='yolo'` 时是否等到这一路**真的出检测数据**才返回。
+                默认 True——只发请求不等的话，紧接着的 `wait_for_detection()`
+                很可能在节点还没起好时就开始等。
+            timeout: 等出数据的超时秒数。实测正常 4 秒，默认给足余量。
+
+        Raises:
+            ValueError: camera/mode 取值不对。
+            ActionFailedError: control_server 没响应、返回失败，或 `wait=True`
+                时超时仍没等到这一路的数据。
+        """
+        cam = self._CAMERA_TO_CAM.get(camera)
+        if cam is None:
+            raise ValueError(
+                f"camera 只能是 {sorted(self._CAMERA_TO_CAM)} 之一，收到 {camera!r}")
+        if mode not in ('yolo', 'apriltag', 'raw', 'stop'):
+            raise ValueError(
+                f"mode 只能是 yolo/apriltag/raw/stop 之一，收到 {mode!r}")
+
+        host = os.environ.get('CONTEST_CONTROL_HOST', '').strip()
+        if not host:
+            self._progress(
+                f'仿真环境，相机模式无需切换（检测节点随飞行栈一起起）；'
+                f'忽略 set_camera_mode({camera!r}, {mode!r})')
+            return
+        port = os.environ.get('CONTEST_CONTROL_PORT', '8890').strip() or '8890'
+        url = f'http://{host}:{port}/vision/mode'
+
+        self._progress(f'切换相机模式：{camera}({cam}) -> {mode}')
+        body = json.dumps({'cam': cam, 'mode': mode}).encode('utf-8')
+        request = urllib.request.Request(
+            url, data=body, headers={'Content-Type': 'application/json'},
+            method='POST')
+        try:
+            with urllib.request.urlopen(request, timeout=10.0) as resp:
+                payload = json.loads(resp.read().decode('utf-8') or '{}')
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise ActionFailedError(
+                action_name=f'set_camera_mode({camera},{mode})',
+                timeout_s=10.0, namespace=self.namespace) from exc
+        if not payload.get('ok', False):
+            raise ActionFailedError(
+                action_name=(f'set_camera_mode({camera},{mode}) 被拒绝：'
+                             f'{payload.get("message", payload)}'),
+                timeout_s=10.0, namespace=self.namespace)
+
+        if not wait or mode != 'yolo':
+            return
+        # 等这一路真的出数据。frame_id 形如 NX01_camera_down_optical_frame，
+        # 跟 wait_for_detection() 用的是同一个过滤写法。清掉旧缓存，不然会被
+        # 切换之前残留的那一帧骗过去。
+        tag = f'_camera_{camera}_'
+        self.clear_detections(camera=camera)
+        ok = self._poll_until(
+            lambda: any(tag in fid for fid in self._latest_detections_by_frame),
+            timeout,
+            lambda: self._progress(f'等 {camera} 相机出检测数据…'))
+        if not ok:
+            raise ActionFailedError(
+                action_name=(f'set_camera_mode({camera},{mode})：'
+                             f'请求已被接受但 {timeout:.0f} 秒内没等到该路数据'),
+                timeout_s=timeout, namespace=self.namespace)
+        self._progress(f'{camera} 相机已就绪')
+
     def clear_detections(self, camera: Optional[str] = None) -> None:
         """丢掉已经缓存的检测结果，让下一次`wait_for_detection()`只认**之后**
         新收到的帧。

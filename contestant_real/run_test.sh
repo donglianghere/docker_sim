@@ -170,7 +170,8 @@ BASE_PYPATH="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}
                | sed -n 's/^PYTHONPATH=//p' | head -1)"
 PYPATH="/workspace${BASE_PYPATH:+:$BASE_PYPATH}"; PYPATH="${PYPATH%:}"
 log "启动测试程序"
-docker run -d --name "$C_TEST" --network host \
+# CONTEST_CONTROL_HOST：见 run_real.sh 同名处的说明。不注入 SDK 会判成仿真。
+docker run -d --name "$C_TEST" -e CONTEST_CONTROL_HOST="$IP" --network host \
     -v /etc/localtime:/etc/localtime:ro \
     -v "$HERE:/workspace:ro" -v "$LOGDIR:/logs" \
     -e PYTHONPATH="$PYPATH" "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \

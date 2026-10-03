@@ -229,10 +229,14 @@ COMMON=(--network host
         "${CONTESTANT_NET_ARGS[@]}")
 
 log "启动选手程序：$SCRIPT（长机=$LEADER 僚机=$FOLLOWER 间距=${SPACING}米）"
-docker run -d --name "$C_LEADER" "${COMMON[@]}" "$IMAGE" \
+# CONTEST_CONTROL_HOST：SDK 的 set_camera_mode() 靠它找自己飞机的
+# control_server(8890) 切相机模式。**不注入的话 SDK 会判成仿真、空操作**
+# （仿真没有 control_server，检测节点随飞行栈起、本来不用切），于是真机上
+# 的切换会静默不生效。各容器注入**自己那架**的 IP。
+docker run -d --name "$C_LEADER" -e CONTEST_CONTROL_HOST="$LEADER_IP" "${COMMON[@]}" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" --namespace "$LEADER" --role leader \
     --teammate "$FOLLOWER" --spacing "$SPACING" >/dev/null
-docker run -d --name "$C_FOLLOWER" "${COMMON[@]}" "$IMAGE" \
+docker run -d --name "$C_FOLLOWER" -e CONTEST_CONTROL_HOST="$FOLLOWER_IP" "${COMMON[@]}" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" --namespace "$FOLLOWER" --role follower \
     --teammate "$LEADER" --spacing "$SPACING" >/dev/null
 
