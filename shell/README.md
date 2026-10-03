@@ -146,6 +146,27 @@ FastDDS，跟已切到 CycloneDDS 的真实节点对不上话题，`ros2 topic l
 > ——否则在非 TTY 环境（管道里、别的脚本里调）会报
 > `cannot attach stdin to a TTY-enabled container`。第一版三个都加了 -t，实测踩到。
 
+### ⚠️ 查话题一律加 `--no-daemon`
+
+`ros2 topic list` 默认问 ROS 2 daemon，而 daemon 是**按 (域, RMW) 起一次就
+常驻**的：只要之前有谁在这个容器里用对的 RMW 起过它，后面不管你自己的 RMW
+对不对，都会读那份缓存、返回完整列表。**于是一个 RMW 配错的 shell 看起来
+完全正常。**
+
+2026-10-03 实测踩过这一下：想反证"不 source `ros2_env_setup.sh` 就看不到
+话题"，结果裸 `docker exec`（默认 FastDDS）也返回 465 条，差点据此断定那步
+可省。`ros2 daemon stop` 清掉缓存、两边都加 `--no-daemon` 重测才是真值：
+
+| | RMW | 话题数 |
+|---|---|---|
+| 裸 `docker exec`（不 source） | 默认 → `rmw_fastrtps_cpp` | **2** |
+| `enter_sim.sh nx01`（source 了） | `rmw_cyclonedds_cpp` | **465** |
+
+镜像里 CycloneDDS 和 FastDDS 都装着，未设置时 ROS 2 选 FastDDS，而真实节点
+全在 CycloneDDS 上——所以 `ros2_env_setup.sh` 那步是必需的，不是冗余。
+三个 `enter_*` 进去时都会提示这一条；`vision_real.sh` / `run_real.sh` 的就绪
+判据本来就都用 `--no-daemon`。
+
 ## 不属于这一层的
 
 | | 在哪 |

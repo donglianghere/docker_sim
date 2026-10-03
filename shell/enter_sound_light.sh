@@ -29,6 +29,8 @@ echo "          ros2 topic pub --once /sound_light/request std_msgs/String 'data
 
 # 交互式才要 -it；"跑一条命令"的形式不加 -t，否则非 TTY 环境（管道、
 # 别的脚本里调）会报 "cannot attach stdin to a TTY-enabled container"。
+echo "   查话题加 --no-daemon（不加会读 ROS 2 daemon 的缓存，可能是别人起的）"
+
 if [ $# -eq 0 ]; then
     exec docker exec -it "$C" bash -lc 'source /opt/ros/humble/setup.bash; exec bash'
 else

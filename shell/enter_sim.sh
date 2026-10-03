@@ -15,6 +15,15 @@
 # 看着像连不上，实际只是 RMW 不一致。同一个坑 scripts/exec_gcs.sh 和
 # scripts/ros2_env_setup.sh 的文件头都记过。
 #
+# ⚠️ 查话题一律加 --no-daemon。`ros2 topic list` 默认问 ROS 2 daemon，而
+# daemon 是**按 (域, RMW) 起一次就常驻**的：只要之前有谁在这个容器里用对的
+# RMW 起过它，后面不管你自己的 RMW 对不对，`ros2 topic list` 都会读那份缓存、
+# 返回完整列表。于是一个 RMW 配错的 shell 看起来完全正常——2026-10-03 实测
+# 踩过：裸 docker exec（默认 FastDDS）也返回 465 条，差点据此断定本脚本
+# source ros2_env_setup.sh 那步可省。`ros2 daemon stop` 清掉缓存后两边加
+# --no-daemon 重测才是真值：FastDDS 2 条 / CycloneDDS 465 条。
+# （vision_real.sh / run_real.sh 的就绪判据本来就都用 --no-daemon。）
+#
 # flight-stack 两个容器把 ./scripts 挂成了 /opt/host_scripts（compose 里
 # `./scripts:/opt/host_scripts:ro`），直接 source 那份就行、不用 docker cp。
 # sim-world **没有**这个挂载，所以那一路先 docker cp 一份到 /tmp。
@@ -48,6 +57,8 @@ fi
 p=$(docker exec "$C" printenv PLANNER 2>/dev/null || echo "?")
 d=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$C" | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)
 echo "== $C   域 ${d:-未知}   PLANNER=$p   RMW 由 $ENVSH 推导 =="
+echo "   查话题加 --no-daemon： ros2 topic list --no-daemon"
+echo "   （不加会读 ROS 2 daemon 的缓存，RMW 配错也看着正常；见文件头）"
 
 PRE="source /opt/ros/humble/setup.bash && source $ENVSH"
 # 交互式才要 -it；"跑一条命令"的形式不加 -t，否则非 TTY 环境（管道、
