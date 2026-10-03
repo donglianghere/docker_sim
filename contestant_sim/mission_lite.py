@@ -34,6 +34,24 @@ SUPPLY_EVENTS = (EV_KIND, EV_GROUND, EV_HIGH, EV_BREACHED, EV_SPOT_CLEAR)
 # ---------------------------------------------------------------------------
 # 侦察机 NX01
 # ---------------------------------------------------------------------------
+def _use_camera(sdk: DroneSDK, which: str) -> None:
+    """只开需要的那一路相机，同时停掉另一路——两路相机不同时用。
+
+    为什么值得这么做：一个 yolo_detector_node 实测占机载约 12% 整机 CPU，
+    单路比双路省约 9%（真机实测 86% vs 95%）。而本任务的两路从来不重叠：
+    地面火情用下视、高层火情瞄准用前视、取放物资用下视（精降看 AprilTag）。
+
+    切换代价实测 **4 秒**（停掉后该路数据立刻为 0，重起 4 秒出数据）。所以
+    调用点都选在**后面紧跟一段飞行**的位置，4 秒被转场时间盖住、等于不花时间。
+
+    仿真下 `set_camera_mode()` 是空操作（没有 control_server，检测节点随飞行栈
+    一起起），所以这个函数在仿真和真机都能原样跑——本程序两边逐字节相同。
+    """
+    other = 'down' if which == 'front' else 'front'
+    sdk.set_camera_mode(other, 'stop')      # 先停，先把 CPU 让出来
+    sdk.set_camera_mode(which, 'yolo')      # 再起，wait=True 等到真出数据
+
+
 def _formation_home_recon(sdk: DroneSDK, last):
     """从 G 起编队返航，任务机过 D 点就解散。
 
@@ -62,6 +80,9 @@ def _ground_round_recon(sdk: DroneSDK, fire_xy, last):
 
 def _high_round_recon(sdk: DroneSDK, last):
     """高层火情轮：三栋楼巡检拍照 -> 发现火情就协同灭火 -> 回 G 编队返航。"""
+    # 本轮只用前视（aim_at/snapshot 都是前视），下视这一路停掉省 CPU。
+    _use_camera(sdk, 'front')
+
     def on_fire(_det, bldg):
         sdk.aim_at(HIGH_FIRE, camera='front', what='高层火情')
         sdk.snapshot(bldg)
@@ -108,6 +129,8 @@ def recon(sdk: DroneSDK):
             # 两轮不重复：地面火情上轮处置过 -> 本轮必然是高层，不用再搜一遍
             fire_xy = None
         else:
+            # 搜之前切下视。上面 fly_route 到 G 刚飞完，这 4 秒不额外花时间。
+            _use_camera(sdk, 'down')
             fire_xy = sdk.search_along(ROUTE_E, GROUND_FIRE, camera='down',
                                        agl_m=CRUISE_AGL_M, what='地面火情')
         kind = KIND_GROUND if fire_xy else KIND_HIGH
@@ -130,6 +153,9 @@ def recon(sdk: DroneSDK):
 def _ground_round_supply(sdk: DroneSDK):
     """地面火情轮：起飞 -> 取灭火弹 -> 投放 -> 拍照回传 -> 编队返航。"""
     d = sdk.wait_event(EV_GROUND, 420.0)
+    # 本轮全程下视（fetch_from 精降看标识、aim_at/snapshot 都是下视）。
+    # 放在 takeoff 之前：等事件时本来就是停着的，这 4 秒完全不占飞行时间。
+    _use_camera(sdk, 'down')
     sdk.takeoff(height_m=CRUISE_AGL_M)
     sdk.fetch_from(SUPPLY_XY, SUPPLY_TAG, what='灭火弹', agl_m=CRUISE_AGL_M,
                    sound='任务机抓取灭火弹')
@@ -146,6 +172,8 @@ def _ground_round_supply(sdk: DroneSDK):
 def _high_round_supply(sdk: DroneSDK):
     """高层火情轮：起飞取器材 -> E 点待命 -> 破窗后进场发射 -> 编队返航 -> 还器材。"""
     d = sdk.wait_event(EV_HIGH, 420.0)
+    # 先下视：fetch_from 取器材是精降，看物资点的 AprilTag。
+    _use_camera(sdk, 'down')
     sdk.takeoff(height_m=CRUISE_AGL_M)
     sdk.fetch_from(SUPPLY_XY, SUPPLY_TAG, what='灭火器材', agl_m=CRUISE_AGL_M,
                    sound='任务机抓取灭火弹')
@@ -154,6 +182,9 @@ def _high_round_supply(sdk: DroneSDK):
     sdk.announce('任务机高层灭火已就位')
     sdk.wait_event(EV_BREACHED, 300.0)
     sdk.wait_event(EV_SPOT_CLEAR, 150.0)          # 发射点上这会儿还杵着侦察机
+    # 改前视：下面 aim_at 用前视瞄高层火情。切换放在飞往发射点**之前**，
+    # 这段飞行把 4 秒盖住；放到 aim_at 前面就要停在那儿干等。
+    _use_camera(sdk, 'front')
     sdk.goto_world(d['x'], d['y'], d['z'], what='侦察机发射点', accept_m=2.0)
     sdk.announce('任务机到达瞄准点')
     sdk.aim_at(HIGH_FIRE, camera='front', face_yaw_deg=FACADE_YAW_DEG, what='高层火情')
