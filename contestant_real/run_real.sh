@@ -182,31 +182,16 @@ log "网络：$CONTESTANT_NET_DESC"
 # ---- 5. 视觉就绪判据（真机特有）----
 # 机载的检测节点**不随栈自启**，要靠 POST /vision/mode 拉起，而且不持久化。
 # 不检查的话会出现"飞行栈一切正常、wait_for_detection 永远等不到"的静默失效。
-log "检查视觉就绪（四条检测话题都要有发布者）"
-ready=$(timeout 90 docker run --rm --network host "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
-    bash -lc 'source /opt/ros/humble/setup.bash 2>/dev/null
-              # 轮询而不是死等：DDS 发现通常几秒收敛，写死 sleep 25 等于每次都
-              # 付最坏情况的代价。一发现够数就立刻返回，最多等约 30 秒。
-              n=0; for i in $(seq 1 15); do
-                  n=$(timeout 6 ros2 topic list --no-daemon 2>/dev/null | grep -c "vision/detections")
-                  [ "$n" -ge 2 ] && break
-                  sleep 2
-              done; echo "$n"' 2>/dev/null \
-         | tr -d '\r' | grep -E '^[0-9]+$' | tail -1 || echo 0)
-# 注意 tail/grep：镜像 entrypoint 会往 stdout 打一行横幅，不过滤的话会连横幅一起
-# 赋给 ready，后面的整数比较就报 "需要整数表达式"。
-if [ "${ready:-0}" -lt 2 ]; then
-    echo "!! 只发现 ${ready:-0} 条 vision/detections（应为 2：NX01 + NX02）" >&2
-    echo "   机载检测节点没起。对每架飞机执行：" >&2
-    for ip in "$LEADER_IP" "$FOLLOWER_IP"; do
-        echo "     curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \\" >&2
-        echo "          -d '{\"cam\":\"cam0\",\"mode\":\"yolo\"}' http://$ip:8890/vision/mode" >&2
-        echo "     （cam1 同理，两路都要起）" >&2
-    done
-    echo "   四条一起起的捷径： ./vision_real.sh up && ./vision_real.sh status" >&2
-    die "视觉未就绪，已中止（这一步不拦住的话，火情相关动作会静默超时）"
-fi
-log "视觉就绪（$ready 条检测话题）"
+#
+# 2026-10-03 重写：原来数的是 `ros2 topic list | grep -c vision/detections >= 2`，
+# 那是**数话题数不是数相机路数**——两路相机发同一个话题、靠 frame_id 区分，
+# 一架只要有任意一路话题就存在，漏开程序要用的那一路照样放行（实测确认过）。
+# 现在按**本程序真正需要的那一路**验 frame_id，既支持"只起一路省 CPU"
+# （实测单路比双路省约 9% 整机），又真能抓住漏开。判据见 scripts/vision_gate.sh。
+source "$ROOT/scripts/vision_gate.sh"
+NEED_CAM="$(required_camera "$SCRIPT")"
+check_vision "$LEADER" "$NEED_CAM"
+check_vision "$FOLLOWER" "$NEED_CAM"
 
 # ---- 6. 声光（只接地面站）----
 sl_dom=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' contestant-sound-light 2>/dev/null | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)

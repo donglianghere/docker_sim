@@ -136,22 +136,8 @@ case "$WHICH" in
     # shellcheck source=/dev/null
     source "$ROOT/scripts/contestant_network.sh"
     contestant_net_args real "$ROOT" "$HOME/.cache/contest_sdk" || die "网络参数生成失败"
-    n="$(timeout 90 docker run --rm --network host "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
-         bash -lc 'source /opt/ros/humble/setup.bash 2>/dev/null
-                   n=0; for i in $(seq 1 15); do
-                       n=$(timeout 6 ros2 topic list --no-daemon 2>/dev/null | grep -c "'"$NS"'/vision/detections")
-                       [ "$n" -ge 1 ] && break
-                       sleep 2
-                   done; echo "$n"' \
-         2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | tail -1 || echo 0)"
-    if [ "${n:-0}" -lt 1 ]; then
-        echo "!! $NS 的 vision/detections 没有发布者，机载检测节点没起" >&2
-        echo "     curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \\" >&2
-        echo "          -d '{\"cam\":\"cam0\",\"mode\":\"yolo\"}' http://$IP:8890/vision/mode" >&2
-        echo "     （cam1 同理，两路都要起）" >&2
-        echo "   捷径： ./vision_real.sh up && ./vision_real.sh status" >&2
-        die "视觉未就绪，已中止（不拦住的话火情相关动作会静默超时）"
-    fi
+    source "$ROOT/scripts/vision_gate.sh"
+    check_vision "$NS" "$(required_camera "$BASENAME")"
     log "视觉就绪"
     ;;
 esac
