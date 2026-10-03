@@ -26,6 +26,8 @@ PHOTO_DIR = '/logs/测试3_高层火情'
 
 
 def test(sdk):
+    # 只开需要的那一路相机（拍照 + 瞄准高层火情用前视）。仿真下是空操作。
+    sdk.set_camera_mode('front')
     use_n = '--n' in sys.argv
     spot, name, bldg = (POINT_N, 'N', '1#楼') if use_n else (POINT_M, 'M', '2#楼')
     sdk.progress(f'=== 测试 3：高层火情瞄准（{name} 点看 {bldg}）===')

@@ -20,6 +20,8 @@ PHOTO_DIR = '/logs/测试2_地面火情'
 
 
 def test(sdk):
+    # 只开需要的那一路相机（搜索 + 对准地面火情用下视）。仿真下是空操作。
+    sdk.set_camera_mode('down')
     sdk.progress('=== 测试 2：地面火情对准 ===')
     sdk.takeoff(height_m=CRUISE_AGL_M)
 

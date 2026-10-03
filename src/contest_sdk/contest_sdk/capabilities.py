@@ -68,6 +68,7 @@ from contest_sdk._sound_light_port import build_request as _build_sound_light_re
 from contest_sdk._sound_light_port import encode_command as _encode_sound_light_command
 from contest_sdk.exceptions import (
     ActionFailedError,
+    CameraModeError,
     DetectionTimeoutError,
     GotoTimeoutError,
     GotoUnreachableError,
@@ -1051,6 +1052,11 @@ class DroneSDK:
     #: （cam0=front=sensor_id 0=MJPEG 8080、cam1=down=sensor_id 1=8081），
     #: 改那边就要同步改这里。
     _CAMERA_TO_CAM = {'front': 'cam0', 'down': 'cam1'}
+    #: `set_camera_mode()` 连不上 control_server 时重试几次、间隔几秒。
+    #: 覆盖 WiFi 的短抖动；撞上长断链（实测约 49 秒）还是会抛，那种只能靠
+    #: 调用方降级（见 mission_lite 的 _use_camera）。
+    CAMERA_MODE_RETRIES = 3
+    CAMERA_MODE_RETRY_GAP_S = 2.0
 
     def set_camera_mode(self, camera: str, mode: str = 'yolo',
                         wait: bool = True, timeout: float = 20.0) -> None:
@@ -1083,8 +1089,9 @@ class DroneSDK:
 
         Raises:
             ValueError: camera/mode 取值不对。
-            ActionFailedError: control_server 没响应、返回失败，或 `wait=True`
-                时超时仍没等到这一路的数据。
+            CameraModeError: control_server 没响应（已重试
+                `CAMERA_MODE_RETRIES` 次）、返回失败，或 `wait=True` 时超时
+                仍没等到这一路的数据。
         """
         cam = self._CAMERA_TO_CAM.get(camera)
         if cam is None:
@@ -1105,21 +1112,39 @@ class DroneSDK:
 
         self._progress(f'切换相机模式：{camera}({cam}) -> {mode}')
         body = json.dumps({'cam': cam, 'mode': mode}).encode('utf-8')
-        request = urllib.request.Request(
-            url, data=body, headers={'Content-Type': 'application/json'},
-            method='POST')
-        try:
-            with urllib.request.urlopen(request, timeout=10.0) as resp:
-                payload = json.loads(resp.read().decode('utf-8') or '{}')
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise ActionFailedError(
-                action_name=f'set_camera_mode({camera},{mode})',
-                timeout_s=10.0, namespace=self.namespace) from exc
+        # 重试 3 次：这条请求走 WiFi 打到飞机的 control_server，而这条链路
+        # 会间歇性断（rtw89 驱动 TX 卡死 -> 丢 beacon -> 断开约 49 秒自愈，
+        # 2026-10-03 一次会话里撞到两次）。只发一次的话，撞上抖动就抛异常。
+        # 注意：只重试**连不上/超时**，被 control_server 明确拒绝（ok:false）
+        # 不重试——那是参数或状态问题（比如 vision-stack 容器没起），重试
+        # 多少次都一样，立刻抛出去让人看到原因。
+        payload = None
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, self.CAMERA_MODE_RETRIES + 1):
+            request = urllib.request.Request(
+                url, data=body, headers={'Content-Type': 'application/json'},
+                method='POST')
+            try:
+                with urllib.request.urlopen(request, timeout=10.0) as resp:
+                    payload = json.loads(resp.read().decode('utf-8') or '{}')
+                break
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                last_exc = exc
+                if attempt < self.CAMERA_MODE_RETRIES:
+                    self._progress(
+                        f'第 {attempt}/{self.CAMERA_MODE_RETRIES} 次连不上 '
+                        f'{host}:{port}（{exc!r}），{self.CAMERA_MODE_RETRY_GAP_S:.0f} 秒后重试')
+                    time.sleep(self.CAMERA_MODE_RETRY_GAP_S)
+        if payload is None:
+            raise CameraModeError(
+                f'{camera}({cam}) -> {mode}，{self.CAMERA_MODE_RETRIES} 次都连不上 '
+                f'{host}:{port}（最后一次：{last_exc!r}）',
+                namespace=self.namespace) from last_exc
         if not payload.get('ok', False):
-            raise ActionFailedError(
-                action_name=(f'set_camera_mode({camera},{mode}) 被拒绝：'
-                             f'{payload.get("message", payload)}'),
-                timeout_s=10.0, namespace=self.namespace)
+            raise CameraModeError(
+                f'{camera}({cam}) -> {mode} 被 control_server 拒绝：'
+                f'{payload.get("message", payload)}',
+                namespace=self.namespace)
 
         if not wait or mode != 'yolo':
             return
@@ -1133,10 +1158,10 @@ class DroneSDK:
             timeout,
             lambda: self._progress(f'等 {camera} 相机出检测数据…'))
         if not ok:
-            raise ActionFailedError(
-                action_name=(f'set_camera_mode({camera},{mode})：'
-                             f'请求已被接受但 {timeout:.0f} 秒内没等到该路数据'),
-                timeout_s=timeout, namespace=self.namespace)
+            raise CameraModeError(
+                f'{camera}({cam}) -> {mode} 请求已被接受，但 {timeout:.0f} 秒内'
+                f'没等到该路的检测数据（节点起了就崩？）',
+                namespace=self.namespace)
         self._progress(f'{camera} 相机已就绪')
 
     def clear_detections(self, camera: Optional[str] = None) -> None:

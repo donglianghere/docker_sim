@@ -138,6 +138,25 @@ class LandTimeoutError(ContestSdkError):
         )
 
 
+class CameraModeError(ContestSdkError):
+    """`sdk.set_camera_mode()`切相机失败。
+
+    不复用`ActionFailedError`：那个是给`do_action()`的舵机动作写的，消息里
+    写死了"action_name拼写/RC通道PWM映射/mavros/rc/override"三条排查方向，
+    跟相机一点关系都没有——2026-10-03实测降级路径时就看到它把一整段舵机
+    排查建议打了出来，排障时会把人带偏。
+    """
+
+    def __init__(self, detail: str, namespace: str):
+        super().__init__(
+            f"切相机失败（namespace={namespace}）：{detail}。可能原因："
+            f"①该机 vision-stack 容器没起（control_server 会明确这么回）；"
+            f"②到飞机 8890 的链路不通（WiFi 断链/control_server 挂了，"
+            f"后者是开机自启的，查 systemctl status uav-control-server）；"
+            f"③节点起了但立刻崩，看 docker logs docker_sim-vision-stack-1。"
+        )
+
+
 class ActionFailedError(ContestSdkError):
     """`sdk.do_action()`等待`action_status`确认`done:<name>`超时/失败。"""
 

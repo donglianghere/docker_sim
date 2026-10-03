@@ -17,6 +17,8 @@ from venue import SUPPLY_XY, SUPPLY_TAG, CRUISE_AGL_M
 
 
 def test(sdk):
+    # 只开需要的那一路相机（物资点精降看 AprilTag，用下视）。仿真下是空操作。
+    sdk.set_camera_mode('down')
     sdk.progress('=== 测试 1：物资抓取 ===')
     sdk.takeoff(height_m=CRUISE_AGL_M)
 

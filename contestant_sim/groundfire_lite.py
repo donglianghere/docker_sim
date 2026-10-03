@@ -21,6 +21,8 @@ EV_FIRE, EV_DROPPED = 'ground_fire_found', 'extinguisher_dropped'
 
 def recon(sdk: DroneSDK):
     """侦察机：航点飞行 -> G->E 边飞边找火情 -> 通报 -> 回 G 等 -> 编队返航。"""
+    # 只开需要的那一路相机（侦察机搜地面火情用下视）。仿真下是空操作。
+    sdk.set_camera_mode('down')
     sdk.open_inbox(EV_DROPPED)
     sdk.takeoff(height_m=CRUISE_AGL_M)
     sdk.fly_route(ROUTE_TO_G, agl_m=CRUISE_AGL_M, names=['A', 'B', 'C', 'G'])
@@ -44,6 +46,8 @@ def recon(sdk: DroneSDK):
 
 def supply(sdk: DroneSDK):
     """任务机：等通报 -> 取灭火弹 -> 投放 -> 拍照回传 -> 编队返航 -> 降落。"""
+    # 只开需要的那一路相机（任务机取弹精降 + 对准火点都用下视）。仿真下是空操作。
+    sdk.set_camera_mode('down')
     sdk.PHOTO_DIR = PHOTO_DIR
     sdk.open_inbox(EV_FIRE)
     d = sdk.wait_event(EV_FIRE, 300.0)

@@ -26,6 +26,8 @@ EV_SPOT_CLEAR, EV_HOME = 'spot_clear', 'supply_landed_home'
 
 def recon(sdk: DroneSDK):
     """侦察机：巡检拍照 -> 遇火情插一轮协同灭火 -> 到 G 等 -> 编队返回 A 点。"""
+    # 只开需要的那一路相机（巡检拍照 + 瞄准高层火情用前视）。仿真下是空操作。
+    sdk.set_camera_mode('front')
     sdk.PHOTO_DIR = PHOTO_DIR
     sdk.open_inbox(EV_AT_E, EV_DONE, EV_HOME)
     sdk.takeoff(height_m=CRUISE_AGL_M)
@@ -64,6 +66,8 @@ def supply(sdk: DroneSDK):
 
     写成循环：1#/2# 两栋都可能着火，侦察机可能通报两次。
     """
+    # 只开需要的那一路相机（瞄准高层火情用前视）。仿真下是空操作。
+    sdk.set_camera_mode('front')
     sdk.open_inbox(EV_FIRE, EV_BREACHED, EV_SPOT_CLEAR, EV_INSPECT_DONE)
     airborne = False
     while True:

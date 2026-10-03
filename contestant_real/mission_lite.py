@@ -10,6 +10,7 @@
 巡检循环、让位放行、收件箱管理，现在都是 SDK 调用。老版一行没动，两版并存。
 """
 from contest_sdk import DroneSDK
+from contest_sdk.exceptions import ContestSdkError
 
 
 # 场地参数全在 venue.py——仿真与真机只有那一个文件不同，本程序两边逐字节相同。
@@ -53,14 +54,27 @@ def _use_camera(sdk: DroneSDK, which: str) -> None:
     Args:
         which: `'front'` 前视 / `'down'` 下视 / `'none'` 两路全停。
     """
-    if which == 'none':
-        # 编队飞行那种整段不用相机的，两路全停。
-        sdk.set_camera_mode('front', 'stop')
-        sdk.set_camera_mode('down', 'stop')
-        return
-    other = 'down' if which == 'front' else 'front'
-    sdk.set_camera_mode(other, 'stop')      # 先停，先把 CPU 让出来
-    sdk.set_camera_mode(which, 'yolo')      # 再起，wait=True 等到真出数据
+    try:
+        if which == 'none':
+            # 编队飞行那种整段不用相机的，两路全停。
+            sdk.set_camera_mode('front', 'stop')
+            sdk.set_camera_mode('down', 'stop')
+            return
+        other = 'down' if which == 'front' else 'front'
+        sdk.set_camera_mode(other, 'stop')      # 先停，先把 CPU 让出来
+        sdk.set_camera_mode(which, 'yolo')      # 再起，wait=True 等到真出数据
+    except ContestSdkError as exc:
+        # **降级而不是中止。** 省 CPU 不该有权力打断一次飞行：切换走 WiFi
+        # 打到飞机，那条链路会间歇性断（SDK 内部已经重试 3 次，撞上长断链
+        # 还是会抛）。这里退回"两路全开"——多占约 13% 机载 CPU，但任务能
+        # 接着飞，后面要用的那一路一定在。
+        sdk.progress(f'[警告] 配相机失败（{exc!r}），降级为两路全开继续飞')
+        for cam in ('front', 'down'):
+            try:
+                sdk.set_camera_mode(cam, 'yolo', wait=False)
+            except ContestSdkError:
+                pass   # 连降级都失败就只能这样了，让后面的 wait_for_detection 去报
+        sdk.progress('[警告] 已降级：两路相机都开着，本轮不再切换')
 
 
 def _formation_home_recon(sdk: DroneSDK, last):
