@@ -190,8 +190,8 @@ log "网络：$CONTESTANT_NET_DESC"
 # （实测单路比双路省约 9% 整机），又真能抓住漏开。判据见 scripts/vision_gate.sh。
 source "$ROOT/scripts/vision_gate.sh"
 NEED_CAM="$(required_camera "$SCRIPT")"
-check_vision "$LEADER" "$NEED_CAM"
-check_vision "$FOLLOWER" "$NEED_CAM"
+ensure_vision "$LEADER" "$NEED_CAM"
+ensure_vision "$FOLLOWER" "$NEED_CAM"
 
 # ---- 6. 声光（只接地面站）----
 sl_dom=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' contestant-sound-light 2>/dev/null | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)

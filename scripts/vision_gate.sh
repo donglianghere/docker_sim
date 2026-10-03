@@ -88,3 +88,54 @@ _vision_hint() {   # _vision_hint <NS> <want>
     echo "          -d '{\"cam\":\"$cam\",\"mode\":\"yolo\"}' http://$ip:8890/vision/mode" >&2
     echo "   两机四路全开： ./vision_real.sh up && ./vision_real.sh status" >&2
 }
+
+# 把某架飞机的相机配置成"**只有需要的那一路在跑**"，然后验证。
+# 2026-10-03 用户要求："永远只有一路启动"。
+#
+# 为什么要放在运行器里做，而不是靠人或靠程序自己：
+#   · `vision_real.sh up` 是**四路全开**（两机×两路），是为"不知道要跑什么"
+#     准备的；
+#   · 单任务程序（groundfire/highrise/t1/t2/t3）**不会自己切相机**，它们只用
+#     飞行前设好的那一路；
+#   · 只有 mission_lite 会在阶段边界自己切（它两路分阶段用）。
+# 所以"起前把多余的停掉"只有运行器这一个地方能统一做——它已经通过
+# required_camera() 知道这个程序要哪一路了。
+#
+# 省多少：一个 yolo_detector_node 实测占机载约 12% 整机。不用相机的程序
+# （t4/t5/formation/basic_test）两路全停，省约 24%。
+ensure_vision() {   # ensure_vision <NS> <down|front|any|none>
+    local ns="$1" want="$2" ip need other
+    case "$ns" in NX01) ip=192.168.2.101 ;; NX02) ip=192.168.2.102 ;; *) die "不认识的命名空间 $ns" ;; esac
+    # any（mission_lite）：两个角色的第一个用相机的动作都是下视
+    # （recon 搜地面火情、supply 取器材精降），所以初始配成下视，
+    # 后面要前视时程序自己切。
+    case "$want" in
+        none)  need=""      ; other="" ;;
+        down)  need=cam1    ; other=cam0 ;;
+        front) need=cam0    ; other=cam1 ;;
+        any)   need=cam1    ; other=cam0 ;;
+    esac
+
+    _vis_post() {   # _vis_post <ip> <cam> <mode>
+        curl -s --noproxy '*' --max-time 25 -X POST -H 'Content-Type: application/json' \
+             -d "{\"cam\":\"$2\",\"mode\":\"$3\"}" "http://$1:8890/vision/mode" 2>/dev/null
+    }
+
+    if [ "$want" = none ]; then
+        log "$ns 本程序不用相机，两路全停（省约 24% 机载 CPU）"
+        _vis_post "$ip" all stop >/dev/null
+        return 0
+    fi
+
+    log "$ns 配相机：只留 $want（$need），停掉 $other"
+    # 先停多余的，再起需要的——先把 CPU 让出来再加新负载。
+    _vis_post "$ip" "$other" stop >/dev/null
+    local r; r="$(_vis_post "$ip" "$need" yolo)"
+    printf '%s' "$r" | grep -q '"ok": true' || {
+        echo "!! $ns 起 $need($want) 失败：$(printf '%s' "$r" | head -c 160)" >&2
+        die "配相机失败，已中止"
+    }
+    # 起完必须验到真出数据——POST 返回 ok 只说明命令被接受，节点可能还在起、
+    # 也可能起了就崩（漏掉的后果是 wait_for_detection 静默超时）。
+    check_vision "$ns" "$want"
+}
