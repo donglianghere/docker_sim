@@ -46,5 +46,8 @@ fi
 if [ "$#" -eq 0 ]; then
     exec docker exec -it "$CONTAINER" bash -c "${RMW_SETUP}exec bash"
 else
-    exec docker exec -it "$CONTAINER" bash -c "${RMW_SETUP}$1"
+    # 这一支不加 -t：非 TTY 环境（管道里、别的脚本里调）用 -it 会直接报
+    # "cannot attach stdin to a TTY-enabled container"。交互式那一支才要 -t。
+    # 2026-10-03 实测踩到（shell/enter_gcs.sh 转发过来跑一条命令时）。
+    exec docker exec "$CONTAINER" bash -c "${RMW_SETUP}$1"
 fi

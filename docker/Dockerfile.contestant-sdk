@@ -116,6 +116,25 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ros-humble-vision-msgs \
         python3-serial
 
+# 2026-10-03新增：matplotlib + 中文字体，给编队监视脚本(scripts/monitor.py)用。
+# 为什么必须装在**这个**镜像里：contestant_real/run_real.sh、run_test.sh 和
+# contestant_sim/run_test.sh 的监视容器都是用 contestant-sdk:latest 起的，而这
+# 个镜像原来没有 matplotlib——monitor.py 第 38 行 `import matplotlib` 直接
+# ModuleNotFoundError，**真机飞行从来就没有过编队间距记录和报告图**。
+# 一直没被发现，是因为监视起不来只警告不中止，而那行警告指向"DISPLAY 和 xhost
+# 授权"，跟真实原因无关——典型的静默失效。（只有 contestant_sim/run.sh 的监视
+# 一直是好的：它 docker exec 进 flight-stack 容器跑，那边镜像自带 matplotlib。）
+# fonts-wqy-zenhei：monitor.py 的字体列表第一项就是 'WenQuanYi Zen Hei'，不装
+# 的话图上所有中文渲染成空心方框——matplotlib 只会告警不会报错，图照出，
+# 看上去"成功了"。跟 gcs/Dockerfile 里同一个坑、同一套解法。
+# 单独一层：python3-matplotlib 会拖 numpy/PIL/fonttools/kiwisolver 一串依赖，
+# 体积比上面那几个小包大一个量级，分开便于复用缓存。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        python3-matplotlib \
+        fonts-wqy-zenhei
+
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
         -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \

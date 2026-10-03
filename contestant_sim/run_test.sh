@@ -27,7 +27,14 @@ ROOT="$(cd "$HERE/.." && pwd)"
 TDIR="$HERE/单机测试"
 IMAGE=contestant-sdk:latest
 LOGDIR="$ROOT/runtime_logs"
-LAYOUT=/opt/contest_mission_ws/src/contest_mission/config/sample_room_layout.yaml
+# 监视的底图布局。run.sh 用的是容器内路径
+# /opt/contest_mission_ws/src/.../sample_room_layout.yaml——那是 **flight-stack**
+# 镜像里才有的（run.sh 的监视是 docker exec 进那个容器跑的）。本脚本的监视跑在
+# contestant-sdk 容器里，**没有**那个路径，直接传过去会让 monitor.py 退回写死的
+# 老坐标、俯视图的房间/立柱位置跟实际场景对不上（2026-10-03 实测踩到，监视日志
+# 里有"布局 ... 读不了"那一行）。所以从宿主机挂一份进去。
+LAYOUT_HOST="$ROOT/src/contest_mission/config/sample_room_layout.yaml"
+LAYOUT=/layout.yaml
 SIMWORLD=docker_sim-sim-world-1
 C_TEST=sim_test
 C_MONITOR=sim_test_monitor
@@ -133,12 +140,18 @@ contestant_net_args sim "$ROOT" "$HOME/.cache/contest_sdk" || die "仿真网络�
 log "网络：$CONTESTANT_NET_DESC"
 
 # ---- 监视（单机也开：任何飞行测试都要同时起监视，2026-09-30 要求）----
+# ⚠️ 下面 --leader 和 --follower 传的是**同一个** $NS。单机测试只有一架飞机，
+# 而 monitor.py 要两个命名空间（它本来是给双机编队用的）。后果：**报告图里的
+# "编队间距"那条曲线恒为 0，没有意义** ——单机测试要看的是轨迹和高度，不是间距。
+# 双机那条路（run.sh / run_real.sh）传的是 NX01/NX02 两个不同的，间距才是真的。
+# monitor.py 没有单机模式，这里不改它（它在飞行时跑着，且有未提交改动）。
 MON_OUT="/logs/${BASENAME%.py}_sim_report.png"
 log "启动监视窗口（报告存 runtime_logs/$(basename "$MON_OUT")）"
 docker run -d --name "$C_MONITOR" --network host \
     -e DISPLAY="$DISPLAY" -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v /etc/localtime:/etc/localtime:ro \
     -v "$ROOT/scripts:/scripts:ro" -v "$LOGDIR:/logs" \
+    -v "$LAYOUT_HOST:$LAYOUT:ro" \
     "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
     python3 -u /scripts/monitor.py --layout "$LAYOUT" \
         --leader "$NS" --follower "$NS" --out "$MON_OUT" >/dev/null 2>&1 \
@@ -170,12 +183,20 @@ while docker ps --format '{{.Names}}' | grep -qx "$C_TEST"; do
     sleep 5
 done
 docker exec "$C_MONITOR" pkill -INT -f monitor.py >/dev/null 2>&1 || true
+# 容器一会儿就被 trap 删掉，`docker logs` 的内容也跟着没了。先把**完整**日志
+# 和监视输出落盘——下面只打 tail -25，光靠它排查不了（2026-10-03 实测：
+# 第 3 趟规划失败，但前两趟的日志已经被 tail 截掉、无从对比）。
+docker logs "$C_TEST"    > "$LOGDIR/${BASENAME%.py}_sim_test.log"    2>&1 || true
+docker logs "$C_MONITOR" > "$LOGDIR/${BASENAME%.py}_sim_monitor.log" 2>&1 || true
+
 sleep 3
 docker run --rm -v "$LOGDIR:/logs" --entrypoint chown "$IMAGE" \
     -R "$(id -u):$(id -g)" /logs >/dev/null 2>&1 || true
 
 echo "================ $BASENAME 结果（仿真）================"
-docker logs "$C_TEST" 2>&1 | tail -25
+tail -25 "$LOGDIR/${BASENAME%.py}_sim_test.log"
 echo "======================================================="
 echo "报告图：runtime_logs/$(basename "$MON_OUT")"
+echo "完整日志：runtime_logs/${BASENAME%.py}_sim_test.log"
+echo "监视日志：runtime_logs/${BASENAME%.py}_sim_monitor.log"
 echo "跑真机同一个测试： cd ../contestant_real && ./run_test.sh $WHICH"

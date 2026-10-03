@@ -165,6 +165,10 @@ log "网络：$CONTESTANT_NET_DESC"
 # ---- 监视（单机也开：高度曲线是 t5 的主要判据）----
 MON_OUT="/logs/${BASENAME%.py}_report.png"
 log "启动监视窗口（报告存 runtime_logs/$(basename "$MON_OUT")）"
+# ⚠️ 下面 --leader 和 --follower 传的是**同一个** $NS。单机测试只有一架飞机，
+# 而 monitor.py 要两个命名空间（它本来是给双机编队用的）。后果：报告图里的
+# "编队间距"那条曲线**恒为 0、没有意义**——单机测试看的是轨迹和高度。
+# 双机那条路（run_real.sh）传 NX01/NX02 两个不同的，间距才是真的。
 docker run -d --name "$C_MONITOR" --network host \
     -e DISPLAY="$DISPLAY" -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v /etc/localtime:/etc/localtime:ro \
@@ -209,9 +213,11 @@ echo
 echo "================ $BASENAME 结果 ================"
 code="$(docker inspect -f '{{.State.ExitCode}}' "$C_TEST" 2>/dev/null || echo '?')"
 echo "退出码 $code"
-docker logs "$C_TEST" 2>&1 | grep -E 'Traceback|Error|错误|失败|!!' | tail -8 || true
+grep -E 'Traceback|Error|错误|失败|!!' "$LOGDIR/${BASENAME%.py}_test.log" | tail -8 || true
 echo
 echo "报告图：runtime_logs/$(basename "$MON_OUT")"
+echo "完整日志：runtime_logs/${BASENAME%.py}_test.log"
+echo "监视日志：runtime_logs/${BASENAME%.py}_monitor.log"
 echo "机载栈仍在运行（本脚本不拆机载容器）。"
 
 [ "$KEEP" = "0" ] && docker rm -f "$C_TEST" "$C_MONITOR" >/dev/null 2>&1 || \
