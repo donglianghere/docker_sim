@@ -2,8 +2,8 @@
 # 跑单项任务测试（任务2/任务3 单项测试.py）：重启仿真 -> 等两机就绪 ->
 # 起两个选手容器 -> 等两边都退出 -> 报结果。
 #
-#   ./scripts/run_task_test.sh --script groundfire.py
-#   ./scripts/run_task_test.sh --script highrise.py --keep
+#   ./scripts/run_task_test.sh --script groundfire_lite.py
+#   ./scripts/run_task_test.sh --script highrise_lite.py --keep
 #
 # 跟 run_formation_test.sh 的区别只有两处：跑哪个脚本可选；结束判据用
 # **容器退出**而不是某一行日志——任务脚本没有统一的结束标志，长机和僚机
@@ -11,7 +11,7 @@
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
-SCRIPT="groundfire.py"
+SCRIPT="groundfire_lite.py"
 SPACING=4.0
 RESTART=1
 KEEP=0

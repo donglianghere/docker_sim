@@ -36,16 +36,20 @@ C_OBS = "#0b7a5a"      # 高层巡检观察位 M/N
 
 
 
-def read_observation_points(highrise_path):
-    """从 highrise.py 解析出观察位 M/N。
+def read_observation_points(venue_path):
+    """从 venue.py 解析出观察位 M/N。
 
-    不在这儿另写一份坐标：权威值是 highrise.py 的 POINT_M / POINT_N
-    （INSPECT_STATIONS 里引用），写死在图里迟早跟飞行代码对不上。
+    不在这儿另写一份坐标：权威值是 venue.py 的 POINT_M / POINT_N
+    （STATIONS 里引用），写死在图里迟早跟飞行代码对不上。
     解析不到就返回空，图照画，只是少两个标注。
+
+    2026-10-03 改到 venue.py：坐标原来在 highrise.py 里，后来场地坐标全部
+    外提到 venue.py（仿真/真机两侧共用同一份程序、只换 venue.py），
+    highrise_lite.py 里现在只有一行 `from venue import ...`，AST 扫不到赋值。
     """
     try:
         import ast
-        tree = ast.parse(open(highrise_path, encoding="utf-8").read())
+        tree = ast.parse(open(venue_path, encoding="utf-8").read())
         out = {}
         for n in tree.body:
             if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name):
@@ -61,7 +65,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--layout", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--highrise", default="contestant_sim/highrise.py",
+    ap.add_argument("--venue", default="contestant_sim/venue.py",
                     help="解析观察位 M/N 用，见 read_observation_points")
     args = ap.parse_args()
     L = yaml.safe_load(open(args.layout, encoding="utf-8"))
@@ -188,7 +192,7 @@ def main():
                     fontsize=8.5, color=color, fontweight="bold")
 
     # ---- 高层巡检观察位 M / N ----
-    for name, (ox, oy) in read_observation_points(args.highrise).items():
+    for name, (ox, oy) in read_observation_points(args.venue).items():
         ax.plot(ox, oy, marker="^", ms=10, color=C_OBS, zorder=6)
         # y=16 这条线上挤着 E、G、地面火情点，观察位标注一律往下排，别横着放
         ax.annotate(f"观察位{name}\n({ox:.0f},{oy:.0f})",

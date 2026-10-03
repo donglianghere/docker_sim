@@ -3,17 +3,28 @@
 # 等飞完 -> 打印结果 -> 收尾。
 #
 #   ./scripts/run_formation_test.sh
-#   ./scripts/run_formation_test.sh --route "5,-8 5,8 -5,8" --spacing 4.0
+#   ./scripts/run_formation_test.sh --spacing 4.0         # 改僚机跟随间距
 #   ./scripts/run_formation_test.sh --no-restart      # 沿用当前已经在跑的仿真
 #   ./scripts/run_formation_test.sh --keep            # 结束后不删选手容器，便于翻日志
 #
-# 跑的是 contestant_sim/formation.py，两架飞机各起一个容器、
+# 跑的是 contestant_sim/formation_lite.py，两架飞机各起一个容器、
 # 跑同一份代码，只有 --role 不同。
+#
+# ⚠️ --route 现在只影响 monitor 画的参考线，不影响飞机实际航线（航线在
+#    contestant_sim/venue.py 里）。显式传了会提示一句。
 set -eo pipefail
 
 cd "$(dirname "$0")/.."
 
-ROUTE="7,-9.5 7,9.5 -7,9.5 -7,-9.5"
+# 当前场景 sample_room 的航线，取自 contestant_sim/venue.py 的
+# [ROUTE_A,B,C,G,E,F,G,D]。原来这里是旧场景 fire_drill_room 的
+# "7,-9.5 7,9.5 -7,9.5 -7,-9.5"（房间中心为原点、有负值），sample_room 以
+# 西南角为原点、全是正数，那串值画出来整条线都在场外。
+# ⚠️ 这个值**只喂给 monitor 画参考线**，不决定飞机怎么飞：选手程序改成
+# formation_lite.py 之后，航线写在 venue.py 里，`DroneSDK.run()` 虽然收
+# `--route` 但解析完没有用过它（capabilities.py 的 ap.add_argument('--route')
+# 下面再没出现 args.route）。要改实际航线就去改 venue.py。
+ROUTE="3.0,3.0 3.0,22.0 17.0,22.0 17.0,16.0 10.0,16.0 14.0,14.0 17.0,16.0 17.0,3.0"
 SPACING=3.5
 RESTART=1
 KEEP=0
@@ -23,7 +34,7 @@ TIMEOUT_S=900
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --route)      ROUTE="$2"; shift 2 ;;
+        --route)      ROUTE="$2"; ROUTE_GIVEN=1; shift 2 ;;
         --spacing)    SPACING="$2"; shift 2 ;;
         --no-restart) RESTART=0; shift ;;
         --keep)       KEEP=1; shift ;;
@@ -33,12 +44,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ "${ROUTE_GIVEN:-0}" = "1" ]; then
+    echo "注意：--route 只改 monitor 画的参考线，飞机实际航线在" >&2
+    echo "      contestant_sim/venue.py 里（formation_lite.py 从那儿 import，" >&2
+    echo "      DroneSDK.run() 收了 --route 但没有使用）。要改航线请改 venue.py。" >&2
+fi
+
 LEADER=NX01
 FOLLOWER=NX02
 FSNX01=docker_sim-flight-stack-nx01-1
 IMAGE=contestant-sdk:latest
 WORKDIR="$PWD/contestant_sim"
-SCRIPT="formation.py"
+SCRIPT="formation_lite.py"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
