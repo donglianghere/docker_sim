@@ -35,7 +35,7 @@ SUPPLY_EVENTS = (EV_KIND, EV_GROUND, EV_HIGH, EV_BREACHED, EV_SPOT_CLEAR)
 # 侦察机 NX01
 # ---------------------------------------------------------------------------
 def _use_camera(sdk: DroneSDK, which: str) -> None:
-    """只开需要的那一路相机，同时停掉另一路——两路相机不同时用。
+    """配相机：`'front'` / `'down'` 只开那一路并停掉另一路，`'none'` 两路全停。
 
     为什么值得这么做：一个 yolo_detector_node 实测占机载约 12% 整机 CPU，
     单路比双路省约 9%（真机实测 86% vs 95%）。而本任务的两路从来不重叠：
@@ -44,9 +44,20 @@ def _use_camera(sdk: DroneSDK, which: str) -> None:
     切换代价实测 **4 秒**（停掉后该路数据立刻为 0，重起 4 秒出数据）。所以
     调用点都选在**后面紧跟一段飞行**的位置，4 秒被转场时间盖住、等于不花时间。
 
+    `'none'` 用在整段不碰相机的阶段（第 1 轮编队飞行只有 lead_formation 和
+    hold_at），两路全停省得更多。
+
     仿真下 `set_camera_mode()` 是空操作（没有 control_server，检测节点随飞行栈
     一起起），所以这个函数在仿真和真机都能原样跑——本程序两边逐字节相同。
+
+    Args:
+        which: `'front'` 前视 / `'down'` 下视 / `'none'` 两路全停。
     """
+    if which == 'none':
+        # 编队飞行那种整段不用相机的，两路全停。
+        sdk.set_camera_mode('front', 'stop')
+        sdk.set_camera_mode('down', 'stop')
+        return
     other = 'down' if which == 'front' else 'front'
     sdk.set_camera_mode(other, 'stop')      # 先停，先把 CPU 让出来
     sdk.set_camera_mode(which, 'yolo')      # 再起，wait=True 等到真出数据
@@ -110,6 +121,8 @@ def recon(sdk: DroneSDK):
     sdk.takeoff(height_m=CRUISE_AGL_M)
 
     sdk.progress('===== 第 1 轮：编队飞行 =====')
+    # 这一轮全程不用相机（只有 lead_formation + hold_at），两路全停。
+    _use_camera(sdk, 'none')
     # disband_at=D 要显式给。不给的话默认判据是"长机飞回**自己起飞点**上空"，
     # 而 (8,3) 根本不在航线上，只是碰巧落在最后一段 D(17,3)->A(3,3) 的连线上
     # （都在 y=3）——编队会在离终点还有 5 米的半路上散掉，散在一个跟任务无关的
@@ -212,6 +225,8 @@ def supply(sdk: DroneSDK):
     sdk.takeoff(height_m=CRUISE_AGL_M)
 
     sdk.progress('===== 第 1 轮：编队飞行 =====')
+    # 这一轮全程不用相机（follow_formation + return_home），两路全停。
+    _use_camera(sdk, 'none')
     sdk.follow_formation(agl_m=CRUISE_AGL_M, join='station')
     sdk.return_home(sound='任务机已降落', report=EV_ROUND_DONE, direct=True)
 
