@@ -63,10 +63,22 @@ cd ~/ai_uav/docker_sim/shell && ./start_gcs.sh
 |---|---|
 | `start_sound_light_server.sh` | 起 `contestant-sound-light`（`contest_sdk.sound_light_server`）。串口默认 `/dev/ttyUSB0` |
 | `stop_sound_light_server.sh` | 停它 |
+| `test_sound_light.sh` | **自检：让装置真的响一次、亮一次。** 无参数跑"蓝→红→绿"三条序列；`--list` 列全 20 个事件；`--event <名>` / `--sound 1..20` 放单个；`--mute` 熄灯静音；`--status` 只看串口状态 |
 
 > **仓库里没有别的东西能起它** —— `scripts/check_env.sh` 和
 > `scripts/contestant_network.sh` 只是去查它的域号，不负责起。
 > 注意 `brltty` 会抢 CH340，被抢了要先停它。
+
+自检原理：常驻程序订阅 `/sound_light/request`（`std_msgs/String`），**纯文本
+就行** —— 事件名 / 声音编号 1~20 / `mute`。`test_sound_light.sh` 从已在跑的
+`contestant-sound-light` 容器里发，那上面已经有正确的 `ROS_DOMAIN_ID=20` 和
+`CYCLONEDDS_URI`，不用另起容器也不会跟仿真的 21 域搞混。
+
+两个时间约束（别和"没响"搞混）：**最小间隔 2.5 秒**（连发更密的会排队而不是
+立刻播，所以序列里 sleep 3）、**过期 15 秒**（排队超时的请求被丢掉）。
+
+没响的分法：看 `docker logs contestant-sound-light` 有没有 `发送：` 那一行
+—— 有，问题在串口/装置那端（接线、电源、波特率）；没有，是请求没到常驻程序。
 
 ---
 
