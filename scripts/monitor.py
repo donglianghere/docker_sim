@@ -28,6 +28,7 @@
 照常记录，结束时仍然出 PNG。
 """
 import argparse
+import collections
 import math
 import os
 import signal
@@ -195,6 +196,18 @@ class FormationMonitor(Node):
         self._gap_started = False
         self._low_since = {n: None for n in names}
         self.landed = {n: False for n in names}
+        # ---- 链路统计（2026-10-02 新增，田字格右上角那块面板用）----
+        # 注意这些量必须在下面 10Hz 降采样**之前**累计，否则测出来的频率
+        # 永远是 10Hz，真实收包速率和抖动全被抹平。
+        self.link = {n: {
+            'recv': collections.deque(maxlen=600),   # 到达时刻(相对 t0)，约 30s@20Hz
+            'delay': collections.deque(maxlen=600),  # 端到端延迟 ms（两机已对时到地面站）
+            'count': 0,                              # 累计收包数
+            'last': None,                            # 最后一次到达时刻
+            'max_gap': 0.0,                          # 最长断流时长，演示拔网线时看这个
+        } for n in names}
+        self.diag_recv = collections.deque(maxlen=600)   # formation_diag 到达时刻：
+                                                         # 它在更新=僚机确实在消费长机数据
         for n in names:
             self.create_subscription(PoseStamped, f'/{n}/uwb/pose_abs',
                                      self._make_cb(n), 10)
@@ -210,6 +223,25 @@ class FormationMonitor(Node):
                              1.0 - 2.0 * (q.y * q.y + q.z * q.z))
             d = self.track[name]
             t = time.monotonic() - self.t0
+
+            # ---- 链路统计：放在降采样 return 之前，必须每条消息都记 ----
+            lk = self.link[name]
+            if lk['last'] is not None:
+                gap = t - lk['last']
+                if gap > lk['max_gap']:
+                    lk['max_gap'] = gap
+            lk['last'] = t
+            lk['count'] += 1
+            lk['recv'].append(t)
+            # 延迟 = 本机接收时刻 - 发布时刻。两机和地面站都已 chrony 对到
+            # 同一基准(2026-10-02)，这个差值才有意义；没对时的话是时钟偏差。
+            st = msg.header.stamp
+            if st.sec or st.nanosec:
+                dly = (self.get_clock().now().nanoseconds
+                       - (st.sec * 1_000_000_000 + st.nanosec)) / 1e6
+                if -1000.0 < dly < 10000.0:        # 明显离谱的丢掉(没对时/stamp异常)
+                    lk['delay'].append((t, dly))
+
             # 降到 10 Hz 存，画图够用，内存也不会涨太快
             if d['t'] and t - d['t'][-1] < 0.1:
                 return
@@ -223,6 +255,7 @@ class FormationMonitor(Node):
 
     def _on_diag(self, msg):
         if len(msg.data) >= 1:
+            self.diag_recv.append(time.monotonic() - self.t0)
             self.diag_t.append(time.monotonic() - self.t0)
             self.diag_lag.append(float(msg.data[0]))
             self.diag_trim.append(float(msg.data[5]) if len(msg.data) >= 6 else 0.0)
@@ -391,10 +424,126 @@ def stats_lines(mon):
     return out
 
 
+def min_clearance(x, y):
+    """机体到最近障碍(四面墙/方柱/圆柱)的水平净距，米。
+
+    纯闭式公式，3 方柱+4 墙实测每帧 1.5 微秒(两机)，相比 matplotlib 一次
+    重绘 70~80ms 可以完全忽略，放心每帧算。
+    """
+    _x0, _y0 = (0.0, 0.0) if ROOM_ORIGIN == 'southwest' else (-ROOM_X / 2, -ROOM_Y / 2)
+    best = min(x - _x0, _x0 + ROOM_X - x, y - _y0, _y0 + ROOM_Y - y)   # 四面墙
+    for px, py in PILLARS:                                             # 方柱：点到轴对齐矩形
+        dx = max(abs(x - px) - PILLAR_HALF, 0.0)
+        dy = max(abs(y - py) - PILLAR_HALF, 0.0)
+        best = min(best, math.hypot(dx, dy))
+    for cx, cy, cr in CYLINDERS:                                       # 圆柱
+        best = min(best, max(math.hypot(x - cx, y - cy) - cr, 0.0))
+    return best
+
+
+CLEAR_WARN_M = 0.8      # 净距低于这个值，俯视图上标红报警
+
+
+def _rate(times, now, win=5.0):
+    """最近 win 秒的到达频率(Hz)和到达间隔抖动(标准差, ms)。"""
+    recent = [t for t in times if now - t <= win]
+    if len(recent) < 2:
+        return 0.0, 0.0
+    hz = (len(recent) - 1) / max(recent[-1] - recent[0], 1e-6)
+    gaps = [(recent[i] - recent[i - 1]) * 1000.0 for i in range(1, len(recent))]
+    mean = sum(gaps) / len(gaps)
+    jit = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5
+    return hz, jit
+
+
+def draw_link_panel(ax, mon, now):
+    """田字格右上：双机通信链路面板。
+
+    一格里分三层画：上层拓扑动画(点在流=在收包)、中层三个大数字、
+    下层延迟条带。全部用 axes 归一化坐标手画，不嵌套 inset——inset 在
+    每帧 ax.clear() 之后要重建，反而麻烦。
+    """
+    ax.clear()
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis('off')
+    ax.set_title('双机通信链路')
+    lead, foll = mon.names[0], mon.names[1]
+    lk_l, lk_f = mon.link[lead], mon.link[foll]
+    hz_l, jit_l = _rate(lk_l['recv'], now)
+    hz_f, jit_f = _rate(lk_f['recv'], now)
+    hz_d, _ = _rate(mon.diag_recv, now)
+
+    def age(lk):
+        return 999.0 if lk['last'] is None else now - lk['last']
+
+    def color_of(a):
+        return '#2ca02c' if a < 0.5 else ('#ff7f0e' if a < 1.0 else '#d62728')
+
+    # ---------- 上层：拓扑 ----------
+    BOXY, BOXH = 0.74, 0.16
+    for cx, name, lk in ((0.17, lead, lk_l), (0.63, foll, lk_f)):
+        a = age(lk)
+        ax.add_patch(matplotlib.patches.FancyBboxPatch(
+            (cx, BOXY), 0.20, BOXH, boxstyle='round,pad=0.012',
+            fc='#eef5ff', ec=color_of(a), lw=2.0))
+        ax.text(cx + 0.10, BOXY + BOXH * 0.62, name, ha='center', va='center',
+                fontsize=11, fontweight='bold')
+        ax.text(cx + 0.10, BOXY + BOXH * 0.22, '长机' if name == lead else '僚机',
+                ha='center', va='center', fontsize=8, color='#555')
+    # 机间连线 + 流动的点：点的相位按"实际收包数"推进，没收到包就不动
+    y_mid = BOXY + BOXH / 2
+    ax.annotate('', xy=(0.63, y_mid), xytext=(0.37, y_mid),
+                arrowprops=dict(arrowstyle='-|>', lw=2.0, color=color_of(age(lk_f))))
+    phase = (lk_f['count'] % 8) / 8.0
+    for k in range(4):
+        fx = 0.38 + ((phase + k / 4.0) % 1.0) * 0.24
+        ax.plot([fx], [y_mid], 'o', ms=5, color='#1f77b4', alpha=0.85)
+    ax.text(0.50, BOXY + BOXH + 0.035, f'/{lead}/uwb/pose_abs', ha='center',
+            fontsize=8, color='#444')
+    ax.text(0.50, y_mid - 0.072, f'diag 回报 {hz_d:4.1f} Hz', ha='center',
+            fontsize=8, color='#2ca02c' if hz_d > 0.5 else '#d62728')
+
+    # ---------- 中层：三个大数字 ----------
+    d_l = lk_l['delay'][-1][1] if lk_l['delay'] else float('nan')
+    d_f = lk_f['delay'][-1][1] if lk_f['delay'] else float('nan')
+    gap_now = mon.gap_d[-1] if mon.gap_d else float('nan')
+    cells = (('延迟 ms', f'{d_l:.0f}/{d_f:.0f}', '#1f77b4'),
+             ('频率 Hz', f'{hz_l:.0f}/{hz_f:.0f}', '#2ca02c'),
+             ('间距 m', f'{gap_now:.2f}', '#9467bd'))
+    for i, (lab, val, col) in enumerate(cells):
+        cx = 0.17 + i * 0.33
+        ax.text(cx, 0.60, val, ha='center', va='center', fontsize=19,
+                fontweight='bold', color=col)
+        ax.text(cx, 0.515, lab, ha='center', va='center', fontsize=8, color='#555')
+
+    # ---------- 下层：延迟条带 ----------
+    X0, X1, Y0, Y1, WIN = 0.08, 0.98, 0.07, 0.44, 30.0
+    ax.add_patch(matplotlib.patches.Rectangle((X0, Y0), X1 - X0, Y1 - Y0,
+                                              fill=False, ec='#ccc', lw=0.8))
+    allv = [v for lk in (lk_l, lk_f) for t, v in lk['delay'] if now - t <= WIN]
+    vmax = max(max(allv) if allv else 50.0, 20.0) * 1.15
+    for lk, name in ((lk_l, lead), (lk_f, foll)):
+        pts = [(t, v) for t, v in lk['delay'] if now - t <= WIN]
+        if len(pts) < 2:
+            continue
+        xs = [X0 + (X1 - X0) * (1.0 - (now - t) / WIN) for t, _ in pts]
+        ys = [Y0 + (Y1 - Y0) * min(v / vmax, 1.0) for _, v in pts]
+        ax.plot(xs, ys, '-', lw=1.2, color=COLORS[name], label=name)
+    ax.text(X0 + 0.005, Y1 - 0.03, f'端到端延迟 (上限 {vmax:.0f} ms，最近 {WIN:.0f}s)',
+            fontsize=7.5, color='#666')
+    ax.text(X0 + 0.005, Y0 + 0.012,
+            f'断流最长 {max(lk_l["max_gap"], lk_f["max_gap"]):.1f}s   '
+            f'抖动 {jit_l:.0f}/{jit_f:.0f} ms   收包 {lk_l["count"]}/{lk_f["count"]}',
+            fontsize=7.5, color='#666')
+
+
 def draw(fig, axes, mon):
-    ax_xy, ax_z, ax_gap = axes
-    for ax in axes:
+    # 田字格（2026-10-02 改）：
+    #   左上 俯视轨迹+障碍净距   右上 通信链路面板
+    #   左下 间距+高度(同为米)   右下 速度+偏航(双轴)
+    ax_xy, ax_link, ax_gap, ax_vel = axes.ravel()
+    for ax in (ax_xy, ax_gap, ax_vel):
         ax.clear()
+    now = time.monotonic() - mon.t0
 
     # ---- ① 俯视轨迹 ----
     ax_xy.set_title('水平轨迹（俯视）')
@@ -433,6 +582,26 @@ def draw(fig, axes, mon):
                        ((x1 + x2) / 2, (y1 + y2) / 2),
                        fontsize=9, color='#222',
                        bbox=dict(fc='white', ec='none', alpha=0.7, pad=1.5))
+    # ---- 障碍净距：撞过 3# 柱，这个数值要一眼能看见 ----
+    # 开销实测 1.5us/帧(两机)，相对一次重绘 70~80ms 完全可忽略，每帧算。
+    clr_txt = []
+    for n in mon.names:
+        d = mon.track[n]
+        if not d['t']:
+            continue
+        c = min_clearance(d['x'][-1], d['y'][-1])
+        clr_txt.append((n, c))
+        if c < CLEAR_WARN_M:          # 逼近障碍：当前位置套一个红圈
+            ax_xy.plot([d['x'][-1]], [d['y'][-1]], 'o', ms=16, mfc='none',
+                       mec='#d62728', mew=2.2, zorder=6)
+    if clr_txt:
+        worst = min(c for _, c in clr_txt)
+        # 放进标题：右下角会被图边界截断，左下角被飞行统计占了
+        ax_xy.set_title('水平轨迹（俯视）    最近障碍 '
+                        + '/'.join(f'{c:.2f}' for _, c in clr_txt) + ' m',
+                        color='#d62728' if worst < CLEAR_WARN_M else 'black',
+                        fontweight='bold' if worst < CLEAR_WARN_M else 'normal')
+
     ax_xy.set_aspect('equal'); ax_xy.grid(alpha=0.3)
     ax_xy.set_xlabel('x (m)'); ax_xy.set_ylabel('y (m)')
     ax_xy.legend(loc='upper right', fontsize=8)
@@ -447,34 +616,65 @@ def draw(fig, axes, mon):
     tmax = max([d['t'][-1] for d in mon.track.values() if d['t']] or [0.0])
     tlo = 0.0                                   # 全程，不滚动
 
-    # ---- ② 高度 ----
-    ax_z.set_title('高度-时间（绝对高度，抬起=飞过仿地模块）')
+    # ---- ② 链路面板（田字格右上）----
+    draw_link_panel(ax_link, mon, now)
+
+    # ---- ③ 间距 + 高度（都是米，共用一个 y 轴，省掉 twinx）----
     for n in mon.names:
         d = mon.track[n]
         if d['t']:
-            ax_z.plot(d['t'], d['z'], '-', color=COLORS[n], lw=1.4, label=n)
+            ax_gap.plot(d['t'], d['z'], ':', color=COLORS[n], lw=1.1,
+                        alpha=0.75, label=f'{n} 高度')
     # 这条曲线是 uwb/pose_abs 的 z——仿真里它来自 uwb_ground_truth_node，
     # 是**绝对高度**；而定高钉的是测距雷达的**离地高度**。所以飞过仿地模块
     # 上空时曲线会整体抬起来一个模块高度再落回去，那是仿地效果本身，不是超调。
     # 虚线只是"平地上离地 2.0 m 对应的绝对高度"，仅供对照。
-    ax_z.axhline(mon.cruise_agl, ls='--', color='#888', lw=1.0,
-                 label=f'平地基准 {mon.cruise_agl:.1f} m')
-    ax_z.set_xlim(tlo, max(tmax, tlo + 5)); ax_z.grid(alpha=0.3)
-    ax_z.set_ylabel('z (m)'); ax_z.legend(loc='lower right', fontsize=8)
+    ax_gap.axhline(mon.cruise_agl, ls=':', color='#aaa', lw=1.0,
+                   label=f'平地基准 {mon.cruise_agl:.1f} m')
 
-    # ---- ③ 间距 ----
+    # ---- 间距本体 ----
     # 2026-09-28（用户要求）：这张图只留两条线——目标间距 + 节点自报间距。
     # 之前叠的"按航线投影算的间距""直线距离""补偿后的有效跟随距离"都撤掉，
     # 数据照常记进 CSV，要复盘再翻 CSV。
-    ax_gap.set_title('两机间距-时间')
+    ax_gap.set_title('间距 & 高度-时间')
     ax_gap.axhline(mon.spacing, ls='--', color='#888', lw=1.2,
                    label=f'目标 {mon.spacing:.1f} m')
     if mon.diag_t:
         ax_gap.plot(mon.diag_t, mon.diag_gap,
                     '-', color='#ff7f0e', lw=1.4, label='节点自报间距')
     ax_gap.set_xlim(tlo, max(tmax, tlo + 5)); ax_gap.grid(alpha=0.3)
-    ax_gap.set_xlabel('t (s)'); ax_gap.set_ylabel('间距 (m)')
-    ax_gap.legend(loc='upper right', fontsize=8)
+    ax_gap.set_xlabel('t (s)'); ax_gap.set_ylabel('米')
+    ax_gap.legend(loc='upper right', fontsize=7, ncol=2)
+
+    # ---- ④ 速度 + 偏航（田字格右下，双 y 轴）----
+    # 协调转弯做得对不对就看这格：速度掉到 0 + yaw 急变 = 拐点悬停转向(要避免)；
+    # 速度平稳 + yaw 渐变 = 协调转弯。
+    ax_vel.set_title('速度 & 偏航-时间')
+    twin = getattr(draw, '_twin', None)
+    if twin is None or twin.figure is not fig:
+        twin = ax_vel.twinx()
+        draw._twin = twin
+    twin.clear()
+    for n in mon.names:
+        d = mon.track[n]
+        if len(d['t']) >= 3:
+            ts = d['t']
+            sp = [0.0]
+            for i in range(1, len(ts)):
+                dt = ts[i] - ts[i - 1]
+                sp.append(math.hypot(d['x'][i] - d['x'][i - 1],
+                                     d['y'][i] - d['y'][i - 1]) / dt if dt > 1e-3 else sp[-1])
+            # 5 点滑动平均，压掉 10Hz 差分的毛刺
+            k = 5
+            sm = [sum(sp[max(0, i - k + 1):i + 1]) / len(sp[max(0, i - k + 1):i + 1])
+                  for i in range(len(sp))]
+            ax_vel.plot(ts, sm, '-', color=COLORS[n], lw=1.4, label=f'{n} 速度')
+            twin.plot(ts, [math.degrees(v) for v in d['yaw']], '--',
+                      color=COLORS[n], lw=1.0, alpha=0.55)
+    ax_vel.set_xlim(tlo, max(tmax, tlo + 5)); ax_vel.grid(alpha=0.3)
+    ax_vel.set_xlabel('t (s)'); ax_vel.set_ylabel('速度 (m/s)')
+    twin.set_ylabel('偏航 (°，虚线)'); twin.set_ylim(-190, 190)
+    ax_vel.legend(loc='upper right', fontsize=7)
     fig.tight_layout()
 
 
@@ -577,7 +777,7 @@ def main():
              for tok in args.route.split()] if args.route else None
     mon = FormationMonitor([args.leader, args.follower],
                            args.spacing, args.cruise_agl, args.tol, route)
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5.5))
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9.5))   # 田字格
     if gui:
         plt.ion(); plt.show(block=False)
 

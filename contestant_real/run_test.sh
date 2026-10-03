@@ -128,17 +128,11 @@ if [ "$vu" != "True" ]; then
 fi
 log "机载栈就绪：$ns_rep  flight_up=$fu  vision_up=$vu"
 
-# 视觉：统一交给 ensure_vision——它按程序需要把相机配成"最多只有一路"，
-# 不用相机的程序（t4/t5）两路全停。2026-10-03 用户要求"每架飞机永远最多只有
-# 一路启动，编队飞行可以 0 路"。
-# 原来这里是 `case $WHICH in t4|t5) 跳过视觉检查 ;;` 的外壳，把整段绕过去——
-# 结果 t4/t5 既不检查**也不会停掉相机**，实测跑 t4 时两路 yolo 还在跑
-# （4 个进程里剩 2 个）。跳过"检查"不等于跳过"配置"。
+# 相机：不在这里配，由程序自己声明（见 run_real.sh 同名处的说明）。
+# 但网络参数下面起容器要用，这里先算出来。
 # shellcheck source=/dev/null
 source "$ROOT/scripts/contestant_network.sh"
 contestant_net_args real "$ROOT" "$HOME/.cache/contest_sdk" || die "网络参数生成失败"
-source "$ROOT/scripts/vision_gate.sh"
-ensure_vision "$NS" "$(required_camera "$BASENAME")"
 # t4/t5 跳过了上面的 source，这里补上
 [ ${#CONTESTANT_NET_ARGS[@]} -gt 0 ] 2>/dev/null || {
     source "$ROOT/scripts/contestant_network.sh"

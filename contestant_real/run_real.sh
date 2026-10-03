@@ -179,19 +179,16 @@ source "$ROOT/scripts/contestant_network.sh"
 contestant_net_args real "$ROOT" "$HOME/.cache/contest_sdk" || die "真机网络参数生成失败"
 log "网络：$CONTESTANT_NET_DESC"
 
-# ---- 5. 视觉就绪判据（真机特有）----
-# 机载的检测节点**不随栈自启**，要靠 POST /vision/mode 拉起，而且不持久化。
-# 不检查的话会出现"飞行栈一切正常、wait_for_detection 永远等不到"的静默失效。
-#
-# 2026-10-03 重写：原来数的是 `ros2 topic list | grep -c vision/detections >= 2`，
-# 那是**数话题数不是数相机路数**——两路相机发同一个话题、靠 frame_id 区分，
-# 一架只要有任意一路话题就存在，漏开程序要用的那一路照样放行（实测确认过）。
-# 现在按**本程序真正需要的那一路**验 frame_id，既支持"只起一路省 CPU"
-# （实测单路比双路省约 9% 整机），又真能抓住漏开。判据见 scripts/vision_gate.sh。
-source "$ROOT/scripts/vision_gate.sh"
-NEED_CAM="$(required_camera "$SCRIPT")"
-ensure_vision "$LEADER" "$NEED_CAM"
-ensure_vision "$FOLLOWER" "$NEED_CAM"
+# ---- 5. 相机：不在这里配 ----
+# 用哪一路相机**由程序自己声明**（开头调 sdk.set_camera_mode()，它会起需要的
+# 那一路、停掉另一路，并等到真出数据才返回；失败直接抛异常）。
+# 这里曾经有一套"按程序文件名猜需要哪路、运行器替它配好"的机制，拆掉了：
+#   · 按文件名匹配（*groundfire*|*抓取*…）本身就脆，改个名就失效，新程序要
+#     回来改表；
+#   · 程序自己最清楚用哪一路，声明在代码里比写在运行器的表里更不容易错；
+#   · set_camera_mode(wait=True) 本身就验证了"这一路真在出数据"，不需要运行器
+#     再单独验一遍。
+# 需要的只是"能动态起停"这个能力，那在 SDK 里。
 
 # ---- 6. 声光（只接地面站）----
 sl_dom=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' contestant-sound-light 2>/dev/null | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)
