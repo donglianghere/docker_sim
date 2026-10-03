@@ -1,82 +1,86 @@
-# shell —— 宿主机侧的启停与维护脚本
+# shell —— 容器起停入口
 
-2026-10-03 从 `/home/robots/ai_uav/` 顶层移进来。移之前这些脚本**不在任何
-版本控制里**（`ai_uav` 不是 git 仓库，仓库根只到 `docker_sim`），改坏了没法
-回退，磁盘回退也没有保护 —— 这是移进来的唯一原因。
-
-**它们都用绝对路径 `/home/robots/ai_uav/docker_sim`，所以放在哪都能跑**；
-移动本身没有改任何一行逻辑。
+这一层只做一件事：**起停容器**。按操作对象分五类，和桌面五个文件夹一一对应。
 
 ```bash
-cd ~/ai_uav/docker_sim/shell
-./start_gcs.sh
+cd ~/ai_uav/docker_sim/shell && ./start_gcs.sh
 ```
+
+桌面 `GCS/ CONTEST/ SIM/ Docker/ SOUND/` 下全是指向本目录的软链（`enter_gcs.sh`
+指向 `scripts/exec_gcs.sh`），双击即用，改这边桌面那边跟着变。
+
+**本层唯一独有的东西是末尾的 `read -n 1` 暂停** —— 双击运行时窗口不会立刻关掉、
+看得见报错。`scripts/` 下的脚本一个都没有，所以即使逻辑搬走了，这层壳也要留。
 
 ---
 
-## 还在用的
+## 五类
 
-| 脚本 | 说明 |
+### ① 地面站容器 → 桌面 `GCS/`
+
+| | |
 |---|---|
-| `start_sound_light_server.sh`<br>`stop_sound_light_server.sh` | 声光反馈常驻程序（`contest_sdk.sound_light_server`，容器 `contestant-sound-light`）。**仓库里没有别的东西能起它** —— `scripts/check_env.sh` 和 `scripts/contestant_network.sh` 只是去查它的域号。串口默认 `/dev/ttyUSB0`，注意 `brltty` 会抢 CH340 |
-| `start_gcs.sh` / `stop_gcs.sh` | 地面站网页栈（`gcs-gcs-1` + `gcs-backend-1`），在 `docker_sim/gcs` 下跑 compose |
-| `start_contestant_shell.sh`<br>`stop_contestant_shell.sh` | 常驻调试选手容器（`contestant-sdk-shell`），进去手敲 `ros2 topic` 用。`run.sh` **没有**这个功能，所以留着 |
+| `start_gcs.sh` | 转发 `scripts/up_gcs.sh`：xhost 授权、`gcs/.env` 校验（缺 `HOST_REPO_PATH` 直接报）、三个 json 从 `.example` 补齐、起完验 backend `/healthz` + 容器 running |
+| `stop_gcs.sh` | 停 `gcs-gcs-1` + `gcs-backend-1` |
+
+### ② 选手容器 → 桌面 `CONTEST/`
+
+| | |
+|---|---|
+| `start_contestant_shell.sh` | 起常驻调试容器 `contestant-sdk-shell`，进去手敲 `ros2 topic` 用。`--real` 切 20 域，默认 21 |
+| `stop_contestant_shell.sh` | 停它 |
+| `start_contestant_task.sh` | 一次性跑 `contestant_sim/我的任务.py`。⚠️ **那个文件现在不在仓库里**，所以这脚本当前会报"找不到任务文件" |
+
+> 跑正式任务不走这里，走 `contestant_sim/run.sh` 或 `contestant_real/run_real.sh`。
+
+### ③ 仿真容器 → 桌面 `SIM/`
+
+| | |
+|---|---|
+| `start_sim.sh` | 转发 `scripts/start_sim.sh`：清选手容器 → `compose down`+`up` → 等两机 PX4 自检+节点就绪 → **验四路相机真的在出图** → 查 gzclient/rviz2 |
+| `stop_sim.sh` | `compose down` |
 | `build_sim.sh` | 构建仿真镜像，按序 sim-world → flight-stack-nx01 |
+
+> `scripts/start_sim.sh` 没有 `DISPLAY` 时**直接退出**（相机渲染必须有 X）。双击
+> 必然有 DISPLAY；纯 SSH 下要起不带相机的仿真直接 `docker compose up -d`。
+>
+> 另有 `start.sh` + `scripts/up_and_watch.sh` 也能起仿真，那两个是 tmux 运维面板
+> （`scripts/watch_sim.sh`）的入口，保留，别和这里混用。
+
+### ④ 镜像与容器残留 → 桌面 `Docker/`
+
+| | |
+|---|---|
 | `clean_docker_build_cache.sh` | 清 build cache |
 | `clean_docker_containers.sh` | 清 Exited 容器，不动在跑的 |
-| `prepare_dataset.py` | 整理 YOLO 训练集，`prepare_dataset.py <图片目录> -o <输出>` |
-| `仿真编译` | 构建命令备忘（绕代理的那串 `env -u` 前缀），不是可执行脚本 |
 
-## 转发到 scripts/ 的（2026-10-03 去重）
+> 同类还有 `scripts/bundle.sh`（导出/恢复已 build 的镜像）和
+> `package_hw_deploy.sh`（真机部署打包），都在仓库根/`scripts/` 下，没搬过来。
 
-`start_sim.sh` 和 `start_gcs.sh` 原来各有一份独立实现，跟 `scripts/` 下
-同功能的版本是两套分叉——改一边另一边不知道。现在改成**薄转发**：
+### ⑤ 声光容器 → 桌面 `SOUND/`
 
-| 脚本 | 转发到 | 为什么留着这一层 |
-|---|---|---|
-| `start_sim.sh` | `scripts/start_sim.sh` | 那份 153 行，会等两机就绪 + **验四路相机真的出图** + 查 gzclient/rviz2 |
-| `start_gcs.sh` | `scripts/up_gcs.sh` | 那份 88 行，多做 xhost 授权、`.env` 校验、三个 json 从 `.example` 补齐、起完验 `/healthz` |
-
-**这一层唯一独有的东西是末尾那个 `read -n 1` 暂停** ——
-双击运行时窗口不会立刻关掉，看得见报错。`scripts/` 下 12 个脚本一个都没有。
-所以不能简单删掉 `shell/` 这两个，删了双击就看不到输出。
-
-转发用 `$(dirname "${BASH_SOURCE[0]}")/..` 定位，不写死家目录，所以这两个在
-`.100`（`hx@`，家目录不是 `/home/robots`）上也能跑。
-
-> `scripts/start_sim.sh` 没有 DISPLAY 时**直接退出**（相机渲染必须有 X），
-> 原来 `shell/` 那份只是警告后继续。双击必然有 DISPLAY，不影响；纯 SSH 下
-> 要起不带相机的仿真直接 `docker compose up -d`。
-
-## 功能上已被 run.sh 取代，但仍留着的
-
-| 脚本 | 说明 |
+| | |
 |---|---|
-| `stop_sim.sh` | `contestant_sim/run.sh` 结束时自己会收尾；单独停仿真时用这个 |
-| `start_contestant_task.sh` | `contestant_sim/run.sh <程序名>` 是正路。这个跑的是 `contestant_sim/我的任务.py`（单机、一次性）——⚠️ **那个文件现在不在仓库里**，在 `~/桌面/CONTEST/` 下，所以这个脚本当前会报"找不到任务文件" |
+| `start_sound_light_server.sh` | 起 `contestant-sound-light`（`contest_sdk.sound_light_server`）。串口默认 `/dev/ttyUSB0` |
+| `stop_sound_light_server.sh` | 停它 |
 
-## 其它副本
+> **仓库里没有别的东西能起它** —— `scripts/check_env.sh` 和
+> `scripts/contestant_network.sh` 只是去查它的域号，不负责起。
+> 注意 `brltty` 会抢 CH340，被抢了要先停它。
 
-`~/桌面/CONTEST/` 下那三个（`start_contestant_task.sh`、
-`start_contestant_shell.sh`、`stop_contestant_shell.sh`）**已于 2026-10-03
-改成软链指向本目录**，分叉结束。原来桌面那份旧 12~13 行（缺 `--real` 切
-20/21 域、不 `source contestant_network.sh`）。
+---
 
-桌面还剩 `我的任务.py` 和 `运行仿真.sh` 两个实体文件：前者是
-`start_contestant_task.sh` 要找的任务文件（放错地方了，见上）；后者是
-10-01 归档掉的旧入口，本目录没有对应物。
+## 不属于这一层的
 
-## 没移进来的
+| | 在哪 |
+|---|---|
+| **完整程序运行** | `contestant_sim/{run,stop}.sh`、`contestant_real/{run_real,run_test,stop_real,vision_real}.sh` |
+| **程序自动调用的** | `scripts/` 下 17 个：`contestant_network.sh`(被 8 处 source)、`check_env.sh`、`ros2_env_setup.sh`(9 处)、`launch_control.sh`、`record_rosbag.sh`/`prune_rosbag.sh`/`save_incident.sh`、`collect_container_stats.sh`/`render_tmux_status.sh`/`status_window.sh`/`watch_sim.sh`、`tail_persist_logs.sh`、`fetch_sources.sh`、`docker/entrypoints/`×4、`gcs/entrypoint.sh` 等。**这些路径被容器 COPY、两机 systemd、`src/**/launch`、`patches/` 钉死，不能移动改名** |
 
-`camera_info.yaml`、`声光反馈程序接口.xlsx`（数据/文档）、`datasets/`、
-`docker_real/`、`tools/` 三个目录仍在 `~/ai_uav/` 顶层，同样没有版本控制。
+## 其它
 
-## 遗留问题
+`prepare_dataset.py`（YOLO 训练集整理）和 `仿真编译`（构建命令备忘，绕代理的
+`env -u` 前缀）也在本目录，不属五类，放这儿是因为同属宿主机侧工具。
 
-路径是硬编码的 `/home/robots/ai_uav/docker_sim`。第二台地面站是 `hx@192.168.2.100`
-（家目录不是 `/home/robots`），这些脚本在那台上**跑不了**。要在两台通用，
-应该改成相对本脚本定位：
-
-```bash
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-```
+路径说明：转发用 `$(dirname "${BASH_SOURCE[0]}")/..` 定位；其余脚本仍写死
+`/home/robots/ai_uav/docker_sim`，在 `.100`（`hx@`，家目录不同）上跑不了。

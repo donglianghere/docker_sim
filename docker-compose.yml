@@ -55,7 +55,7 @@ services:
                                     # 全部任务已对标2026-09-27商定的大赛样题，航点/起降点/
                                     # 立柱坐标都按样题场景写死在选手程序和.env里；默认还留
                                     # 老场景的话，任何不显式带WORLD_ENV的启动路径（比如
-                                    # scripts/run_formation_test.sh里的`docker compose up -d`）
+                                    # scripts/start_sim.sh和start.sh里的`docker compose up -d`）
                                     # 都会静默load老世界，飞机按样题坐标飞到老场景的墙外去，
                                     # 表现成GotoUnreachableError而不是"场景选错了"——实测踩过。
                                     # 2026-08-21修复：之前这里是硬编码字面量`WORLD_ENV=
