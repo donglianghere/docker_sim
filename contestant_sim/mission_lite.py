@@ -80,8 +80,8 @@ def _ground_round_recon(sdk: DroneSDK, fire_xy, last):
 
 def _high_round_recon(sdk: DroneSDK, last):
     """高层火情轮：三栋楼巡检拍照 -> 发现火情就协同灭火 -> 回 G 编队返航。"""
-    # 本轮只用前视（aim_at/snapshot 都是前视），下视这一路停掉省 CPU。
-    _use_camera(sdk, 'front')
+    # 前视由调用方（recon 的轮次循环）在进来之前就配好了——它那儿才知道
+    # "本轮是不是高层"，在这里再切一次是重复的。
 
     def on_fire(_det, bldg):
         sdk.aim_at(HIGH_FIRE, camera='front', what='高层火情')
@@ -123,17 +123,25 @@ def recon(sdk: DroneSDK):
     for rnd in (2, 3):
         sdk.wait_event(EV_ROUND_DONE, 900.0)      # 等任务机本轮降落停稳
         sdk.progress(f'===== 第 {rnd} 轮：开始巡检 =====')
+        # 两轮不重复：地面火情上轮处置过的话，本轮必然是高层，不用再搜一遍。
+        # 这个判断在**起飞前**就成立，所以相机也在这儿配好——A->B->C->G 整段
+        # 飞行把切换的 4 秒吸收掉，比到 G 之后再切更早、更不占时间。
+        #   还可能是地面火情 -> 开下视（到 E 点那段要边飞边找）
+        #   已知是高层      -> 直接开前视，整轮用不到下视
+        may_be_ground = KIND_GROUND not in done
+        _use_camera(sdk, 'down' if may_be_ground else 'front')
         # 裁判盯着"侦察机过 G 点"才放火情，到 G 之前场上什么都没有。
         sdk.fly_route(ROUTE_TO_G, agl_m=CRUISE_AGL_M, names=['A', 'B', 'C', 'G'])
-        if KIND_GROUND in done:
-            # 两轮不重复：地面火情上轮处置过 -> 本轮必然是高层，不用再搜一遍
+        if not may_be_ground:
             fire_xy = None
         else:
-            # 搜之前切下视。上面 fly_route 到 G 刚飞完，这 4 秒不额外花时间。
-            _use_camera(sdk, 'down')
             fire_xy = sdk.search_along(ROUTE_E, GROUND_FIRE, camera='down',
                                        agl_m=CRUISE_AGL_M, what='地面火情')
         kind = KIND_GROUND if fire_xy else KIND_HIGH
+        if kind == KIND_HIGH and may_be_ground:
+            # 过了 E 点整段都没看到地面火情 -> 本轮是高层。这时才把下视换成
+            # 前视（上面"已知是高层"那条路已经开着前视了，不用重复切）。
+            _use_camera(sdk, 'front')
         sdk.send_to_teammate(EV_KIND, kind=kind, round=rnd)
         sdk.progress(f'本轮判定：{"地面火情" if kind == KIND_GROUND else "高层火情"}')
         if kind == KIND_GROUND:
