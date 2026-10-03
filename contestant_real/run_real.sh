@@ -78,7 +78,9 @@ flock -n 9 || die "已经有一个 run_real.sh 在跑（锁 $LOCK）。先等它
 
 # ---- 1. 找程序 ----
 SRCDIR="$HERE"
-[ -f "$HERE/$SCRIPT" ] || die "找不到程序 $SCRIPT（本目录下可选：$(cd "$HERE" && ls *_lite.py 2>/dev/null | tr '\n' ' '))"
+# 列举时排除 venue.py（那是坐标表，不是可跑的程序）。原来只列 *_lite.py，
+# 结果 basic_test.py 这类测试程序不会出现在提示里。
+[ -f "$HERE/$SCRIPT" ] || die "找不到程序 $SCRIPT（本目录下可选：$(cd "$HERE" && ls *.py 2>/dev/null | grep -v '^venue\.py$' | tr '\n' ' '))"
 log "程序：$SRCDIR/$SCRIPT"
 
 purge_stale

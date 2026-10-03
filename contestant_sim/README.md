@@ -82,7 +82,15 @@ cd contestant_sim && pyright        # 查一遍自己的程序
 ./run.sh mission_lite --keep   # 跑完保留容器，便于翻日志
 ./stop.sh                      # 一键清理所有仿真容器
 ./stop.sh --check              # 只看现在还剩什么，不动手
+
+./stop_all.sh                  # 关掉**一切**仿真相关栈：stop.sh 全部 + 声光栈
+                               # + 选手调试容器（后两个只在它们处于仿真域 21
+                               # 时才关；挂在真机域 20 的是别人在用，不动）
+./stop_all.sh --check          # 只看会动什么
 ```
+
+> 网页栈（`gcs-gcs-1` / `gcs-backend-1`）`stop_all.sh` **不关** —— `run.sh`
+> 本来也不起它，它是仿真/真机共用的观察面。要关用 `../shell/stop_gcs.sh`。
 
 自己写的程序放在本目录就能同样跑：`./run.sh 我的程序`。
 `run.sh` 只在本目录按名字找。
