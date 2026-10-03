@@ -7,7 +7,7 @@
 #   ./scripts/run_formation_test.sh --no-restart      # 沿用当前已经在跑的仿真
 #   ./scripts/run_formation_test.sh --keep            # 结束后不删选手容器，便于翻日志
 #
-# 跑的是 contestant_template/formation.py，两架飞机各起一个容器、
+# 跑的是 contestant_sim/formation.py，两架飞机各起一个容器、
 # 跑同一份代码，只有 --role 不同。
 set -eo pipefail
 
@@ -37,7 +37,7 @@ LEADER=NX01
 FOLLOWER=NX02
 FSNX01=docker_sim-flight-stack-nx01-1
 IMAGE=contestant-sdk:latest
-WORKDIR="$PWD/contestant_template"
+WORKDIR="$PWD/contestant_sim"
 SCRIPT="formation.py"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -68,7 +68,7 @@ docker rm -f fm_leader fm_follower >/dev/null 2>&1 || true
 # 检查器，能精确抓到这类错——问题不在工具缺失，在改完没跑。所以接进来，
 # 让这一步跳不过去，不靠记性。
 if [ -f scripts/check_python_static.py ]; then
-    if ! python3 scripts/check_python_static.py contestant_template/*.py; then
+    if ! python3 scripts/check_python_static.py contestant_sim/*.py; then
         echo "!! 选手脚本静态自检不通过，先修好再飞 !!" >&2
         exit 1
     fi

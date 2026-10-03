@@ -61,7 +61,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--layout", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--highrise", default="contestant_template/highrise.py",
+    ap.add_argument("--highrise", default="contestant_sim/highrise.py",
                     help="解析观察位 M/N 用，见 read_observation_points")
     args = ap.parse_args()
     L = yaml.safe_load(open(args.layout, encoding="utf-8"))

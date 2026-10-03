@@ -87,7 +87,7 @@ purge_stale
 # 真机与仿真的选手程序**必须逐字节相同**，差异只允许出现在 venue.py（场地参数）。
 # 这样改场地坐标不会把程序改出分叉，修 bug 也只需要改一边再同步。
 # 漂移了就拦下——不然两套代码会悄悄长歪，到现场才发现就晚了。
-SIMDIR="$ROOT/contestant_template"
+SIMDIR="$ROOT/contestant_sim"
 if [ -d "$SIMDIR" ]; then
     drift=""
     for f in "$HERE"/*_lite.py; do
@@ -96,7 +96,7 @@ if [ -d "$SIMDIR" ]; then
         cmp -s "$f" "$SIMDIR/$b" || drift="$drift $b"
     done
     if [ -n "$drift" ]; then
-        echo "!! 这些程序跟 contestant_template/ 下的不一致：$drift" >&2
+        echo "!! 这些程序跟 contestant_sim/ 下的不一致：$drift" >&2
         echo "   场地差异应该只在 venue.py 里。看看差了什么：" >&2
         for b in $drift; do echo "     diff -u $SIMDIR/$b $HERE/$b" >&2; done
         die "程序代码已漂移，先对齐再飞"

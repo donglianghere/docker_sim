@@ -1,12 +1,12 @@
 # 真机选手程序（contestant_real）
 
-这是 `contestant_template/` 的**真机副本**。两边程序逻辑完全一样，区别只有一个：
+这是 `contestant_sim/` 的**真机副本**。两边程序逻辑完全一样，区别只有一个：
 **这里的场地坐标要按真实赛场改**。
 
 分成独立目录是因为两套坐标必然不同，放在一起迟早改混。想对比改了什么：
 
 ```bash
-diff -u ../contestant_template/formation_lite.py formation_lite.py
+diff -u ../contestant_sim/formation_lite.py formation_lite.py
 ```
 
 ---

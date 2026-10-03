@@ -24,8 +24,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'src', 'contest_sdk', 'contest_sdk', 'capabilities.py')
-PROGS = os.path.join(ROOT, 'contestant_template', '*_lite.py')
-OUTDIR = os.path.join(ROOT, 'contestant_template', 'API参考')
+PROGS = os.path.join(ROOT, 'contestant_sim', '*_lite.py')
+OUTDIR = os.path.join(ROOT, 'contestant_sim', 'API参考')
 
 CATEGORIES = [
     ('程序入口', ['run', 'spacing_m']),

@@ -1,13 +1,13 @@
-// 在**仓库根**打开编辑器时用这份；直接打开 contestant_template/ 时用那边的同名文件。
+// 在**仓库根**打开编辑器时用这份；直接打开 contestant_sim/ 时用那边的同名文件。
 // 两边都配，是因为人多半会开仓库根，而配置只在工作区根目录生效——
 // 只配一边的话，开错目录就报 "DroneSDK" is unknown import symbol，
 // 补全和悬停说明全没有。
 {
   "extraPaths": ["./src/contest_sdk"],
   // 只查选手程序。整个仓库一起查会冒出大量跟选手无关的告警，淹掉真问题。
-  "include": ["contestant_template/*.py"],
-  "exclude": ["**/__pycache__", "contestant_template/API参考",
-              "contestant_template/normal", "contestant_template/archive"],
+  "include": ["contestant_sim/*.py"],
+  "exclude": ["**/__pycache__", "contestant_sim/API参考",
+              "contestant_sim/normal", "contestant_sim/archive"],
   "reportMissingImports": "none",
   "reportMissingModuleSource": "none",
   "typeCheckingMode": "basic"
