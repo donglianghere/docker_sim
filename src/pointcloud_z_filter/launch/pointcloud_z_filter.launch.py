@@ -29,6 +29,9 @@ def generate_launch_description():
     min_z = LaunchConfiguration('min_z')
     max_z = LaunchConfiguration('max_z')
     max_rate_hz = LaunchConfiguration('max_rate_hz')
+    projector_enabled = LaunchConfiguration('projector_enabled')
+    projector_resolution = LaunchConfiguration('projector_resolution')
+    projector_rate_hz = LaunchConfiguration('projector_rate_hz')
     lazy_subscribe = LaunchConfiguration('lazy_subscribe')
 
     declare_namespace = DeclareLaunchArgument(
@@ -73,6 +76,26 @@ def generate_launch_description():
                      '现场层高/空间不一样要跟着改这个值',
     )
 
+    declare_projector_enabled = DeclareLaunchArgument(
+        'projector_enabled',
+        default_value='true',
+        description='是否起 occupancy_projector（把三维占据点云投影成 2D '
+                    'OccupancyGrid，49 KB/帧 @0.1m，比点云小约 100 倍）。'
+                    '地面站不看障碍物时可以传 false 关掉',
+    )
+    declare_projector_resolution = DeclareLaunchArgument(
+        'projector_resolution',
+        default_value='0.1',
+        description='投影栅格分辨率(米)。0.1 时 20x25m 场地 = 200x250 = 49 KB/帧；'
+                    '要更省就调大到 0.2(12 KB)',
+    )
+    declare_projector_rate_hz = DeclareLaunchArgument(
+        'projector_rate_hz',
+        default_value='2.0',
+        description='投影输出的频率上限(Hz)。0=不限。显示用 2Hz 足够，'
+                    '实测整条热路径 1.49 ms/帧，2Hz 时约 0.3% CPU',
+    )
+
     occupancy_filter = Node(
         package='pointcloud_z_filter',
         executable='z_filter_node',
@@ -90,6 +113,26 @@ def generate_launch_description():
         }],
     )
 
+    # 2026-10-03 新增：2D 投影支路。和上面的 z_filter 是**并列**的两条显示支路，
+    # 都直接接原始 occupancy_inflate，互不依赖——投影不需要 odom（z_filter 要读
+    # odom 算相对高度窗口，没收到 odom 就整帧跳过），少一个依赖少一类卡死。
+    # 两条都惰性订阅，地面站只订其中一条时另一条完全不干活。
+    occupancy_projector = Node(
+        package='pointcloud_z_filter',
+        executable='occupancy_projector_node',
+        name='occupancy_projector',
+        namespace=namespace,
+        output='screen',
+        condition=IfCondition(projector_enabled),
+        parameters=[{
+            'input_topic': 'grid_map/occupancy_inflate',
+            'output_topic': 'grid_map/occupancy_2d',
+            'resolution': ParameterValue(projector_resolution, value_type=float),
+            'max_rate_hz': ParameterValue(projector_rate_hz, value_type=float),
+            'lazy_subscribe': ParameterValue(lazy_subscribe, value_type=bool),
+        }],
+    )
+
     return LaunchDescription([
         declare_namespace,
         declare_enabled,
@@ -97,5 +140,9 @@ def generate_launch_description():
         declare_max_z,
         declare_max_rate,
         declare_lazy,
+        declare_projector_enabled,
+        declare_projector_resolution,
+        declare_projector_rate_hz,
         occupancy_filter,
+        occupancy_projector,
     ])

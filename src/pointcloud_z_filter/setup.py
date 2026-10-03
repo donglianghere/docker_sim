@@ -15,11 +15,12 @@ setup(
     zip_safe=True,
     maintainer='todo',
     maintainer_email='todo@todo.todo',
-    description='按Z轴高度区间过滤PointCloud2，只给地面站/RViz显示用，不改动原始话题',
+    description='给地面站/RViz显示用的点云支路：按Z轴区间过滤，或投影成2D OccupancyGrid。不改动原始话题',
     license='TODO',
     entry_points={
         'console_scripts': [
             'z_filter_node = pointcloud_z_filter.z_filter_node:main',
+            'occupancy_projector_node = pointcloud_z_filter.occupancy_projector_node:main',
         ],
     },
 )
