@@ -1,0 +1,45 @@
+机载相机 MJPEG 拉流地址
+========================
+
+真机（实测确认，2026-10-03）
+----------------------------
+容器 network_mode: host，所以端口直接在飞机自己的 IP 上，不经地面站转发。
+
+  NX01（侦察机）  前视  http://192.168.2.101:8080/
+                  下视  http://192.168.2.101:8081/
+  NX02（任务机）  前视  http://192.168.2.102:8080/
+                  下视  http://192.168.2.102:8081/
+
+对应关系是固定的，由 scripts/control_server.py 的表定死：
+  cam0 = front = sensor_id 0 = 8080
+  cam1 = down  = sensor_id 1 = 8081
+
+前提：vision-stack 容器起着，**而且每一路都 POST /vision/mode 打开过**。
+容器起来后检测节点并不自动跑，拉流也就没有。四路一起开：
+  cd ~/ai_uav/docker_sim/contestant_real && ./vision_real.sh up && ./vision_real.sh status
+
+⚠ 本机代理会截内网请求，用浏览器没问题，用 curl 要绕代理：
+  curl --noproxy '*' -I http://192.168.2.101:8080/
+502 不等于服务没起，先确认是不是代理截的。
+
+
+仿真（当前没有拉流）
+---------------------
+2026-09-22 仿真侧换成 camera_tag_detect_node（每路相机一个独立进程），
+那个节点**不带 MJPEG 推送**——文件头第 28 行写着"没有 MJPEG 推送：检测节点
+只管检测"，也没有声明端口参数。
+
+所以下面这组旧地址已经失效，不要再用：
+  ✗ NX01 8180/8181、NX02 8190/8191
+
+那是换节点之前 qr_apriltag_detect_node 提供的（mjpeg_port_base=8180，
+NX01=8180 起、NX02=8190 起，front +0 / down +1，刻意避开 GCS 占的 8080）。
+那个节点在 src/contest_mission/setup.py 里还注册着，但 entrypoint 不再启动它。
+
+仿真里要看图像，用这两条：
+  · RViz（start_sim.sh 默认会起）
+  · ros2 topic echo /NX01/NX01_down_camera/image_raw --no-arr
+    （只看有没有在发；真要看画面用 RViz 或 rqt_image_view）
+如果确实需要仿真拉流，手动起旧节点：
+  ros2 run contest_mission qr_apriltag_detect_node --ros-args \
+      -r __ns:=/NX01 -p mjpeg_port_base:=8180

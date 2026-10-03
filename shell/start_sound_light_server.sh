@@ -52,10 +52,24 @@ if ! docker run --rm "$IMAGE_NAME" python3 -c "import contest_sdk.sound_light_se
     exit 1
 fi
 
-if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
-    echo "容器 $CONTAINER_NAME 已经存在（可能还在跑，也可能上次没清理干净）。"
-    echo "先用 stop_sound_light_server.sh 关掉旧的，再重新运行这个脚本。"
+# 旧容器的处理分两种，不能一视同仁：
+#   · 还在跑  → **拒绝**。声光是长期共享服务，飞行中正被用着；自动重建会把
+#     正在服务的那个静默掐掉。要换域（仿真21↔真机20）就显式先 stop。
+#   · 已退出  → 直接清掉。它什么都没在服务，拦住只是让人多双击一次。
+# （对比 run_real.sh/run_test.sh 的 purge_stale() 是无条件 docker rm -f——
+#   那两个起的是自己的容器 real_leader/real_follower/real_monitor，不是共享服务。）
+if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    echo "容器 $CONTAINER_NAME **正在运行**，当前模式：$(
+        docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null \
+          | sed -n 's/^ROS_DOMAIN_ID=/域 /p' | head -1)"
+    echo "没有自动重建——声光常驻程序是共享服务，正在跑的那个可能有人在用。"
+    echo "确实要换（比如仿真↔真机换域）就先显式关掉："
+    echo "    $(dirname "${BASH_SOURCE[0]}")/stop_sound_light_server.sh"
+    echo "然后重新运行这个脚本（换真机域加 --real）。"
     exit 1
+elif docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    echo "清理上次残留的已退出容器 $CONTAINER_NAME"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
 fi
 
 if [[ ${#SERVER_ARGS[@]} -eq 0 && ! -e "$PORT" ]]; then

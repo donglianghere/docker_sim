@@ -114,28 +114,45 @@ send() {   # send <文本> <说明>
 }
 
 # ---- 参数 ----
-case "${1:-}" in
-    --list)   list_events; exit 0 ;;
-    --status) echo "声光常驻程序状态："; show_domain; show_status || die "串口没打开——brltty 抢了 CH340？用 systemctl stop brltty"; exit 0 ;;
-    --mute)   send "mute" "熄灯静音"; echo; echo "装置应已熄灯静音。"; exit 0 ;;
-    --event)  [ -n "${2:-}" ] || die "--event 后面要跟事件名（--list 看可选）"
-              grep -q "'$2':" "$VOCAB" || { echo "!! 没有这个事件：$2" >&2; echo >&2; list_events >&2; exit 2; }
-              send "$2" "单个事件"; echo; echo "听到声音、看到灯色变化就算通过。"; exit 0 ;;
-    --sound)  [ -n "${2:-}" ] || die "--sound 后面要跟 1~20"
-              case "$2" in ''|*[!0-9]*) die "--sound 要是数字 1~20，收到 '$2'" ;; esac
-              [ "$2" -ge 1 ] && [ "$2" -le 20 ] || die "--sound 范围是 1~20，收到 $2"
-              send "$2" "声音编号 $2"; echo; echo "听到第 $2 号声音就算通过。"; exit 0 ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
-    --sim)    WANT=sim ;;
-    --real)   WANT=real ;;
-    "")       ;;
-    *)        die "未知参数：$1（用 --help 看用法）" ;;
+# 用循环而不是 case "$1"：--sim/--real 是**断言**，要能和 --event/--sound/
+# --mute/--status 组合（`--real --event X` = 先确认在真机域，再放那一个事件）。
+# 第一版写成 case "$1" 的单分支，--real 命中后直接落到默认序列，后面的
+# --event 被静默忽略——实测踩到。
+WANT=""; ACTION=""; ARG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sim)     WANT=sim; shift ;;
+        --real)    WANT=real; shift ;;
+        --list)    ACTION=list; shift ;;
+        --status)  ACTION=status; shift ;;
+        --mute)    ACTION=mute; shift ;;
+        --event)   ACTION=event; ARG="${2:-}"; [ -n "$ARG" ] || die "--event 后面要跟事件名（--list 看可选）"; shift 2 ;;
+        --sound)   ACTION=sound; ARG="${2:-}"; [ -n "$ARG" ] || die "--sound 后面要跟 1~20"; shift 2 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+        *)         die "未知参数：$1（用 --help 看用法）" ;;
+    esac
+done
+
+# --list 不碰容器，先处理掉
+[ "$ACTION" = list ] && { list_events; exit 0; }
+
+echo "声光常驻程序状态："
+show_domain
+[ -n "$WANT" ] && assert_mode "$WANT"
+
+case "$ACTION" in
+    status) show_status || die "串口没打开——brltty 抢了 CH340？用 systemctl stop brltty"; exit 0 ;;
+    mute)   send "mute" "熄灯静音"; echo; echo "装置应已熄灯静音。"; exit 0 ;;
+    event)  grep -q "'$ARG':" "$VOCAB" || { echo "!! 没有这个事件：$ARG" >&2; echo >&2; list_events >&2; exit 2; }
+            show_status || die "串口没打开，先修这个"
+            send "$ARG" "单个事件"; echo; echo "听到声音、看到灯色变化就算通过。"; exit 0 ;;
+    sound)  case "$ARG" in ''|*[!0-9]*) die "--sound 要是数字 1~20，收到 '$ARG'" ;; esac
+            [ "$ARG" -ge 1 ] && [ "$ARG" -le 20 ] || die "--sound 范围是 1~20，收到 $ARG"
+            show_status || die "串口没打开，先修这个"
+            send "$ARG" "声音编号 $ARG"; echo; echo "听到第 $ARG 号声音就算通过。"; exit 0 ;;
 esac
 
 # ---- 默认：跑一小段序列 ----
-echo "声光常驻程序状态："
-show_domain
-[ -n "${WANT:-}" ] && assert_mode "$WANT"
 show_status || die "串口没打开，先修这个——brltty 抢了 CH340？用 systemctl stop brltty"
 echo
 echo "开始自检序列，共 3 条。每条之间等 3 秒（常驻程序最小间隔是 2.5 秒）。"
