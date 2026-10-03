@@ -119,6 +119,14 @@ log "DISPLAY=$DISPLAY"
 #     仿真这边的播报会全部静默失效（不报错，只是没声音）。
 #   · 真机的选手容器要是还在跑，它们在对两架真飞机发指令，而你正准备用
 #     同一台机器起 Gazebo——CPU 被挤之外，真机那边也不该无人照看。
+# ---- 共享栈必起（2026-10-03 用户要求）----
+# 声光栈不属于本脚本自己的容器，原来 check_env.sh 只给 △ 提示不拦，于是可以
+# 一声不响飞完整轮、事后才发现任务通报全缺。改成必起。放在 check_env 之前，
+# 让 check_env 去复核修好之后的状态。
+# 网页栈仿真侧**不管**（用户明确：它只用于观察）。
+source "$ROOT/scripts/ensure_stacks.sh"
+ensure_sound_light sim
+
 "$ROOT/scripts/check_env.sh" sim || { echo "!! 环境检查未通过（见上），处理后再跑" >&2; exit 1; }
 
 # ---- 2. 定位程序：按名字去源目录找，不保留副本 ----
@@ -215,7 +223,7 @@ docker exec -d -e DISPLAY="$DISPLAY" "$FSNX01" bash -lc "
            CYCLONEDDS_URI=file:///tmp/docker_sim_cyclonedds.xml
     python3 -u /tmp/monitor.py --layout '$LAYOUT' --route '$ROUTE' \
         --out '$MON_OUT' --spacing $SPACING $MON_END > '$MON_LOG' 2>&1
-" >/dev/null 2>&1 || echo "（监视没起来，不影响飞行）" >&2
+" >/dev/null 2>&1 || die "监视窗口没起来——必起（见 2026-09-30 要求）。查 DISPLAY=$DISPLAY 和 xhost 授权"
 
 # ---- 5.5 综合任务：起"出题裁判" ----
 # 它负责把两处火情标识先从 world 里删掉，等侦察机过 G 点再把本轮抽中的那个

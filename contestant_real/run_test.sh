@@ -85,6 +85,11 @@ flock -n 9 || die "已经有 run_real.sh 或另一个 run_test.sh 在跑"
 
 # ---- 前置闸门（跟 run_real.sh 同一套，只查这一架）----
 purge_stale
+# ---- 共享栈必起（2026-10-03 用户要求，同 run_real.sh）----
+source "$ROOT/scripts/ensure_stacks.sh"
+ensure_sound_light real
+ensure_gcs_web
+
 "$ROOT/scripts/check_env.sh" real || die "环境检查未通过"
 
 ping -c1 -W2 "$IP" >/dev/null 2>&1 || die "飞机 $IP 不可达"
@@ -167,7 +172,7 @@ docker run -d --name "$C_MONITOR" --network host \
     "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
     python3 -u /scripts/monitor.py --leader "$NS" --follower "$NS" \
         --out "$MON_OUT" >/dev/null 2>&1 \
-    || echo "（监视没起来，不影响飞行）" >&2
+    || die "监视窗口没起来——必起（见 2026-09-30 要求）。查 DISPLAY=$DISPLAY 和 xhost 授权"
 
 # ---- 跑 ----
 BASE_PYPATH="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" \

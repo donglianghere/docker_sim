@@ -108,6 +108,13 @@ fi
 # 仿真和真机主要靠 ROS_DOMAIN_ID 隔离（21 / 20），话题不会串；但声光常驻程序
 # 只有一个容器、只能在一个域，而且 Gazebo 很重会挤占 CPU。这两类隔离不了，
 # 必须在起飞前拦住。
+# ---- 共享栈必起（2026-10-03 用户要求）----
+# 声光栈和网页栈都不属于本脚本自己的容器，原来 check_env.sh 对它们只给 △
+# 提示不拦。真机侧两个都必起。放在 check_env 之前，让它复核修好之后的状态。
+source "$ROOT/scripts/ensure_stacks.sh"
+ensure_sound_light real
+ensure_gcs_web
+
 "$ROOT/scripts/check_env.sh" real || die "环境检查未通过（见上），处理后再跑"
 
 # ---- 3. 两机可达性与机载栈就绪 ----
@@ -215,7 +222,7 @@ docker run -d --name "$C_MONITOR" --network host \
     "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
     python3 -u /scripts/monitor.py --leader "$LEADER" --follower "$FOLLOWER" \
         --spacing "$SPACING" --out "$MON_OUT" >/dev/null 2>&1 \
-    || echo "（监视没起来，不影响飞行）" >&2
+    || die "监视窗口没起来——必起（见 2026-09-30 要求）。查 DISPLAY=$DISPLAY 和 xhost 授权"
 
 # ---- 8. 两个选手程序 ----
 BASE_PYPATH="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" \
