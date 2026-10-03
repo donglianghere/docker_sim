@@ -12,20 +12,19 @@
 两机跑的是同一段动作，各自独立执行，**没有编队、没有跨机握手** —— 所以
 一架有问题不会连带另一架，便于单独判断是哪台的事。
 
-⚠️ **降落点在起飞点正前方约 1 米**，不是起降垫上。跑之前确认那一米范围内
-没人没障碍。要让它回起降垫降落，把末尾的 sdk.land() 换成
-sdk.return_home(direct=True)。
+**降落回各自的起降垫**（不是停在前方 1 米处）：末尾用 return_home()，它会
+飞回自己的起飞点、按落点坐标核对、核对通过才播降落声光。1 米的回程短于
+RETURN_HOME_FAR_M(2.0)，所以直接走精修段，不经规划器也不需要论证直线余量。
+它内部用 land_or_confirm()，兜住"贴地了但 PX4 不报 Landing detected"那个老坑。
 
-⚠️ 前飞用 step_forward()，它内部走 goto_direct（直飞，不经规划器）。1 米的
-空旷位移这样最直接；但也因此**周围必须是空的**，它不会避障。
+⚠️ 前飞和回程都是直线（step_forward 走 goto_direct，1 米回程走精修段），
+**不避障**。所以起飞点正前方那一米必须是空的。
 
 看什么：
-  · 监视窗口里两条轨迹都应该是"原地 -> 前移1米 -> 原地"，悬停段应该是个点
-    而不是一团
+  · 监视窗口里两条轨迹都应该是"原地 -> 前移1米 -> 退回原地"，悬停段应该是
+    个点而不是一团；落点应该回到起飞点上
+  · 日志末尾 return_home 会报落点是否在起降垫容差内——这一项是硬判据
   · 声光应该响四次：两机起飞各一次、两机降落各一次
-  · 日志里不该有 LandTimeoutError（贴地时测距仪卡在最小量程、PX4 不报
-    Landing detected 的老问题，见 archive/utils.py 的说明）
-
 用法： ./run_real.sh basic_test
 """
 import time
@@ -57,10 +56,11 @@ def _sequence(sdk, who, takeoff_event, land_event):
     sdk.progress(f'再悬停 {HOVER_S:.0f} 秒')
     time.sleep(HOVER_S)
 
-    sdk.progress('就地降落（注意：这里不是起降垫，是起飞点前方约 1 米）')
-    sdk.land()
-    sdk.announce(land_event)
-    sdk.progress(f'=== {who} 测试结束 ===')
+    # 声光交给 return_home 的 sound= 自己播，**不要在这里 announce**：
+    # 它要先按落点坐标核对是否真落在起降垫上，核对通过才播（SDK 文件头有说明）。
+    sdk.progress('回起降垫降落')
+    ok = sdk.return_home(sound=land_event)
+    sdk.progress(f'=== {who} 测试结束，落点{"在" if ok else "**不在**"}起降垫容差内 ===')
 
 
 def leader(sdk: DroneSDK):
