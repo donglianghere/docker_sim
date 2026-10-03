@@ -92,7 +92,10 @@ purge_stale
 SIMDIR="$ROOT/contestant_sim"
 if [ -d "$SIMDIR" ]; then
     drift=""
-    for f in "$HERE"/*_lite.py; do
+    # 比**所有** .py，不只 *_lite.py：basic_test.py 这类场地无关的测试
+    # 程序两边也该逐字节相同。venue.py 本来就该不同，跳过。
+    for f in "$HERE"/*.py; do
+        [ "$(basename "$f")" = venue.py ] && continue
         b="$(basename "$f")"
         [ -f "$SIMDIR/$b" ] || continue
         cmp -s "$f" "$SIMDIR/$b" || drift="$drift $b"
