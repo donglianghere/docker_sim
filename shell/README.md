@@ -27,24 +27,44 @@ cd ~/ai_uav/docker_sim/shell
 | `prepare_dataset.py` | 整理 YOLO 训练集，`prepare_dataset.py <图片目录> -o <输出>` |
 | `仿真编译` | 构建命令备忘（绕代理的那串 `env -u` 前缀），不是可执行脚本 |
 
-## 已有更好替代的
+## 转发到 scripts/ 的（2026-10-03 去重）
 
-| 脚本 | 替代 |
+`start_sim.sh` 和 `start_gcs.sh` 原来各有一份独立实现，跟 `scripts/` 下
+同功能的版本是两套分叉——改一边另一边不知道。现在改成**薄转发**：
+
+| 脚本 | 转发到 | 为什么留着这一层 |
+|---|---|---|
+| `start_sim.sh` | `scripts/start_sim.sh` | 那份 153 行，会等两机就绪 + **验四路相机真的出图** + 查 gzclient/rviz2 |
+| `start_gcs.sh` | `scripts/up_gcs.sh` | 那份 88 行，多做 xhost 授权、`.env` 校验、三个 json 从 `.example` 补齐、起完验 `/healthz` |
+
+**这一层唯一独有的东西是末尾那个 `read -n 1` 暂停** ——
+双击运行时窗口不会立刻关掉，看得见报错。`scripts/` 下 12 个脚本一个都没有。
+所以不能简单删掉 `shell/` 这两个，删了双击就看不到输出。
+
+转发用 `$(dirname "${BASH_SOURCE[0]}")/..` 定位，不写死家目录，所以这两个在
+`.100`（`hx@`，家目录不是 `/home/robots`）上也能跑。
+
+> `scripts/start_sim.sh` 没有 DISPLAY 时**直接退出**（相机渲染必须有 X），
+> 原来 `shell/` 那份只是警告后继续。双击必然有 DISPLAY，不影响；纯 SSH 下
+> 要起不带相机的仿真直接 `docker compose up -d`。
+
+## 功能上已被 run.sh 取代，但仍留着的
+
+| 脚本 | 说明 |
 |---|---|
-| `start_sim.sh` / `stop_sim.sh` | `contestant_sim/run.sh` 自己会 `compose down/up`；只想起仿真不跑程序的话，`scripts/start_sim.sh`（153 行）比这个（48 行）更全，它还会**验证相机真的在出图**才返回 |
-| `start_contestant_task.sh` | `contestant_sim/run.sh <程序名>`。这个脚本跑的是 `contestant_sim/我的任务.py`（单机、一次性） |
-| `start_gcs.sh` | `scripts/up_gcs.sh`（88 行 vs 32 行，带 xhost 授权的说明和校验） |
-
-> ⚠️ **分叉提醒**：`start_sim.sh` 和 `start_gcs.sh` 在 `scripts/` 下各有一个
-> 同名/同功能但更完整的版本，两套并存。改了一边另一边不会知道。等确认哪套
-> 是权威之后应该合并去重。
+| `stop_sim.sh` | `contestant_sim/run.sh` 结束时自己会收尾；单独停仿真时用这个 |
+| `start_contestant_task.sh` | `contestant_sim/run.sh <程序名>` 是正路。这个跑的是 `contestant_sim/我的任务.py`（单机、一次性）——⚠️ **那个文件现在不在仓库里**，在 `~/桌面/CONTEST/` 下，所以这个脚本当前会报"找不到任务文件" |
 
 ## 其它副本
 
-`~/桌面/CONTEST/` 下有 `start_contestant_task.sh`、`start_contestant_shell.sh`、
-`stop_contestant_shell.sh` 的**旧副本** —— 它们缺 `--real`（切 20/21 域）这一段，
-也不 `source contestant_network.sh`。本目录这份才是新的。桌面那份应该换成
-软链指向这里，终结分叉。
+`~/桌面/CONTEST/` 下那三个（`start_contestant_task.sh`、
+`start_contestant_shell.sh`、`stop_contestant_shell.sh`）**已于 2026-10-03
+改成软链指向本目录**，分叉结束。原来桌面那份旧 12~13 行（缺 `--real` 切
+20/21 域、不 `source contestant_network.sh`）。
+
+桌面还剩 `我的任务.py` 和 `运行仿真.sh` 两个实体文件：前者是
+`start_contestant_task.sh` 要找的任务文件（放错地方了，见上）；后者是
+10-01 归档掉的旧入口，本目录没有对应物。
 
 ## 没移进来的
 
