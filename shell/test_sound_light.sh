@@ -7,7 +7,15 @@
 #   ./test_sound_light.sh --sound 7        # 直接按声音编号 1~20
 #   ./test_sound_light.sh --mute           # 熄灯静音
 #   ./test_sound_light.sh --status         # 只看状态，不发声
+#   ./test_sound_light.sh --sim            # 先断言容器在仿真域(21)，再跑序列
+#   ./test_sound_light.sh --real           # 先断言容器在真机域(20)，再跑序列
 #
+# 关于仿真/真机：**本脚本自己不需要区分** ——它是 docker exec 进已在跑的容器
+# 里发的，用的就是那个容器的域，不可能发到另一个域去。但声光常驻程序是
+# **共享资源、同一时刻只能在一个域**（仿真21/真机20，见 start_sound_light_server.sh
+# 的 --real），所以存在一个假就绪的坑：容器挂在 20 域时你测，装置照样响，可
+# 仿真程序（21域）的事件根本到不了它。因此本脚本每次都把容器的域号打出来，
+# 并提供 --sim/--real 做断言——要上哪个场景，就用对应的那个跑一遍。
 # 原理：常驻程序订阅 /sound_light/request（std_msgs/String），**纯文本就行**
 # ——事件名 / 声音编号 / mute。本脚本从已在跑的 contestant-sound-light 容器里
 # 发，因为它身上已经有正确的 ROS_DOMAIN_ID=20 和 CYCLONEDDS_URI，不用另起容器
@@ -27,6 +35,40 @@ die() { echo "!! $*" >&2; exit 1; }
 
 # 容器里跑一条 ros2 命令。`source` 不能省：镜像里 ros2 不在默认 PATH 上。
 in_c() { docker exec "$C" bash -lc "source /opt/ros/humble/setup.bash && $1"; }
+
+# 跟 scripts/check_env.sh 的 domain_of 同一种取法，保持一致
+domain_of() {
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null \
+      | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1
+}
+
+# 容器在哪个域 → 这套声光此刻服务于哪个场景
+show_domain() {
+    local d; d="$(domain_of "$C")"
+    case "$d" in
+        20) echo "   域 20 → **真机**场景（仿真程序发的事件到不了）" ;;
+        21) echo "   域 21 → **仿真**场景（真机程序发的事件到不了）" ;;
+        "") echo "   ⚠ 读不到容器的 ROS_DOMAIN_ID" ;;
+        *)  echo "   ⚠ 域 $d —— 既不是仿真(21)也不是真机(20)" ;;
+    esac
+}
+
+# --sim / --real 的断言。不一致就给出和 check_env.sh 同样的修法
+assert_mode() {   # assert_mode sim|real
+    local want d
+    [ "$1" = "real" ] && want=20 || want=21
+    d="$(domain_of "$C")"
+    [ "$d" = "$want" ] && { echo "   ✓ 域 $d 与 $1 模式一致"; return 0; }
+    echo "!! 声光容器在域 ${d:-?}，但你要的是 $1 模式（应为 $want）" >&2
+    echo "   声光常驻程序只能在一个域，换域要重起它：" >&2
+    echo "     $(dirname "${BASH_SOURCE[0]}")/stop_sound_light_server.sh" >&2
+    if [ "$1" = "real" ]; then
+        echo "     $(dirname "${BASH_SOURCE[0]}")/start_sound_light_server.sh --real /dev/ttyUSB0" >&2
+    else
+        echo "     $(dirname "${BASH_SOURCE[0]}")/start_sound_light_server.sh /dev/ttyUSB0" >&2
+    fi
+    die "域不匹配，已中止"
+}
 
 # ---- 前置：容器在不在跑 ----
 docker ps --format '{{.Names}}' | grep -qx "$C" || {
@@ -74,7 +116,7 @@ send() {   # send <文本> <说明>
 # ---- 参数 ----
 case "${1:-}" in
     --list)   list_events; exit 0 ;;
-    --status) echo "声光常驻程序状态："; show_status || die "串口没打开——brltty 抢了 CH340？用 systemctl stop brltty"; exit 0 ;;
+    --status) echo "声光常驻程序状态："; show_domain; show_status || die "串口没打开——brltty 抢了 CH340？用 systemctl stop brltty"; exit 0 ;;
     --mute)   send "mute" "熄灯静音"; echo; echo "装置应已熄灯静音。"; exit 0 ;;
     --event)  [ -n "${2:-}" ] || die "--event 后面要跟事件名（--list 看可选）"
               grep -q "'$2':" "$VOCAB" || { echo "!! 没有这个事件：$2" >&2; echo >&2; list_events >&2; exit 2; }
@@ -83,13 +125,17 @@ case "${1:-}" in
               case "$2" in ''|*[!0-9]*) die "--sound 要是数字 1~20，收到 '$2'" ;; esac
               [ "$2" -ge 1 ] && [ "$2" -le 20 ] || die "--sound 范围是 1~20，收到 $2"
               send "$2" "声音编号 $2"; echo; echo "听到第 $2 号声音就算通过。"; exit 0 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    --sim)    WANT=sim ;;
+    --real)   WANT=real ;;
     "")       ;;
     *)        die "未知参数：$1（用 --help 看用法）" ;;
 esac
 
 # ---- 默认：跑一小段序列 ----
 echo "声光常驻程序状态："
+show_domain
+[ -n "${WANT:-}" ] && assert_mode "$WANT"
 show_status || die "串口没打开，先修这个——brltty 抢了 CH340？用 systemctl stop brltty"
 echo
 echo "开始自检序列，共 3 条。每条之间等 3 秒（常驻程序最小间隔是 2.5 秒）。"

@@ -63,7 +63,7 @@ cd ~/ai_uav/docker_sim/shell && ./start_gcs.sh
 |---|---|
 | `start_sound_light_server.sh` | 起 `contestant-sound-light`（`contest_sdk.sound_light_server`）。串口默认 `/dev/ttyUSB0` |
 | `stop_sound_light_server.sh` | 停它 |
-| `test_sound_light.sh` | **自检：让装置真的响一次、亮一次。** 无参数跑"蓝→红→绿"三条序列；`--list` 列全 20 个事件；`--event <名>` / `--sound 1..20` 放单个；`--mute` 熄灯静音；`--status` 只看串口状态 |
+| `test_sound_light.sh` | **自检：让装置真的响一次、亮一次。** 无参数跑"蓝→红→绿"三条序列；`--sim`/`--real` 先断言域号再跑；`--list` 列全 20 个事件；`--event <名>` / `--sound 1..20` 放单个；`--mute` 熄灯静音；`--status` 只看域号+串口状态 |
 
 > **仓库里没有别的东西能起它** —— `scripts/check_env.sh` 和
 > `scripts/contestant_network.sh` 只是去查它的域号，不负责起。
@@ -79,6 +79,32 @@ cd ~/ai_uav/docker_sim/shell && ./start_gcs.sh
 
 没响的分法：看 `docker logs contestant-sound-light` 有没有 `发送：` 那一行
 —— 有，问题在串口/装置那端（接线、电源、波特率）；没有，是请求没到常驻程序。
+
+### 仿真 / 真机
+
+`test_sound_light.sh` **自己不需要区分** —— 它 `docker exec` 进已在跑的容器里
+发，用的就是那个容器的域，不可能发到另一个域去。
+
+但声光常驻程序是**共享资源、同一时刻只能在一个域**（`--real`=20 真机 /
+默认=21 仿真），于是有个假就绪的坑：**容器挂在 20 域时你测，装置照样响，可
+仿真程序（21 域）的事件根本到不了它**。所以脚本每次都把域号打出来：
+
+```
+域 20 → **真机**场景（仿真程序发的事件到不了）
+```
+
+要上哪个场景，就用对应的断言跑一遍，不一致会拦住并给出换域的命令：
+
+```
+$ ./test_sound_light.sh --sim
+!! 声光容器在域 20，但你要的是 sim 模式（应为 21）
+   声光常驻程序只能在一个域，换域要重起它：
+     ./stop_sound_light_server.sh
+     ./start_sound_light_server.sh /dev/ttyUSB0
+```
+
+`scripts/check_env.sh sim|real` 也查这一项（`run.sh` / `run_real.sh` /
+`run_test.sh` 起飞前都会调），两边用的是同一种取域号的方式。
 
 ---
 
