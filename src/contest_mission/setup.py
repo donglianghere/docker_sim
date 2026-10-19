@@ -24,6 +24,7 @@ setup(
             'camera_tag_detect_node = contest_mission.camera_tag_detect_node:main',
             'target_locate_node = contest_mission.target_locate_node:main',
             'position_cmd_relay_node = contest_mission.position_cmd_relay_node:main',
+            'line_goto_node = contest_mission.line_goto_node:main',
             'pillar_detector_node = contest_mission.pillar_detector_node:main',
             'precision_servo_node = contest_mission.precision_servo_node:main',
             'fire_pillar_aim_node = contest_mission.fire_pillar_aim_node:main',

@@ -114,12 +114,24 @@ class ScenarioResetNode(Node):
             if _p.get('twin_east'):
                 _pillars.append((_p['id'] + '_e', _p['x'] + _psize, _p['y']))
         self.fixed_positions = {pid: (px, py) for pid, px, py in _pillars}
-        self.fixed_positions['obstacle_cylinder'] = (
-            layout['obstacle_cylinder']['x'], layout['obstacle_cylinder']['y'],
-        )
+        # 独立避障圆柱：2026-10-11 用户要求去掉，yaml 里置 `enabled: false`，
+        # 生成 world 时就不出这个模型了。这里必须跟着跳过——名单里留着它，
+        # 每次重置都会对一个不存在的模型调 SetEntityState，服务返回失败、
+        # all_ok 被拉成 False，"重置成功"这个信号就永久失真了。
+        # （整条键是故意保留的，见 yaml 注释：pillar_detector_node 还要用
+        # diameter 当圆柱/方柱判别阈值，所以这里判 enabled 而不是判键在不在。）
+        if layout['obstacle_cylinder'].get('enabled', True):
+            self.fixed_positions['obstacle_cylinder'] = (
+                layout['obstacle_cylinder']['x'], layout['obstacle_cylinder']['y'],
+            )
         self.fixed_positions['supply_point_marker'] = (
             layout['supply_point']['x'], layout['supply_point']['y'],
         )
+        # 地面火情点：2026-10-11 起位置是在 G-E 航段上**随机**的，但抽签不在
+        # 这里做——跟高层火情同一个理由（gzclient 不重绘热移的模型，界面会
+        # 骗人），由 gen_sample_room_world.py 在生成 world 时抽定并写回这份
+        # yaml、同时把 ground_fire_random.enabled 置 false。所以这里照旧读
+        # ground_fire_point 的固定值，读到的就是本次抽定的结果。
         self.fixed_positions['fire_point_marker'] = (
             layout['ground_fire_point']['x'], layout['ground_fire_point']['y'],
         )
@@ -269,7 +281,7 @@ class ScenarioResetNode(Node):
         _fr = self.fire_random
         fire_note = ''
         if _fr.get('enabled'):
-            bldgs = list(_fr.get('buildings') or ['pillar_1', 'pillar_2'])
+            bldgs = list(_fr.get('buildings') or ['pillar_2', 'pillar_3'])
             floors = [int(v) for v in (_fr.get('floors') or [2, 3])]
             bldg = random.choice(bldgs)
             floor = random.choice(floors)

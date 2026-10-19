@@ -572,7 +572,7 @@
             <option value="h264">H.264(经本机转码)</option>
           </select>
           <label style="font-size:12px;color:#9aa4b2;">地址：</label>
-          <input id="camUrl-topcam" placeholder="http://192.168.x.x:8080/stream.mjpg">
+          <input id="camUrl-topcam" placeholder="http://192.168.2.102:8081/stream.mjpg（下视）">
           <button onclick="camApply('topcam')">应用</button>
         </div>
         <div class="camView" id="camView-topcam"></div>
@@ -587,7 +587,7 @@
             <option value="h264">H.264(经本机转码)</option>
           </select>
           <label style="font-size:12px;color:#9aa4b2;">地址：</label>
-          <input id="camUrl-frontcam" placeholder="http://192.168.x.x:8080/stream.mjpg">
+          <input id="camUrl-frontcam" placeholder="http://192.168.2.101:8080/stream.mjpg（前视）">
           <button onclick="camApply('frontcam')">应用</button>
         </div>
         <div class="camView" id="camView-frontcam"></div>
@@ -1571,6 +1571,20 @@ function callServiceWithTimeout(srv, request, onOk, onErr, timeoutMs) {
 // 按钮的结果会分不清。
 const ACTION_LABEL = { lock: "锁定起飞点", takeoff: "起飞", hover: "悬停", land: "降落" };
 
+// 2026-10-13：禁掉"锁定起飞点"。改用 UWB 全局坐标之后机载 UWB_GLOBAL_FRAME=true，
+// entrypoint 不再启动 origin_setter_node，而这个按钮调的 /{ns}/set_origin_from_uwb
+// 正是那个节点提供的服务——服务根本不存在，按下去只会卡到超时（历史事故
+// "锁定起飞点按钮点了没反应"就是这个症状，见 callServiceWithTimeout 上面的注释）。
+// 现在 world -> {ns}/map 由 entrypoint 直接发恒等静态 TF，不需要任何锁定动作，
+// SDK 的 world_to_local()/local_to_world() 退化成恒等。
+// 回滚：机载 .env 改回 UWB_GLOBAL_FRAME=false（会重新启动 origin_setter_node），
+// 同时把下面这个常量改成 false。两者必须一起改——只改一边会出现
+// "按钮能点但服务不在" 或 "需要锁定却点不了"。
+const ORIGIN_LOCK_DISABLED = true;
+const ORIGIN_LOCK_OFF_TITLE = "UWB 全局坐标模式下无需锁定起飞点"
+  + "（机载 UWB_GLOBAL_FRAME=true，origin_setter_node 不启动、"
+  + "set_origin_from_uwb 服务不存在；world->map 已是恒等静态 TF）";
+
 function withBusy(ns, action, fn) {
   const st = fleet[ns];
   if (!st || st.actionBusy) return;
@@ -1604,6 +1618,11 @@ function withBusy(ns, action, fn) {
 }
 
 function doLockOrigin(ns) {
+  // disabled 只挡住鼠标点击，挡不住 console 里手敲或别处代码调用，所以这里再拦一道。
+  if (ORIGIN_LOCK_DISABLED) {
+    withBusy(ns, "lock", (done) => done(false, ORIGIN_LOCK_OFF_TITLE));
+    return;
+  }
   withBusy(ns, "lock", (done) => {
     callServiceWithTimeout(fleet[ns].lockOriginSrv, {}, (res) => {
       done(!!res.success, res.message || (res.success ? "已锁定" : "失败"));
@@ -2210,6 +2229,12 @@ function doHwFleetQueryStatus(ns) {
 function doHwFleetLockOrigin(ns) {
   const st = hwFleetRow(ns);
   if (st.busy || !fleet[ns]) return;
+  // 同上：disabled 挡不住非 UI 路径的调用。
+  if (ORIGIN_LOCK_DISABLED) {
+    st.msg = ORIGIN_LOCK_OFF_TITLE; st.msgCls = "err";
+    renderHwFleetDiscoverPanel(true);
+    return;
+  }
   st.busy = true; st.msg = "锁定起飞点中..."; st.msgCls = ""; renderHwFleetDiscoverPanel(true);
   callServiceWithTimeout(fleet[ns].lockOriginSrv, {}, (res) => {
     st.busy = false; st.msg = res.message || (res.success ? "已锁定" : "失败"); st.msgCls = res.success ? "ok" : "err";
@@ -2826,7 +2851,7 @@ function renderHwFleetRow(ns) {
   // vision容器控制，都挂在"①控制面板"这个小标题下面。
   const flightControlHtml = hasTelemetry ? `
     <div class="actions" style="margin-top:6px;">
-      <button ${st.busy ? "disabled" : ""} onclick="doHwFleetLockOrigin('${ns}')">锁定起飞点</button>
+      <button ${ORIGIN_LOCK_DISABLED ? `disabled title="${ORIGIN_LOCK_OFF_TITLE}"` : (st.busy ? "disabled" : "")} onclick="doHwFleetLockOrigin('${ns}')">锁定起飞点</button>
       <button ${st.busy ? "disabled" : ""} onclick="doHwFleetTakeoff('${ns}')">起飞</button>
       <button ${st.busy ? "disabled" : ""} onclick="doHwFleetHover('${ns}')">悬停</button>
       <button ${st.busy ? "disabled" : ""} class="danger" onclick="doHwFleetLand('${ns}')">降落</button>
@@ -2891,7 +2916,6 @@ function renderHwFleetRow(ns) {
         <select id="hwFleetCam0Mode_${ns}">
           <option value="yolo" ${st.cam0Mode === "yolo" ? "selected" : ""}>yolo（画面叠加检测框）</option>
           <option value="yolo_nodraw" ${st.cam0Mode === "yolo_nodraw" ? "selected" : ""}>yolo（画面直通，不叠加检测框）</option>
-          <option value="qr" ${st.cam0Mode === "qr" ? "selected" : ""}>qr</option>
           <option value="apriltag" ${st.cam0Mode === "apriltag" ? "selected" : ""}>apriltag</option>
           <option value="raw" ${st.cam0Mode === "raw" ? "selected" : ""}>raw（纯视频直通，不做任何识别）</option>
           <option value="stop" ${st.cam0Mode === "stop" ? "selected" : ""}>stop</option>
@@ -2905,7 +2929,6 @@ function renderHwFleetRow(ns) {
         <select id="hwFleetCam1Mode_${ns}">
           <option value="yolo" ${st.cam1Mode === "yolo" ? "selected" : ""}>yolo（画面叠加检测框）</option>
           <option value="yolo_nodraw" ${st.cam1Mode === "yolo_nodraw" ? "selected" : ""}>yolo（画面直通，不叠加检测框）</option>
-          <option value="qr" ${st.cam1Mode === "qr" ? "selected" : ""}>qr</option>
           <option value="apriltag" ${st.cam1Mode === "apriltag" ? "selected" : ""}>apriltag</option>
           <option value="raw" ${st.cam1Mode === "raw" ? "selected" : ""}>raw（纯视频直通，不做任何识别）</option>
           <option value="stop" ${st.cam1Mode === "stop" ? "selected" : ""}>stop</option>
@@ -3947,12 +3970,19 @@ function switchRightTab(id) {
 // GCS容器自动管理的服务——转码依赖的gst-launch-1.0只装在宿主机上，
 // 不在任何docker镜像里，装进镜像属于要改Dockerfile+重新build的范畴，
 // 这次没有做。
+// 2026-10-16 修正：原来 topcam 默认指向 192.168.43.19:8080 / 192.168.43.7:8081，
+// 那是早期调试时的网段，现在两架飞机是 192.168.2.101/102——地址不通，所以界面上
+// 两个视频框一直是空的。frontcam 更干脆，默认值本来就是空字符串。
+// 现在按当前分工给默认值：侦察机(.101)用**前视** cam0=8080、任务机(.102)用
+// **下视** cam1=8081（见 control_server 的 _CAM_DEFAULTS：cam0=front=8080、
+// cam1=down=8081）。要看另一架/另一路，在地址栏改端口和 IP 再点"应用"。
+// h264 那一路留空：转码依赖宿主机的 gst-launch-1.0，这个功能一直没做完（见上面注释）。
+// ⚠️ 这里只是**没填过时的默认值**。填过一次就存进 localStorage
+// （gcsCamUrl_<位>_<模式>），之后一直用存的那个，改这里不生效——界面上手动改
+// 地址再点"应用"即可。
 const CAM_MODE_DEFAULT_URL = {
-  topcam: {
-    mjpeg: "http://192.168.43.19:8080/stream.mjpg",
-    h264: "http://192.168.43.7:8081/stream.mjpg",
-  },
-  frontcam: { mjpeg: "", h264: "" },
+  topcam:   { mjpeg: "http://192.168.2.102:8081/stream.mjpg", h264: "" },  // 📷 俯视＝任务机下视
+  frontcam: { mjpeg: "http://192.168.2.101:8080/stream.mjpg", h264: "" },  // 🎥 前视＝侦察机前视
 };
 function camUrlStorageKey(key, mode) { return `gcsCamUrl_${key}_${mode}`; }
 // 滚轮缩放+拖动平移的状态，跟俯视图画布(mapView.scale/centerWorld)
@@ -4684,7 +4714,7 @@ function renderSimDroneCard(ns) {
       <b class="cardTitle">${ns}</b><span class="cardSub">仿真</span> ${simContainerBadgeHtml(ns)}
       <div id="simTelemetryTop_${ns}">${simTelemetryTopHtml(ns)}</div>
       <div class="actions">
-        <button class="${lock.cls}"${lock.title} ${st.actionBusy ? "disabled" : ""} onclick="doLockOrigin('${ns}')">锁定起飞点</button>
+        <button ${ORIGIN_LOCK_DISABLED ? `disabled title="${ORIGIN_LOCK_OFF_TITLE}"` : `class="${lock.cls}"${lock.title} ${st.actionBusy ? "disabled" : ""}`} onclick="doLockOrigin('${ns}')">锁定起飞点</button>
         <button class="${takeoff.cls}"${takeoff.title} ${st.actionBusy ? "disabled" : ""} onclick="doTakeoff('${ns}')">起飞</button>
         <button class="${hover.cls}"${hover.title} ${st.actionBusy ? "disabled" : ""} onclick="doHover('${ns}')">悬停</button>
         <button class="danger ${land.cls}"${land.title} ${st.actionBusy ? "disabled" : ""} onclick="doLand('${ns}')">降落</button>

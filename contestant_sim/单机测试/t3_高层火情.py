@@ -2,12 +2,16 @@
 """单机测试 3：高层火情瞄准专项。
 
 M 点（或 N 点）起飞 -> 拍照 -> 前视精确对准高层火情 -> 回家。
-默认 M 点看 2# 楼；加 --n 用 N 点看 1# 楼。
+默认用 M 点，加 --n 用 N 点。**具体看的是哪栋楼不写死在这里**，按观察位名
+从 venue.STATIONS 查——楼号是场地参数，仿真/真机两边编号可以不一样
+（2026-10-11 仿真把 1# 和 3# 互换过），写死就得改两边的程序代码，而两份
+程序必须逐字节相同（run_real.sh 1.8 节的闸门）。
 
-**这个测试专查 aim_at 的前视几何**，跟 t2 是两条完全不同的路：
-前视用相机内参自己算角度和距离（2026-10-03 起从 camera_info 读，
-真机拿实测标定值 fx≈1200），而下视转给 precision_servo 的像素闭环。
-所以 t2 过了不代表 t3 过。
+**这个测试专查 aim_at 的前视几何**，跟 t2 是两条不同的路：前视用相机内参
+自己算角度和距离（2026-10-03 起从 camera_info 读，真机 2026-10-15 起四路
+共用一组标定值 **fx≈735.46 / cx≈616.22 / cy≈376.47**，水平 FOV 82°——换
+摄像头之前是 fx≈1200/FOV 56°，差 1.62 倍），而下视转给 precision_servo 的
+像素闭环。所以 t2 过了不代表 t3 过。
 
 ⚠ 必须先 face_yaw 正对楼面再对准——aim_at 是"锁住当前朝向只做平移"的，
   朝向不对的话画面里居中了、机身却斜着。
@@ -20,16 +24,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from contest_sdk import DroneSDK
 from venue import (POINT_M, POINT_N, HIGH_FIRE, FACADE_YAW_DEG,
-                   CRUISE_AGL_M, OBSERVE_AGL_M)
+                   CRUISE_AGL_M, OBSERVE_AGL_M, STATIONS)
+
+#: 观察位名 -> 楼号标签，只收"要查火情"的那些站（另一站是只拍照的那栋）。
+#: 查不到就退回观察位名本身，少个好看的名字而已，不让测试因为标签挂掉。
+_BLDG_AT = {s[2]: s[0] for s in STATIONS if s[4]}
 
 PHOTO_DIR = '/logs/测试3_高层火情'
 
 
-def test(sdk):
+def test(sdk: DroneSDK):
     # 只开需要的那一路相机（拍照 + 瞄准高层火情用前视）。仿真下是空操作。
     sdk.set_camera_mode('front')
     use_n = '--n' in sys.argv
-    spot, name, bldg = (POINT_N, 'N', '1#楼') if use_n else (POINT_M, 'M', '2#楼')
+    spot, name = (POINT_N, 'N') if use_n else (POINT_M, 'M')
+    bldg = _BLDG_AT.get(name, f'{name}点那栋')
     sdk.progress(f'=== 测试 3：高层火情瞄准（{name} 点看 {bldg}）===')
     sdk.takeoff(height_m=CRUISE_AGL_M)
 
@@ -56,8 +65,9 @@ def test(sdk):
             sdk.snapshot(f'{bldg}_已对准', camera='front', directory=PHOTO_DIR)
             sdk.progress('对准成功，照片已回传')
         else:
-            sdk.progress('!! 没能对准——前视几何用的是 camera_info 的内参，'
-                         '先确认 {ns}_front_camera/camera_info 的 fx 是标定值不是 381')
+            sdk.progress('!! 没能对准——前视几何用的是 camera_info 的内参，先确认 '
+                         '{ns}_front_camera/camera_info 的 fx 是 735 那组标定值；'
+                         '读到 381 是订阅错话题后走的回退值，1200 是老摄像头的旧值')
     else:
         sdk.progress(f'!! {name} 点前视看不到 {HIGH_FIRE}——确认标识摆位、朝向和视觉已起')
 

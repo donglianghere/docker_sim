@@ -288,7 +288,15 @@ def pillars(layout):
 
 
 def cylinder_model(layout):
+    """独立避障圆柱。`enabled: false` 时整个模型不生成（2026-10-11 用户去掉它）。
+
+    注意 layout 里那条 `obstacle_cylinder` 键是**故意留着**的（见 yaml 注释：
+    pillar_detector_node 拿 diameter 当圆柱/方柱判别阈值），所以这里不能靠
+    "键在不在"判断，必须看 enabled。
+    """
     c = layout["obstacle_cylinder"]
+    if not c.get("enabled", True):
+        return ""
     return (f"\n    <model name='obstacle_cylinder'>\n"
             f"      <static>1</static>\n"
             f"      <pose>{c['x']} {c['y']} {c['height']/2} 0 0 0</pose>\n"
@@ -306,8 +314,20 @@ def cylinder_model(layout):
             f"    </model>\n")
 
 
-def floor_marker(name, x, y, tag_material):
-    """地面圆盘 + 上面一张 AprilTag 贴片（物资点/地面火情点共用这个形状）。"""
+def floor_marker(name, x, y, tag_material, size=None, tag_size=0.5):
+    """地面标识：底座 + 上面一张 AprilTag 贴片。
+
+    `size=None` 画半径 0.4 的**圆盘**（地面火情点）；给 `(sx, sy)` 就画那么大的
+    **长方形**底座（物资点，2026-10-11 用户指定 2 米(X) x 1 米(Y)，x/y 是矩形
+    对角线中心）。两种形状都只是贴地的薄片，没有 <collision>，不会被雷达扫成
+    障碍，也不挡精准降落。
+    """
+    if size is None:
+        base = ("          <geometry><cylinder><radius>0.4</radius>"
+                "<length>0.02</length></cylinder></geometry>\n")
+    else:
+        base = (f"          <geometry><box><size>{size[0]} {size[1]} 0.02</size>"
+                f"</box></geometry>\n")
     return (f"\n    <model name='{name}'>\n"
             f"      <static>1</static>\n"
             f"      <pose>{x} {y} 0 0 0 0</pose>\n"
@@ -315,13 +335,13 @@ def floor_marker(name, x, y, tag_material):
             f"        <visual name='visual_base'>\n"
             f"          <cast_shadows>0</cast_shadows>\n"
             f"          <pose>0 0 0.01 0 0 0</pose>\n"
-            f"          <geometry><cylinder><radius>0.4</radius><length>0.02</length></cylinder></geometry>\n"
+            f"{base}"
             f"{script_mat('Gazebo/Grey', 10)}"
             f"        </visual>\n"
             f"        <visual name='visual_apriltag'>\n"
             f"          <cast_shadows>0</cast_shadows>\n"
             f"          <pose>0 0 0.025 0 0 0</pose>\n"
-            f"          <geometry><box><size>0.5 0.5 0.01</size></box></geometry>\n"
+            f"          <geometry><box><size>{tag_size} {tag_size} 0.01</size></box></geometry>\n"
             f"{marker_mat(tag_material, 10)}"
             f"        </visual>\n"
             f"      </link>\n"
@@ -368,7 +388,7 @@ def resolve_random_fire(layout, rng=None):
     rng = rng or _random
     psize = float(layout["pillar_size"])
     spacing = float((layout.get("floor_rings") or {}).get("spacing_m", 1.0))
-    bldg = rng.choice(list(fr.get("buildings") or ["pillar_1", "pillar_2"]))
+    bldg = rng.choice(list(fr.get("buildings") or ["pillar_2", "pillar_3"]))
     floor = int(rng.choice([int(v) for v in (fr.get("floors") or [2, 3])]))
     unit = rng.randrange(2)                       # 0=本柱(西单元) 1=孪生柱(东单元)
     pid = bldg if unit == 0 else f"{bldg}_e"
@@ -387,6 +407,60 @@ def resolve_random_fire(layout, rng=None):
     note = (f'{bldg.replace("pillar_", "")}# 楼 {floor} 层 '
             f'{"西" if unit == 0 else "东"}单元')
     return note, (x, base["y"] - d, z)
+
+
+def resolve_random_ground_fire(layout, rng=None):
+    """把"地面火情点随机化"在**生成 world 之前**抽定，并写回 layout（内存里）。
+
+    为什么也必须在这一步抽、而不是等 scenario_reset_node 运行时抽：跟高层
+    着火点一模一样的理由，见 resolve_random_fire 的注释（gzclient 对运行中被
+    热移的模型不重绘，界面所见就不再是真值）。
+
+    范围是 `ground_fire_random.between` 指定的两个**航点 id** 之间的线段
+    （2026-10-11 用户要求：新 G 和 E 之间），两端各留 margin_m 不取。
+    航点 id 在 route_waypoints 里可能出现多次（G 去回各一次，坐标相同），取第一个。
+
+    返回 (说明文字, (x, y))；没开随机就返回 (None, None)。
+    """
+    import random as _random
+    gr = layout.get("ground_fire_random") or {}
+    if not gr.get("enabled"):
+        return None, None
+    rng = rng or _random
+    ids = list(gr.get("between") or [])
+    if len(ids) != 2:
+        raise ValueError(f"ground_fire_random.between 需要两个航点 id，拿到 {ids!r}")
+
+    def _wp(i):
+        for w in layout["route_waypoints"]:
+            if w["id"] == i:
+                return float(w["x"]), float(w["y"])
+        raise KeyError(f"route_waypoints 里没有航点 '{i}'")
+
+    (x0, y0), (x1, y1) = _wp(ids[0]), _wp(ids[1])
+    seg = math.hypot(x1 - x0, y1 - y0)
+    # 两端余量可以**分开设**（2026-10-16 用户："地面火情生成位置必须距离 G 点
+    # 3 米以上"）。margin_m 是两端共用的默认值，margin_start_m / margin_end_m
+    # 分别覆盖 between[0] / between[1] 那一端——between 是 [G, E]，所以
+    # margin_start_m 管的就是 G 这一头。
+    # 为什么不是把 margin_m 直接调到 3.0：那样 E 端也留 3 m，7 m 的段只剩 1 m
+    # 可选，随机性几乎没了。
+    margin = float(gr.get("margin_m", 0.0))
+    m_start = float(gr.get("margin_start_m", margin))
+    m_end = float(gr.get("margin_end_m", margin))
+    if seg <= m_start + m_end:
+        raise ValueError(
+            f"{ids[0]}-{ids[1]} 段长 {seg:.2f} m，留不出 {ids[0]} 端 {m_start} m "
+            f"+ {ids[1]} 端 {m_end} m 的余量")
+    t = rng.uniform(m_start / seg, 1.0 - m_end / seg)
+    x, y = x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
+    x, y = round(x, 2), round(y, 2)
+    layout["ground_fire_point"]["x"] = x
+    layout["ground_fire_point"]["y"] = y
+    layout["ground_fire_random"]["enabled"] = False   # 已抽定，reset 节点别再抽
+    note = (f'{ids[0]}-{ids[1]} 段上 {t * seg:.2f}/{seg:.2f} m 处'
+            f'（距 {ids[0]} {t * seg:.2f} m、距 {ids[1]} {(1 - t) * seg:.2f} m）')
+    return note, (x, y)
 
 
 def fire_apriltag(layout):
@@ -503,17 +577,23 @@ def main():
     room = L["room"]
 
     fire_note = fire_xyz = None
+    gfire_note = gfire_xy = None
     if args.randomize_fire:
         import random
         rng = random.Random(args.seed) if args.seed is not None else random
         fire_note, fire_xyz = resolve_random_fire(L, rng)
+        # 地面火情跟高层火情共用这个开关：两者都必须在生成阶段抽定（原因同上）
+        gfire_note, gfire_xy = resolve_random_ground_fire(L, rng)
 
     parts = [HEADER, ground_plane(room), walls_and_ceiling(room),
              cylinder_model(L), pillars(L),
              floor_marker("supply_point_marker", L["supply_point"]["x"],
-                          L["supply_point"]["y"], "ContestMarkers/AprilTagSupply"),
+                          L["supply_point"]["y"], "ContestMarkers/AprilTagSupply",
+                          size=(L["supply_point"]["size_x"], L["supply_point"]["size_y"]),
+                          tag_size=L["apriltag_size_m"]),
              floor_marker("fire_point_marker", L["ground_fire_point"]["x"],
-                          L["ground_fire_point"]["y"], "ContestMarkers/AprilTagGroundFire"),
+                          L["ground_fire_point"]["y"], "ContestMarkers/AprilTagGroundFire",
+                          tag_size=L["apriltag_size_m"]),
              fire_apriltag(L), terrain(L), helipads(L), footer(room)]
     with open(args.output, "w", encoding="utf-8") as f:
         f.write("".join(parts))
@@ -525,11 +605,14 @@ def main():
     if fire_note:
         print(f"  [高层火情真值] {fire_note} tag=({fire_xyz[0]:.2f}, "
               f"{fire_xyz[1]:.2f}, {fire_xyz[2]:.2f})")
+    if gfire_note:
+        print(f"  [地面火情真值] {gfire_note} tag=({gfire_xy[0]:.2f}, {gfire_xy[1]:.2f})")
     n_pillars = sum(2 if p.get("twin_east") else 1 for p in L["pillars"])
     print(f"[gen_sample_room_world] wrote {args.output}")
     print(f"  房间 {room['size_x']}x{room['size_y']}x{room['height']} m，原点在西南角")
     print(f"  立柱 {n_pillars} 根（{len(L['pillars'])} 根 + 各自正东孪生柱），"
           f"每根 {int((L['pillar_height'] - 1e-6) // L['floor_rings']['spacing_m'])} 圈楼层线")
+    print(f"  避障圆柱 {'有' if L['obstacle_cylinder'].get('enabled', True) else '无（enabled: false）'}")
 
 
 if __name__ == "__main__":

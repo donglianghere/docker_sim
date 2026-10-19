@@ -1437,8 +1437,28 @@ def hw_fleet_stack(ns: str, req: HwFleetStackReq):
             ("cam0", "cam0_mode", "cam0_mjpeg_port"),
             ("cam1", "cam1_mode", "cam1_mjpeg_port"),
         ):
-            mode = cfg.get(mode_key)
-            if not mode:
+            # 2026-10-15 用户要求：「启动Vision」按钮一次把两路摄像头都起来，
+            # 任务执行时再按需开关。所以没配置的那一路不再跳过，按 yolo 起。
+            # ⚠️ 2026-10-16 排查"下视没图"时一度以为两路不能同时跑（当时 cam0
+            # 正常而 cam1 一帧拿不到），**那个结论不成立**：之后单独起 cam1 坏、
+            # 单独起 cam0 也坏，说明整条相机链路已经在退化，两路同时只是撞上了
+            # 中间状态。10-03 实测的"两路同时跑 CPU 88~90%"仍然有效。
+            # 留下的真教训是**怎么判断一路相机到底有没有在出帧**：
+            #     docker exec docker_sim-vision-stack-1 \
+            #       grep -c "no frame" /tmp/cam{0,1}_yolo_detector_node.log
+            # 只有计数为 0 才是真在出帧。**接口返回 ok、vision/detections 有发布者、
+            # MJPEG 端口 HTTP 200 —— 这三个全都骗人**，相机不出帧时它们照样成立。
+            # 要某一路不起，在网页上把它显式选成 stop（下面有分支处理）。
+            # 这同时修掉一个"界面和实际不一致、而且看不出来"的坑：网页那两个
+            # 检测模式下拉**没有空选项**（yolo/yolo_nodraw/apriltag/raw/stop），
+            # 配置里是 null 时 refreshHwFleet() 的 `if (cfg.cam1_mode)` 不覆盖、
+            # 界面照样显示"yolo"，而这里旧逻辑却直接 continue —— NX01 的 cam1
+            # 就这么一直没起过（2026-10-15 查"下视没有流"查到这里）。
+            # 要只起一路的话，在网页上把另一路**显式**选成 stop：
+            # start_vision_mode() 的 stop 分支只杀那一路的进程、不起新的。
+            mode = cfg.get(mode_key) or "yolo"
+            if mode == "stop":
+                notes.append(f"{cam}: 配置为 stop，未启动")
                 continue
             body = {"cam": cam, "mode": mode}
             # 2026-09-23：地面拉到的画面要"直通"(不叠加检测框)时，本地

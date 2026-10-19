@@ -4,9 +4,15 @@
 G 点起飞 -> 飞往 E 点 -> 下视精确瞄准地面火情 -> 拍照回传 -> 回家。
 
 **下视对准走的不是 aim_at 自己的几何**：aim_at(camera='down') 会转给
-center_on_target() 的 precision_servo 闭环（像素级 P 控制，不用相机内参）。
-所以这个测试验的是 precision_servo 这条链：检测话题 -> frame_id 判据 ->
-precision_land_cmd -> position_cmd_relay -> pt4ctrl。
+center_on_target() 的 precision_servo 闭环。所以这个测试验的是 precision_servo
+这条链：检测话题 -> frame_id 判据 -> precision_land_cmd -> position_cmd_relay
+-> pt4ctrl。
+
+⚠ 2026-10-15 起**真机**这条链也吃相机内参了（原来只按 hfov 和图像中心算）：
+  像素偏移换算改成 alt/fx、原点取 camera_info 的真主点 (cx, cy)，订阅
+  {ns}_down_camera/camera_info，拿不到才回退图像中心。所以对不准时除了查
+  检测话题和 frame_id，还要看这条 camera_info 在不在、fx 是不是 735 那组值。
+  仿真侧仍走 hfov 那条老路（它的 precision_servo 没改）。
 
 坐标来自 ../venue.py。
 """
@@ -19,7 +25,7 @@ from venue import ROUTE_G, ROUTE_E, GROUND_FIRE, CRUISE_AGL_M
 PHOTO_DIR = '/logs/测试2_地面火情'
 
 
-def test(sdk):
+def test(sdk: DroneSDK):
     # 只开需要的那一路相机（搜索 + 对准地面火情用下视）。仿真下是空操作。
     sdk.set_camera_mode('down')
     sdk.progress('=== 测试 2：地面火情对准 ===')

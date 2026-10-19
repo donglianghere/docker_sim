@@ -4,7 +4,7 @@
 #
 #   ./run_test.sh t1              # 物资抓取（默认 NX02，带夹爪）
 #   ./run_test.sh t2              # 地面火情对准（默认 NX01）
-#   ./run_test.sh t3 --n          # 高层火情，用 N 点看 1# 楼
+#   ./run_test.sh t3 --n          # 高层火情，用 N 点看 3# 楼
 #   ./run_test.sh t4 --nx02       # 避障，指定用 NX02
 #   ./run_test.sh t5 --keep       # 仿地，结束后保留容器看日志
 #   ./run_test.sh t1 --restart    # 强制重起仿真（默认复用已在跑的）

@@ -79,8 +79,21 @@ fi
 # 仿真/真机两种网络参数（ROS_DOMAIN_ID 仿真21/真机20，真机还要换DDS网卡配置），
 # 见 contestant_network.sh。
 source /home/robots/ai_uav/docker_sim/scripts/contestant_network.sh
-contestant_net_args "$MODE" /home/robots/ai_uav/docker_sim "$HOME/.cache/contest_sdk"
+# 2026-10-04：真机域改用 **local** 而不是 real。板子在地面站上，常驻程序只跟
+# 同一台机器上的选手容器说话，**飞机从不发声光请求**；原来跟选手容器一样钉死在
+# "连飞机那张网卡"上，结果地面站一换 SSID，它的 DDS 就卡在
+# `ddsi_udp_conn_write to udp/192.168.2.101:... failed` 上刷屏，对本机也不通，
+# 板子整个变砖（2026-10-04 实测）。local = 域 20 + 仅回环，不依赖任何外部网卡。
+# 选手容器那边（real 模式）同日补了回环网卡和 127.0.0.1 对等体，所以两边照常能碰上。
+_SL_NET_MODE="$MODE"
+[ "$MODE" = real ] && _SL_NET_MODE=device
+contestant_net_args "$_SL_NET_MODE" /home/robots/ai_uav/docker_sim "$HOME/.cache/contest_sdk"
 echo "运行模式：$CONTESTANT_NET_DESC"
+# 记一份"启动时用的配置"快照，给 ensure_stacks.sh 的漂移检测比对用：
+# device 模式的网卡集合取决于**当时**有没有连上飞机那个网段，地面站接回 uav
+# 之后必须重起容器才能挂上 LAN 那张网卡，否则真飞时选手容器找不到它（只在 lo 上）。
+_SL_DEV_XML="$HOME/.cache/contest_sdk/cyclonedds_device.xml"
+[ -f "$_SL_DEV_XML" ] && cp -f "$_SL_DEV_XML" "$HOME/.cache/contest_sdk/cyclonedds_device.started.xml" 2>/dev/null || true
 
 # 串口直通不用--device：--device要求启动时设备已经存在，而且板子拔插后
 # 设备节点会变，容器里看不到新节点。改成把/dev整个挂进去+按设备号放行

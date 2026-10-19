@@ -102,8 +102,10 @@ from rcl_interfaces.srv import SetParameters
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import String
-from vision_msgs.msg import Detection2DArray
+from sensor_msgs.msg import CameraInfo
+from vision_msgs.msg import Detection2DArray, Detection3DArray
 
 from contest_mission.ground_scan_helper import compute_ground_footprint
 
@@ -129,7 +131,9 @@ from contest_mission.ground_scan_helper import compute_ground_footprint
 # **不会**触发降落——用户必须清楚这条路径完全不避障，只应该在已知
 # 无障碍物的路段使用（比如起降点附近、开阔区域），不能拿来替代
 # `goto()`跑有障碍物的常规航线。
-VALID_SERVO_MODES = ('center_only', 'precision_land', 'coordinate_land', 'coordinate_goto')
+VALID_SERVO_MODES = ('center_only', 'precision_land', 'coordinate_land',
+                     'coordinate_goto', 'track_target', 'track_land',
+                     'aim_front')
 
 # precision_land模式下发TakeoffLand(LAND)的重发次数——照抄takeoff_gate.py/
 # gcs后端_publish_takeoff_land()同款"连发几次而不是一次"的防御写法（注释
@@ -216,6 +220,21 @@ class PrecisionServoNode(Node):
         # 因为这个是三维距离阈值，语义上跟"水平误差"阈值不是同一个量，
         # 未来两个值有必要分开调时不用共用一个参数打架。
         self.declare_parameter('arrival_threshold_m', 0.3)
+        # 2026-10-08：上面那个阈值从"三维球半径"改成**水平**阈值，Z 单独一个。
+        #   起因：高层火情轮任务机 release_at(direct=True) 回物资点放器材，在点
+        #   上空盘旋很久不降。判据原来是 hypot(水平误差, dz) <= 0.3 —— 一个球，
+        #   Z 吃掉多少预算，水平就少多少。那趟定高全程钉在 1.87 m 而请求的是
+        #   2.0 m，光高度差就占掉 0.13，水平只剩 0.27，再叠上 UWB 噪声和悬停
+        #   漂移就长时间够不到，而 goto_direct(timeout=None) 和
+        #   coordinate_goto_max_wait_s=0.0 两端都不超时，于是一直等。
+        #   ⚠ 为什么不干脆去掉 Z 只看水平：set_agl() 走的就是 coordinate_goto
+        #   （goto_direct(cx, cy, lz)，水平不动只改高度），判据里没有 Z 的话
+        #   第一个控制周期就会广播 arrived，高度一厘米没动就返回——patrol() 每
+        #   站查完都调一次 set_agl()，全会变成空动作。所以 Z 必须留着把关，
+        #   只是跟水平分开算。
+        #   两个都填 0.3 相对原来是**纯放宽**（球 -> 盒，对角放到 0.52），
+        #   现在能到点的场景不会退化。
+        self.declare_parameter('arrival_z_threshold_m', 0.3)
         self.declare_parameter('image_width', 640)
         self.declare_parameter('image_height', 480)
         self.declare_parameter('camera_hfov_rad', 1.3963)  # 跟gen_iris_mid360_sdf.py的CAMERA_MOUNTS['down']一致
@@ -232,6 +251,34 @@ class PrecisionServoNode(Node):
         # 这里是控制器内部限制单个控制周期的最大步长，目标点还是一次性
         # 给的原始目标，两者不是一回事）。
         self.declare_parameter('coordinate_max_speed_mps', 0.3)
+        # [m/s] 2026-10-13 新增：**垂直**方向的速率上限。
+        # ⚠️ 原来 z 这一路完全是裸的：`target_z = z + kp_z * world_dz`，
+        # `coordinate_max_speed_mps` 的夹限只作用在 step_x/step_y（那段 hypot
+        # 只含水平两轴），而且 `cmd.velocity.z` 从来没被赋过值。后果是
+        # 一次 2 m 的高度变化，第一拍高度设定点就跳 1 m——垂直速度完全靠
+        # PX4 自己的 MPC_Z_VEL_MAX 兜着，这个节点一点都没管。
+        # `set_agl()` 走的就是 coordinate_goto，是纯 z 运动，这条路最吃亏。
+        # 单独一个参数、不复用水平那个：`_direct_leg()` 会把水平限速临时提到
+        # 1.0 m/s 跑航段，垂直速率不该跟着一起变。
+        # 取 0.6，跟 .env 的 EGO_ALT_RATE_MAX / LINE_ALT_RATE_MPS 同一个口径。
+        # ---- aim_front：机载前视瞄准（2026-10-14 用户要求搬到机上）----
+        # 为什么必须在机上：这是"看一眼动一下"的闭环，跟 track_target 同一类。
+        # 放地面侧循环的话每轮都要跨链路取检测、下指令、轮询到位——用户
+        # 2026-10-06 就为 track_target 定过这条口径，这次先写成地面版是我的疏漏。
+        # 跟 track_target 的区别：那个靠 target_locate_node 解出**地面坐标**再飞
+        # 过去（只对朝下相机成立）；这个只用**方位角+俯仰角**，对任何朝向的相机
+        # 都成立，所以不走像素->地面偏移那套换算，也因此必须单独一条检测路径。
+        self.declare_parameter('aim_timeout_s', 15.0)
+        self.declare_parameter('aim_yaw_tol_deg', 2.0)     # 方位容差
+        self.declare_parameter('aim_z_tol_m', 0.12)        # 高度容差
+        self.declare_parameter('aim_yaw_gain', 0.8)        # <1 防过冲
+        self.declare_parameter('aim_scan_deg', 60.0)       # 扫描总张角
+        self.declare_parameter('aim_scan_rate_dps', 12.0)  # 扫描角速度（缓慢）
+        self.declare_parameter('aim_tag_size_m', 0.5)      # 按框宽估距离用
+        self.declare_parameter('aim_z_min_m', 0.8)
+        self.declare_parameter('aim_z_max_m', 4.0)
+        self.declare_parameter('aim_det_stale_s', 0.5)     # 检测新鲜度
+        self.declare_parameter('coordinate_max_z_speed_mps', 0.6)
         # 2026-09-14用户重新设计精降下降逻辑，`descent_rate_mps`+
         # `min_descent_z`（连续匀速下压到很低高度才触发降落）这套逻辑
         # 整个废弃，改成`land_handoff_height_m`+`descent_step_m`这套
@@ -292,6 +339,29 @@ class PrecisionServoNode(Node):
         # 一个正数重新启用兜底）。
         self.declare_parameter('coordinate_goto_max_wait_s', 0.0)
         self.declare_parameter('detection_timeout_s', 1.0)
+        # ---- track_target 模式（2026-10-06 用户要求）----
+        # 做法：目标坐标由 target_locate_node 解算（内参+位姿+测距仪，不碰
+        # pixel_offset_to_body_frame 那套配置），本节点把飞机一轮轮送到那个
+        # 坐标正上方；像素误差只当收敛判据。闭环整个留在机上，地面只发起+等结果。
+        self.declare_parameter('center_tol_px', 50.0)    # 目标框中心离图像主点多少像素算到位
+        self.declare_parameter('track_timeout_s', 30.0)  # 总时限；超时**按成功处理**，见下
+        self.declare_parameter('track_agl_m', 0.0)       # 逼近时保持的高度，<=0 表示保持当前高度
+        # ---- track_land 模式（2026-10-06 用户要求：land_on 下沉到机载）----
+        # 边按解算坐标对准边下降，水平和垂直在同一条指令里——不是"对准一点、降
+        # 一点、再对准"的分级下降（那套从 2.5 m 下来要 40 s 以上，30 s 时限内走
+        # 不完，每次都走超时兜底，等于精度只做了一半）。默认值取自地面版 land_on
+        # 的 LAND_ON_* 常量，逐个对应。
+        self.declare_parameter('land_step_m', 0.8)           # 每步降多少，降完重新解算
+        self.declare_parameter('land_handoff_m', 0.7)        # 降到离地这么高交给 AUTO_LAND
+        self.declare_parameter('land_handoff_tol_m', 0.15)   # 悬停有起伏，死等"严格低于"会卡住
+        self.declare_parameter('track_land_timeout_s', 30.0) # 总时限，到点直接交给 AUTO_LAND
+        self.declare_parameter('track_lost_grace_s', 5.0)    # 丢目标超过这么久才放弃，用最后坐标撑住
+        # ⚠️ 解算坐标的保质期（2026-10-06 实测事故）：缓存没有时效检查时，apriltag:0
+        # 在飞机还贴地时被看到过的那份结果会一直有效——地面 z 跟飞机 z 几乎相等，于是
+        # 飞到物资点上空一进 track_land 就算出 agl≈0.04 m，第一拍判"已到交接高度"直接
+        # 交给 AUTO_LAND，视觉精降一步没做。超过这个岁数的坐标只能用来"飞回去找"，
+        # 不能用来算 agl。
+        self.declare_parameter('track_cache_max_age_s', 3.0)
         self.declare_parameter('control_rate_hz', 10.0)
         # 三个轴映射修正旋钮，见文件头说明。
         self.declare_parameter('invert_x', False)
@@ -302,6 +372,17 @@ class PrecisionServoNode(Node):
         # 同日期说明——照抄fire_pillar_aim_node.py的auto_switch_relay_mode/
         # relay_set_parameters_service两个参数，同一套开关。
         self.declare_parameter('auto_switch_relay_mode', True)
+        # 2026-10-05新增：接管期间**周期性重申** relay_mode 的间隔（秒，<=0 关闭）。
+        # 为什么需要：原来只在首次接管时切一次（见 _relay_mode_active），之后整个
+        # servo_mode 会话内永不重申，于是别的节点一旦把 relay_mode 改回去，本节点
+        # 完全察觉不到，继续往 precision_land_cmd 发指令而中继全丢，飞机表现为
+        # "收到指令却不动"。10-05 11:36 formation_lite 实测事故：僚机出列时
+        # formation_follower_node 迟到的 relay_mode='normal' 顶掉了本节点的接管，
+        # 回家那段根本没被伺服、靠 AUTO_HOVER 漂了 37.6 秒才漂进到点球里
+        # （长机同样 1.0m/s 直飞只用 1.0 秒收住，对照组）。
+        # 重申是幂等的，而且 _set_relay_mode() 是非阻塞 call_async，代价可忽略；
+        # _on_relay_mode_set_done() 本来只在失败时打日志，所以重申不会刷屏。
+        self.declare_parameter('relay_reassert_period_s', 1.0)
         self.declare_parameter('relay_set_parameters_service', 'position_cmd_relay/set_parameters')
 
         # servo_mode：见文件头"2026-09-13补充"说明，故意用空字符串当默认值——
@@ -360,6 +441,15 @@ class PrecisionServoNode(Node):
         self._last_world_offset: Optional[Tuple[float, float]] = None
         self._last_detection_time: Optional[float] = None
 
+        # === aim_front 模式专用状态 ===
+        self._aim_dyaw: Optional[float] = None    # 方位角（rad，>0=目标在画面右）
+        self._aim_dz: Optional[float] = None      # 高度差（m，>0=要升）
+        self._aim_dist: Optional[float] = None    # 按框宽估的距离（m）
+        self._aim_rx: Optional[float] = None      # 最近一帧前视检测的时刻
+        self._aim_done = False
+        self._aim_scan_center: Optional[float] = None   # 接管时的朝向，扫描以它为中心
+        self._aim_yaw_cmd: Optional[float] = None       # 本拍要下发的 yaw（覆写 cmd.yaw）
+        self._aim_target_z: float = 0.0                 # 本拍目标高度（所有分支都必须有定义）
         # === center_only模式专用状态 ===
         # 记录"持续满足水平收敛条件"是从哪个time.monotonic()时刻开始的，
         # None表示当前不在"持续收敛"区间内（还没收敛，或者中途又超出过阈值）。
@@ -399,6 +489,8 @@ class PrecisionServoNode(Node):
         # 外部设成合法值)时就抢占relay_mode，跟formation_follower_node
         # "常驻但默认不生效"是同一个设计原则。
         self._relay_mode_active = False
+        # 上一次（重）申 relay_mode 的时刻，配合 relay_reassert_period_s 使用
+        self._relay_last_assert_t: Optional[float] = None
         # 2026-09-14新增：precision_land_max_wait_s硬超时兜底计时起点——
         # 跟_relay_mode_active在同一个时刻(真正接管飞控那一刻)一起置位，
         # 见_on_control_tick里的用法。
@@ -407,6 +499,38 @@ class PrecisionServoNode(Node):
         self.pub = self.create_publisher(PositionCommand, 'precision_land_cmd', 10)
         self.create_subscription(Odometry, 'dlio/odom_node/odom', self._on_odom, 10)
         self.create_subscription(Detection2DArray, 'vision/detections', self._on_detections, 10)
+        # track_target 用：解算坐标（target_locate_node 的输出，frame_id 是本机
+        # odom 系，跟 self._odom_xy_z_yaw 同一个系）和图像主点（camera_info）。
+        # class_id -> (x, y, z, 收到时刻)，见 _on_target_positions 的说明
+        self._track_cache: dict = {}
+        self._track_target_z: float = 0.0   # track_* 这一拍要去的高度，见控制回路
+        self._track_xy: Optional[Tuple[float, float]] = None
+        self._track_z: float = 0.0
+        self._track_seen_t: Optional[float] = None
+        self._track_px: Optional[float] = None
+        self._track_done = False
+        self._principal: Optional[Tuple[float, float]] = None
+        self._fx: Optional[float] = None       # camera_info 的 K[0]，aim_front 用
+        self.create_subscription(Detection3DArray, 'vision/target_positions',
+                                 self._on_target_positions, 10)
+        _ns = self.get_namespace().strip('/') or 'NX01'
+        # 2026-10-14：**两路都订**。原来只订 _down_ 那一路，于是 aim_front
+        # （前视）永远拿不到内参、每次都走回退——真机实测后果：fx 从真值 1200.7
+        # 掉到回退的 381.5（差 3.15 倍），主点从 646.3 掉到 320（差 326 px，
+        # 在真 fx 下相当于 15.2°）。于是节点报"方位 +1.4° 已锁定"，实际对着偏
+        # 15° 的方向，解出的距离也只有真实值的 1/3.15（日志 1.32 m 实为 4.15 m）。
+        # 现象就是用户说的"有瞄准动作，但是没有真瞄准"。
+        # 内参由机载 control_server.py 的 start_vision_mode() 按标定值发，话题名
+        # {ns}_{label}_camera/camera_info，label 取自 _CAM_DEFAULTS：
+        # cam0->front、cam1->down。两路主点差是装配决定的，必须分别存、不能互套。
+        self._caminfo_front: Optional[Tuple[float, float, float]] = None
+        self._caminfo_down: Optional[Tuple[float, float, float]] = None
+        self.create_subscription(
+            CameraInfo, f'{_ns}_down_camera/camera_info',
+            lambda m: self._on_caminfo(m, 'down'), qos_profile_sensor_data)
+        self.create_subscription(
+            CameraInfo, f'{_ns}_front_camera/camera_info',
+            lambda m: self._on_caminfo(m, 'front'), qos_profile_sensor_data)
 
         # centered_pose：center_only模式收敛完成后广播的坐标x/y（这架
         # 飞机自己的局部坐标系`{ns}/odom`，不是跨机共享的world坐标系——
@@ -510,6 +634,24 @@ class PrecisionServoNode(Node):
                 self._set_relay_mode('normal')
             self._centered_notified = False
             self._arrived_notified = False
+            self._track_done = False
+            # 2026-10-14：aim_front 那套也必须在这儿复位。漏掉的后果：第一次
+            # 瞄准锁定后 _aim_done 永久为 True，第二次进 aim_front 直接撞上
+            # 控制循环开头的 `if aim_front and _aim_done: return`，机载侧一行
+            # 日志都不打，地面侧等满 预算+10s 报"机载节点没在跑？"。
+            # 实测现象：侦查机发现点瞄准成功(2.2s 锁定)，发射前复瞄却必然超时。
+            # 这类"闩锁没复位"的错当天已经踩过一次（own_pad 被二次起飞改写），
+            # 加新模式时要连带检查**所有**同族状态的复位点。
+            self._aim_done = False
+            self._aim_dyaw = None
+            self._aim_dz = None
+            self._aim_dist = None
+            self._aim_rx = None
+            self._aim_scan_center = None
+            self._aim_yaw_cmd = None
+            self._track_px = None
+            self._track_xy = None
+            self._track_seen_t = None
             self._landing_triggered = False
             self._landed_notified = False
             self._converge_since = None
@@ -517,6 +659,7 @@ class PrecisionServoNode(Node):
             self._descent_converge_since = None
             self._land_repeat_remaining = 0
             self._relay_mode_active = False
+            self._relay_last_assert_t = None
             self._control_start_time = None
         return SetParametersResult(successful=True)
 
@@ -530,10 +673,20 @@ class PrecisionServoNode(Node):
     def _on_detections(self, msg: Detection2DArray):
         if self._odom_xy_z_yaw is None:
             return
-        # 2026-09-22：只认下视相机。像素偏移->地面偏移的换算只对朝下的相机
-        # 成立，前视相机斜着看到同一个标签时算出来的偏移是错的，会把飞机
+        is_down = '_camera_down_' in msg.header.frame_id
+        # aim_front 走**独立**的前视解算：只要方位角和俯仰角，不做像素->地面
+        # 偏移那套换算（那套只对朝下相机成立），所以必须在这里分叉。两路相机
+        # 互斥、同一时刻只有一路在跑，所以按"不是下视帧就当前视帧"收，比写死
+        # frame_id 字面量更耐名字变化。
+        if str(self.get_parameter('servo_mode').value) == 'aim_front':
+            if is_down:
+                return
+            self._on_detections_front(msg)
+            return
+        # 2026-09-22：其余模式只认下视相机。像素偏移->地面偏移的换算只对朝下的
+        # 相机成立，前视相机斜着看到同一个标签时算出来的偏移是错的，会把飞机
         # 带偏。两路相机的检测结果发在同一个话题上，靠frame_id区分。
-        if '_camera_down_' not in msg.header.frame_id:
+        if not is_down:
             return
         target_id = self.get_parameter('target_class_id').value
         match = None
@@ -562,6 +715,97 @@ class PrecisionServoNode(Node):
 
         self._last_world_offset = (world_dx, world_dy)
         self._last_detection_time = time.monotonic()
+        # track_target 的收敛判据：目标框中心离图像主点多少像素。用主点而不是
+        # image_width/2 —— 那两个参数真机上本来就配错了（640x480 vs 实际 1280x720）。
+        if self._principal is not None:
+            pcx, pcy = self._principal
+            self._track_px = math.hypot(
+                match.bbox.center.position.x - pcx, match.bbox.center.position.y - pcy)
+
+    def _on_detections_front(self, msg: Detection2DArray):
+        """前视瞄准解算：像素偏移 -> 方位角 / 俯仰角 / 距离。
+
+        跟下视那条链的本质区别：不需要"目标在地面哪个坐标"，只需要"目标偏机头
+        多少度、偏视线多少度"——这两个量对任何朝向的相机都成立，而且不依赖离地
+        高度（下视那套要拿 altitude 去投影）。弹道沿机头出去，所以方位角直接
+        驱动 yaw、俯仰角换算成高度差驱动升降。
+        """
+        target_id = self.get_parameter('target_class_id').value
+        match = None
+        for det in msg.detections:
+            if det.results and det.results[0].hypothesis.class_id == target_id:
+                match = det
+                break
+        if match is None:
+            return
+        # 优先用真内参（camera_info 的 K）。回退是最后手段——真机实测
+        # image_width/height 本来就配错过（640x480 vs 实际 1280x720）。
+        if self._caminfo_front is not None:
+            fx, cx, cy = self._caminfo_front
+        else:
+            cx = float(self.get_parameter('image_width').value) / 2.0
+            cy = float(self.get_parameter('image_height').value) / 2.0
+            hfov = float(self.get_parameter('camera_hfov_rad').value)
+            fx = (cx / math.tan(hfov / 2.0)) if hfov > 0.0 else 1.0
+            self.get_logger().warn(
+                'aim_front 没拿到 camera_info，回退用 image_width/hfov 估内参'
+                '——方位角和距离都会偏，优先把 camera_info 发上来',
+                throttle_duration_sec=10.0)
+        tag = float(self.get_parameter('aim_tag_size_m').value)
+        bw = max(1.0, float(match.bbox.size_x))
+        dist = fx * tag / bw
+        self._aim_dyaw = math.atan2(match.bbox.center.position.x - cx, fx)
+        dpitch = math.atan2(match.bbox.center.position.y - cy, fx)
+        self._aim_dz = -dist * math.tan(dpitch)   # 目标在画面下方 -> 要降高度
+        self._aim_dist = dist
+        self._aim_rx = time.monotonic()
+
+    def _on_caminfo(self, msg: CameraInfo, cam: str = 'down'):
+        # K = [fx 0 cx; 0 fy cy; 0 0 1]，主点就是"图像中心"的准确定义
+        # ⚠️ CameraInfo.k 是 9 元素数组，不能直接 if msg.k（numpy 下抛
+        # "truth value of an array ... is ambiguous"，节点收到第一帧就崩）
+        if len(msg.k) >= 6 and float(msg.k[2]) > 0.0 and float(msg.k[5]) > 0.0:
+            cxcy = (float(msg.k[2]), float(msg.k[5]))
+            fx = float(msg.k[0]) if float(msg.k[0]) > 0.0 else None
+            if cam == 'front':
+                if fx is not None:
+                    self._caminfo_front = (fx, cxcy[0], cxcy[1])
+                return
+            self._caminfo_down = ((fx if fx is not None else 0.0), cxcy[0], cxcy[1])
+            # 下视那条链（track_target 的像素判据）一直用这两个字段，保持不变。
+            self._principal = cxcy
+            if fx is not None:
+                self._fx = fx
+
+    def _on_target_positions(self, msg: Detection3DArray):
+        # ⚠️ 2026-10-06 修：原来只存"当前 target_class_id 匹配"的那一条，结果
+        # target_class_id 是 SDK 调 track_* 那一刻才设的（之前一直是默认
+        # apriltag:0），于是**设模式之前解算到的坐标全被丢掉**；设完模式时目标
+        # 要是已经出了画面，target_locate_node 就不再发它，_track_xy 永远是
+        # None，机载只能原地干等——实测"识别到了却没有瞄准动作"就是这个。
+        # 改成按类别全缓存，谁当目标就取谁的最近一条，坐标跟踪才真的"丢不了"。
+        now_m = time.monotonic()
+        for det in msg.detections:
+            if det.results:
+                pos = det.results[0].pose.pose.position
+                self._track_cache[det.results[0].hypothesis.class_id] = (
+                    float(pos.x), float(pos.y), float(pos.z), now_m)
+        self._refresh_track_from_cache()
+
+    def _refresh_track_from_cache(self):
+        """把当前 target_class_id 的最近一条解算坐标取出来给控制回路用。"""
+        hit = self._track_cache.get(self.get_parameter('target_class_id').value)
+        if hit is not None:
+            self._track_xy = (hit[0], hit[1])
+            self._track_z = hit[2]
+            self._track_seen_t = hit[3]
+
+    def _track_is_fresh(self) -> bool:
+        """手上的解算坐标够不够新，能不能拿来算 agl。见 track_cache_max_age_s。"""
+        if self._track_seen_t is None:
+            return False
+        return (time.monotonic() - self._track_seen_t
+                <= float(self.get_parameter('track_cache_max_age_s').value))
 
     def _on_control_tick(self):
         if self._odom_xy_z_yaw is None:
@@ -602,7 +846,14 @@ class PrecisionServoNode(Node):
         # 里程计只要在正常发布就随时能算出误差，不需要等一条检测消息。
         # `center_only`/`precision_land`两个视觉模式保留原有检测超时
         # 保护（见下面说明）。
-        if servo_mode not in ('coordinate_land', 'coordinate_goto'):
+        # 2026-10-14：aim_front 也必须豁免。它的检测新鲜度由自己的
+        # aim_det_stale_s 判（见那个分支里的 fresh），而且**扫描阶段本来就
+        # 没有检测**——转着找目标正是"还没看到"时要做的事。被这条守卫挡住的
+        # 后果：节点进了 aim_front 模式却永远到不了那个分支、永不上报
+        # 'aimed'，地面侧等满 预算+10s 然后报"机载节点没在跑？"，整段瞄准
+        # 静默消失（实测现象就是"没有机载瞄准动作"）。
+        if servo_mode not in ('coordinate_land', 'coordinate_goto',
+                              'track_target', 'track_land', 'aim_front'):
             timeout = float(self.get_parameter('detection_timeout_s').value)
             if (
                 self._last_detection_time is None
@@ -641,7 +892,15 @@ class PrecisionServoNode(Node):
             return
         if servo_mode == 'coordinate_goto' and self._arrived_notified:
             return
-        if servo_mode in ('precision_land', 'coordinate_land') and self._landing_triggered:
+        if servo_mode == 'track_target' and self._track_done:
+            return
+        if servo_mode == 'aim_front' and self._aim_done:
+            return
+        # track_land 也要在这儿早退：否则交棒后下一拍走到 relay 接管块，
+        # 看见 _relay_mode_active=False 又把 relay 抢回 precision_land，
+        # 在 normal/precision_land 之间横跳，后续 goto 指令时断时续被丢弃。
+        if servo_mode in ('precision_land', 'coordinate_land', 'track_land') \
+                and self._landing_triggered:
             if self._land_repeat_remaining > 0:
                 self._publish_land_cmd()
                 self._land_repeat_remaining -= 1
@@ -654,6 +913,9 @@ class PrecisionServoNode(Node):
         # 接管这个决策）`_set_relay_mode()`直接返回False，这种情况不能
         # 当成"接管失败、跳过本周期"处理，否则整个节点会变成永远不发布
         # 指令——只有"开关打开但service调用真失败"才重试。
+        # ⚠️ 2026-10-05 补充：上面"一次任务里只真正发生一次"说的是**首次接管**；
+        # 接管之后现在会按 relay_reassert_period_s 周期性重申一次（见下面 else
+        # 分支），原来那种"切完就再也不管"的写法会被别的节点静默顶掉。
         if not self._relay_mode_active:
             auto_switch = bool(self.get_parameter('auto_switch_relay_mode').value)
             if not auto_switch:
@@ -664,9 +926,180 @@ class PrecisionServoNode(Node):
             else:
                 return  # 开关开着但这次service调用真失败了，本周期先不发指令，下个周期重试
             self._control_start_time = time.monotonic()  # 硬超时兜底计时起点，见__init__/文件头说明
+            self._relay_last_assert_t = time.monotonic()
+        else:
+            # 2026-10-05：接管期间周期性重申 relay_mode，防止被别的节点顶掉而本
+            # 节点察觉不到（见 relay_reassert_period_s 声明处的事故说明）。
+            period = float(self.get_parameter('relay_reassert_period_s').value)
+            if period > 0.0 and bool(self.get_parameter('auto_switch_relay_mode').value):
+                now_m = time.monotonic()
+                if (self._relay_last_assert_t is None
+                        or now_m - self._relay_last_assert_t >= period):
+                    self._set_relay_mode('precision_land')
+                    self._relay_last_assert_t = now_m
 
         x, y, z, yaw = self._odom_xy_z_yaw
-        if servo_mode in ('coordinate_land', 'coordinate_goto'):
+        if servo_mode in ('track_target', 'track_land'):
+            # target_class_id 可能刚被 SDK 改掉，这里立刻按新目标取缓存，
+            # 不等下一帧 target_positions 到达。
+            self._refresh_track_from_cache()
+        if servo_mode == 'aim_front':
+            # ---- 机载前视瞄准：方位角 -> yaw，俯仰角 -> 高度，水平位置不动 ----
+            # 水平不动是刻意的：飞机此刻停在侦查机给的发射点上（那个距离按弹药
+            # 射程选的），平移会把它挪走；弹道沿机头出去，命中靠方位角保证。
+            tmo = float(self.get_parameter('aim_timeout_s').value)
+            ytol = math.radians(float(self.get_parameter('aim_yaw_tol_deg').value))
+            ztol = float(self.get_parameter('aim_z_tol_m').value)
+            gain = float(self.get_parameter('aim_yaw_gain').value)
+            stale = float(self.get_parameter('aim_det_stale_s').value)
+            now_m = time.monotonic()
+            elapsed = (now_m - self._control_start_time
+                       if self._control_start_time is not None else 0.0)
+            if self._aim_scan_center is None:
+                self._aim_scan_center = yaw
+            fresh = (self._aim_rx is not None and (now_m - self._aim_rx) <= stale
+                     and self._aim_dyaw is not None and self._aim_dz is not None)
+            locked = fresh and abs(self._aim_dyaw) <= ytol and abs(self._aim_dz) <= ztol
+            timed_out = tmo > 0.0 and elapsed > tmo
+            if locked or timed_out:
+                # 超时**按成功上报**（同 track_target 2026-10-06 那条口径）：
+                # 调用方语义是"超时即刻发射"，把状态报出去比让它干等有用。
+                self._publish_servo_status('aimed')
+                self._aim_done = True
+                if bool(self.get_parameter('auto_switch_relay_mode').value):
+                    self._set_relay_mode('normal')
+                self._relay_mode_active = False
+                if locked:
+                    self.get_logger().info(
+                        '\033[32maim_front 已锁定：方位 %+.1f° 高度 %+.2f m '
+                        '距离 %.2f m（%.1f s）\033[32m'
+                        % (math.degrees(self._aim_dyaw), self._aim_dz,
+                           self._aim_dist if self._aim_dist is not None else float('nan'),
+                           elapsed))
+                else:
+                    self.get_logger().warn(
+                        'aim_front 超时 %.0f s（%s），按当前朝向上报'
+                        % (tmo, ('方位 %+.1f° 高度 %+.2f m'
+                                 % (math.degrees(self._aim_dyaw), self._aim_dz))
+                           if fresh else '始终没看到目标'))
+                return
+            world_dx = world_dy = 0.0          # 水平不动
+            if fresh:
+                # 捕获了：方位角驱动 yaw。**减**不是加——dyaw>0 表示目标在画面
+                # 右侧，而 REP-103 机体系 y 轴朝左，"右"是 -y，所以右转要让 yaw
+                # 变小。地面版那次写成加号，实测方位角 +13.7->+12.2->+19.5 一路
+                # 发散到目标出视场（用户看到的现象是"朝向偏左太多"）。
+                self._aim_yaw_cmd = yaw - self._aim_dyaw * gain
+                self._aim_target_z = min(
+                    max(z + self._aim_dz, float(self.get_parameter('aim_z_min_m').value)),
+                    float(self.get_parameter('aim_z_max_m').value))
+            else:
+                # 还没捕获（或丢了）：以接管时朝向为中心缓慢来回扫，高度保持。
+                rate = float(self.get_parameter('aim_scan_rate_dps').value)
+                half = float(self.get_parameter('aim_scan_deg').value) / 2.0
+                if half > 0.0 and rate > 0.0:
+                    period = 4.0 * half / rate          # 一个完整来回
+                    ph = (elapsed % period) / period    # 0..1
+                    tri = (4.0 * ph - 1.0) if ph < 0.5 else (3.0 - 4.0 * ph)
+                    self._aim_yaw_cmd = self._aim_scan_center + math.radians(half * tri)
+                else:
+                    self._aim_yaw_cmd = self._aim_scan_center
+                self._aim_target_z = z
+        elif servo_mode == 'track_target':
+            tol = float(self.get_parameter('center_tol_px').value)
+            tmo = float(self.get_parameter('track_timeout_s').value)
+            agl = float(self.get_parameter('track_agl_m').value)
+            elapsed = (time.monotonic() - self._control_start_time
+                       if self._control_start_time is not None else 0.0)
+            px = self._track_px
+            timed_out = tmo > 0.0 and elapsed > tmo
+            if (px is not None and px <= tol) or timed_out:
+                # ⚠️ 超时**按成功处理**（用户 2026-10-06 定）：目标本来就已经发现了，
+                # 超时只意味着"没能飞到正上方"，坐标照样是解算出来的真坐标，只是
+                # 精度差一点。报出去比把整个任务判死有用得多。
+                tx, ty = self._track_xy if self._track_xy is not None else (x, y)
+                self._publish_servo_status('centered')
+                self._publish_centered_pose(tx, ty)
+                self._track_done = True
+                if bool(self.get_parameter('auto_switch_relay_mode').value):
+                    self._set_relay_mode('normal')
+                self._relay_mode_active = False
+                if timed_out:
+                    self.get_logger().warn(
+                        f'track_target 超时 {tmo:.0f}s（像素误差 '
+                        f'{"%.0f" % px if px is not None else "未知"}），'
+                        f'按当前解算坐标 ({tx:.2f}, {ty:.2f}) 上报')
+                else:
+                    self.get_logger().info(
+                        f'\033[32mtrack_target 已到目标正上方：像素误差 {px:.0f} '
+                        f'<= {tol:.0f} px，坐标 ({tx:.2f}, {ty:.2f})\033[32m')
+                return
+            # 还没到位：朝最近一次解算的坐标飞。目标暂时丢出画面也照飞不误——
+            # 这正是"按坐标跟踪"相对图像伺服的意义（图像伺服这时只能干等）。
+            # ⚠️ 这条链的产物是**相对当前位置的偏移** world_dx/dy，下游统一
+            # 按 step=kp*world_d、target=当前位置+step 发指令；直接写 target_x
+            # 会让 world_dx 没定义（2026-10-06 实测 UnboundLocalError 把节点打死）。
+            if self._track_xy is None:
+                world_dx = world_dy = 0.0     # 还没有解算结果，先原地稳住
+            else:
+                world_dx = self._track_xy[0] - x
+                world_dy = self._track_xy[1] - y
+            self._track_target_z = z if agl <= 0.0 else agl
+        elif servo_mode == 'track_land':
+            step = float(self.get_parameter('land_step_m').value)
+            handoff = float(self.get_parameter('land_handoff_m').value)
+            tol_m = float(self.get_parameter('land_handoff_tol_m').value)
+            tmo = float(self.get_parameter('track_land_timeout_s').value)
+            grace = float(self.get_parameter('track_lost_grace_s').value)
+            now_m = time.monotonic()
+            elapsed = (now_m - self._control_start_time
+                       if self._control_start_time is not None else 0.0)
+            # 从没拿到过坐标时，宽限从**进入模式**算起（原来直接给 1e9，等于第一拍
+            # 就判"丢了"立刻交棒，根本不给看见目标的机会）。
+            lost_for = (now_m - self._track_seen_t
+                        if self._track_seen_t is not None else elapsed)
+            # 只有新鲜坐标才能算 agl，陈旧的一律当"还没看到"，见 track_cache_max_age_s。
+            agl = (z - self._track_z
+                   if (self._track_xy is not None and self._track_is_fresh()) else 1e9)
+            why = None
+            if self._track_xy is not None and agl <= handoff + tol_m:
+                why = f'已降到离地 {agl:.2f} m'
+            elif tmo > 0.0 and elapsed > tmo:
+                why = f'用满 {tmo:.0f} s'
+            elif lost_for > grace:
+                # 地面版 land_on 在这儿是 locate_target 2 秒超时就直接放弃；机载版
+                # 手上有最后一次解算的坐标，能多撑 track_lost_grace_s 再交棒。
+                why = f'目标丢了 {lost_for:.1f} s'
+            if why is not None:
+                self.get_logger().info(
+                    f'\033[32mtrack_land：{why}，交给 AUTO_LAND 收尾\033[32m')
+                self._trigger_land()
+                # ⚠️ 交还 relay（track_land 2026-10-06 实测事故）：_trigger_land()
+                # 之后本节点不再发 precision_land_cmd，降落由 px4ctrl 的 AUTO_LAND
+                # 自己走完，relay 没有任何理由继续停在 'precision_land'。不交还的
+                # 后果是**抓取完重新起飞后，traj_server 的 position_cmd 全被中继
+                # 静默丢弃**——飞机收到指令却不动，停在空中（实测任务机抓完弹起飞
+                # 后悬停不动就是这个）。原来的 precision_land 流程不暴露，是因为
+                # 地面版 land_on 走 goto_direct+land()，根本不接管 relay。
+                if bool(self.get_parameter('auto_switch_relay_mode').value):
+                    self._set_relay_mode('normal')
+                self._relay_mode_active = False
+                return
+            # 水平对准 + 下降一步，同一条指令（跟地面版 land_on 的语义一致）。
+            # 水平给偏移、垂直给绝对高度，分别交给下游两条链，理由同上。
+            # ⚠️ 2026-10-06：这里原来直接取 `self._track_xy[0]`，而目标从没被解算过时
+            # 它是 None → `TypeError: 'NoneType' object is not subscriptable`，**节点当场
+            # 被打死**，relay 停在 precision_land 没人交还，飞机指令全被中继丢弃。
+            # 真机复现：highrise 的任务机开着前视去抓物资，下视没有任何检测数据。
+            # 还没坐标时原地稳住等（等多久由 track_lost_grace_s 兜底，到点转 AUTO_LAND）。
+            if self._track_xy is None:
+                world_dx = world_dy = 0.0     # 还没有解算结果，原地稳住等
+                self._track_target_z = z
+            else:
+                world_dx = self._track_xy[0] - x
+                world_dy = self._track_xy[1] - y
+                self._track_target_z = self._track_z + max(handoff, agl - step)
+        elif servo_mode in ('coordinate_land', 'coordinate_goto'):
             # 2026-09-14新增：直接拿目标坐标跟当前里程计位置作差，不经过
             # 视觉/像素偏移这一整套换算——见VALID_SERVO_MODES声明处说明。
             target_x_param = float(self.get_parameter('target_x').value)
@@ -678,7 +1111,8 @@ class PrecisionServoNode(Node):
         kp = float(self.get_parameter('kp_xy').value)
         step_x = kp * world_dx
         step_y = kp * world_dy
-        if servo_mode in ('coordinate_land', 'coordinate_goto'):
+        if servo_mode in ('coordinate_land', 'coordinate_goto',
+                          'track_target', 'track_land'):
             max_speed = float(self.get_parameter('coordinate_max_speed_mps').value)
             rate_hz = float(self.get_parameter('control_rate_hz').value)
             max_step = max_speed / rate_hz if rate_hz > 0.0 else max_speed
@@ -689,11 +1123,24 @@ class PrecisionServoNode(Node):
                 step_y *= scale
         target_x = x + step_x
         target_y = y + step_y
+        # 2026-10-13：z 这一步单独记下来，下面发布时要当速度前馈用。
+        # **在这里初始化**而不是只在 coordinate_goto 分支里赋值——其余模式
+        # （precision_land/coordinate_land/track_*/center_only）走的是别的
+        # target_z 计算路径，不给它们 z 前馈，但这个名字必须在所有分支下都
+        # 有定义，否则发布那段会 UnboundLocalError 把节点打死，而那种死法
+        # 在空中看起来就是"飞机正常悬停"（见记忆 feedback_verify_onboard_node_edits）。
+        step_z = 0.0
 
         horizontal_error = math.hypot(world_dx, world_dy)
         threshold = float(self.get_parameter('horizontal_converge_threshold_m').value)
 
-        if servo_mode == 'center_only':
+        if servo_mode == 'aim_front':
+            target_z = self._aim_target_z
+        elif servo_mode in ('track_target', 'track_land'):
+            # 高度在上面那条链里按模式算好了：track_target 保持高度，
+            # track_land 每拍降一步。
+            target_z = self._track_target_z
+        elif servo_mode == 'center_only':
             target_z = z  # 仅居中模式永远不下降，见文件头"2026-09-13补充"说明
             if horizontal_error <= threshold:
                 now = time.monotonic()
@@ -762,11 +1209,22 @@ class PrecisionServoNode(Node):
             target_z_param = float(self.get_parameter('target_z').value)
             world_dz = target_z_param - z
             kp_z = kp  # 复用kp_xy，垂直方向没有单独调过一份增益的必要
-            target_z = z + kp_z * world_dz
+            # 2026-10-13：加垂直速率夹限，口径跟水平那段完全一致
+            # （水平是 max_step = max_speed / rate_hz，这里同形）。
+            # 不加的话 kp_z=0.5 会把整个高度误差的一半一拍发出去：2 m 的
+            # 高度变化 => 设定点一拍跳 1 m。
+            step_z = kp_z * world_dz
+            _max_z_speed = float(self.get_parameter('coordinate_max_z_speed_mps').value)
+            _rate_hz = float(self.get_parameter('control_rate_hz').value)
+            _max_step_z = (_max_z_speed / _rate_hz) if _rate_hz > 0.0 else _max_z_speed
+            if abs(step_z) > _max_step_z:
+                step_z = math.copysign(_max_step_z, step_z)
+            target_z = z + step_z
 
             arrival_threshold = float(self.get_parameter('arrival_threshold_m').value)
-            total_error = math.hypot(horizontal_error, world_dz)
-            if total_error <= arrival_threshold:
+            arrival_z_threshold = float(self.get_parameter('arrival_z_threshold_m').value)
+            total_error = math.hypot(horizontal_error, world_dz)   # 仅用于日志
+            if horizontal_error <= arrival_threshold and abs(world_dz) <= arrival_z_threshold:
                 now = time.monotonic()
                 if self._goto_converge_since is None:
                     self._goto_converge_since = now
@@ -780,7 +1238,9 @@ class PrecisionServoNode(Node):
                         self._set_relay_mode('normal')
                     self._relay_mode_active = False
                     self.get_logger().info(
-                        f'三维误差{total_error:.3f}m已持续收敛超过'
+                        f'水平误差{horizontal_error:.3f}m(阈值{arrival_threshold:.2f})、'
+                        f'垂直误差{abs(world_dz):.3f}m(阈值{arrival_z_threshold:.2f})、'
+                        f'三维{total_error:.3f}m已持续收敛超过'
                         f'converge_hold_duration_s={hold_s}s，判定为已到点'
                         f'({target_x_param:.3f},{target_y_param:.3f},{target_z_param:.3f})，'
                         f"广播servo_status='arrived'，本节点停止发布"
@@ -844,7 +1304,10 @@ class PrecisionServoNode(Node):
         cmd.position.x = target_x
         cmd.position.y = target_y
         cmd.position.z = target_z
-        cmd.yaw = yaw  # 精降阶段保持当前朝向，不额外转向
+        # aim_front 要主动给朝向（瞄准靠转机头）；其余模式保持当前朝向不动。
+        cmd.yaw = (self._aim_yaw_cmd
+                   if (servo_mode == 'aim_front' and self._aim_yaw_cmd is not None)
+                   else yaw)
         cmd.yaw_dot = 0.0
         # 2026-09-15新增：`coordinate_land`/`coordinate_goto`长距离飞行
         # 时实测发现——不管`coordinate_max_speed_mps`设0.3/0.5/1.0，实际
@@ -866,11 +1329,18 @@ class PrecisionServoNode(Node):
         # 只加在`coordinate_land`/`coordinate_goto`（本来就没有速度前馈、
         # 且是本次问题的现场）——`center_only`/`precision_land`那套视觉
         # 伺服短距离场景一直工作正常，不动它，避免引入不必要的回归风险。
-        if servo_mode in ('coordinate_land', 'coordinate_goto'):
+        if servo_mode in ('coordinate_land', 'coordinate_goto',
+                          'track_target', 'track_land'):
             rate_hz = float(self.get_parameter('control_rate_hz').value)
             if rate_hz > 0.0:
                 cmd.velocity.x = step_x * rate_hz
                 cmd.velocity.y = step_y * rate_hz
+                # 2026-10-13：z 也给前馈。理由跟 2026-09-15 补 x/y 前馈时
+                # 一模一样——只发位置、速度留 0，等于每个周期都告诉 PX4
+                # "这一点应该是静止悬停的"，纯位置误差项算出来的响应天然保守。
+                # step_z 在 coordinate_goto 之外的模式下是 0，所以这一行对
+                # 那些模式没有任何影响（行为逐位不变）。
+                cmd.velocity.z = step_z * rate_hz
         self.pub.publish(cmd)
 
     def _publish_centered_pose(self, x: float, y: float):
@@ -1019,6 +1489,11 @@ class PrecisionServoNode(Node):
         if self._landing_triggered and not self._landed_notified and not msg.armed:
             self._landed_notified = True
             self._publish_servo_status('landed')
+            # 双保险：确认落地这一刻再交还一次 relay。上面 _trigger_land() 那次
+            # 如果 service 调用恰好失败，这里补上；重复切是幂等的。
+            if bool(self.get_parameter('auto_switch_relay_mode').value):
+                self._set_relay_mode('normal')
+            self._relay_mode_active = False
             self.get_logger().info(
                 "mavros/state确认armed=false，判定为已真正落地，广播"
                 "servo_status='landed'"
@@ -1038,6 +1513,19 @@ def main(args=None):
         executor.spin()
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        # 2026-10-14 加（precision_servo_node 同款缺口）：原来只接 KeyboardInterrupt，
+        # 其余异常会穿过 spin() 落到 finally，节点被干净拆掉、进程**静默退出**，
+        # 异常从没被打印。空中表现就是"飞机正常悬停"，根因只能事后 ps 推断。
+        # 用 BaseException 而非 Exception：SystemExit/GeneratorExit 这类更难查。
+        import traceback
+        try:
+            node.get_logger().fatal('precision_servo_node 因未捕获异常退出——完整栈：\n'
+                                    + traceback.format_exc())
+        except Exception:
+            pass
+        traceback.print_exc()
+        raise
     finally:
         node.destroy_node()
         rclpy.shutdown()

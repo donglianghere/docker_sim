@@ -22,8 +22,23 @@ ensure_sound_light() {   # ensure_sound_light sim|real
         d="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null \
              | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)"
         if [ "$d" = "$want" ]; then
-            log "声光栈已在 $mode 域（$want），不动"
-            return 0
+            # 域号对了还要比**网卡集合有没有变**。device 模式按"当时有没有连上
+            # 飞机网段"决定挂不挂 LAN 那张网卡；地面站接回 uav 之后不重起，容器
+            # 就一直只在 lo 上，真飞时选手容器（real 模式、钉在 LAN 上）找不到
+            # 它 —— 表现是"测试能响、真飞没声"，很难查。
+            local cur="$HOME/.cache/contest_sdk/cyclonedds_device.xml"
+            local started="$HOME/.cache/contest_sdk/cyclonedds_device.started.xml"
+            if [ "$mode" = real ]; then
+                ( source "$ROOT/scripts/contestant_network.sh"
+                  contestant_net_args device "$ROOT" "$HOME/.cache/contest_sdk" >/dev/null 2>&1 ) || true
+            fi
+            if [ "$mode" = real ] && [ -f "$cur" ] && [ -f "$started" ] \
+               && ! cmp -s "$cur" "$started"; then
+                log "声光栈的网卡集合变了（地面站换过网？）—— 停掉重起，否则真飞时选手容器找不到它"
+            else
+                log "声光栈已在 $mode 域（$want），不动"
+                return 0
+            fi
         fi
         log "声光栈在域 $d，$mode 模式要 $want —— 停掉重起"
         # 喂一个**换行**不能省，而且不能用 `< /dev/null`：这两个脚本是给双击

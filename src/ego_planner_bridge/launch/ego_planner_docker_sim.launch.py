@@ -190,9 +190,16 @@ def generate_launch_description():
     # obstacle_cylinder"时发现原来的42x30米缓冲区+15米局部窗口（半宽）
     # 跟房间实际尺度（20x25米）、20米长的单段目标比起来偏紧，见
     # DEBUG_JOURNAL.md 2026-09-14相关记录。
-    map_size_x = LaunchConfiguration('map_size_x_', default=60.0)
-    map_size_y = LaunchConfiguration('map_size_y_', default=60.0)
-    map_size_z = LaunchConfiguration('map_size_z_', default=5.0)
+    # 2026-10-16 缩小：房间只有 20x25 m（sample_room_layout.yaml 的 room），
+    # 原来开 60x60x5 等于把 9 倍于场地的空白格子也一起维护。按分辨率 0.2 算，
+    # 60x60x5 是 300x300x25=225 万格，26x30x4 只有 130x150x20=39 万格（-83%）。
+    # grid_map 每帧要遍历膨胀，格子数直接决定 CPU（ego_planner 实测单线程饱和）。
+    # 留的余量：x 到 26（房间 20 + 两侧各 3），y 到 30（房间 25 + 5），z 到 4
+    # （巡航 2 m、楼高 6 m 但飞机不会飞那么高；虚拟天花板 EGO_VIRTUAL_CEIL_HEIGHT
+    # 另有一套）。**换更大的场地必须同步调大**，否则地图外的障碍物看不见。
+    map_size_x = LaunchConfiguration('map_size_x_', default=26.0)
+    map_size_y = LaunchConfiguration('map_size_y_', default=30.0)
+    map_size_z = LaunchConfiguration('map_size_z_', default=4.0)
     # docker_sim: 原来max_vel/max_acc是这个demo launch文件自己的硬编码默认值
     # (2.0/3.0)，从来没跟docker-compose.yml/flight-stack-entrypoint.sh里
     # V_MAX/A_MAX这两个环境变量联动过——mighty那条路径一直在用这两个环境
@@ -428,7 +435,11 @@ def generate_launch_description():
             # 这里仍然给出去0是为了参数声明完整、避免歧义）。
             {'fsm/waypoint_num': 0},
 
-            {'grid_map/resolution': 0.1},
+            # 2026-10-16 0.1 -> 0.2：格子边长翻倍，三维格子数降到 1/8。
+            # 代价是障碍物边界量化到 20 cm——本场地的障碍是直径 0.3 m 的立柱和
+            # 墙，0.2 m 的格子仍能把它们表达出来，而且 obstacles_inflation=0.6
+            # 的膨胀半径远大于量化误差，避障余量不受影响。
+            {'grid_map/resolution': 0.2},
             {'grid_map/map_size_x': map_size_x},
             {'grid_map/map_size_y': map_size_y},
             {'grid_map/map_size_z': map_size_z},
@@ -496,6 +507,17 @@ def generate_launch_description():
             # 新种子优化透。太短（<1s）会一直在用没优化透的初值，反而更差。
             {'fsm/poly_reset_period_s': ParameterValue(
                 EnvironmentVariable('EGO_POLY_RESET_PERIOD_S', default_value='0.0'), value_type=float)},
+            # 起点速度/加速度投影到"起点->局部目标"方向、清掉横向分量
+            # （配合 ego_planner_align_start_state.patch）。false=关闭，行为不变。
+            # 治的是 poly_reset 治不了的那一半：B 样条前 3 个控制点由起点状态唯一
+            # 确定、不是优化变量，所以"换种子"（poly_reset）换不掉已经锁进边界
+            # 条件里的横向速度。2026-10-12 实测 A->B 横偏峰值 1.96 m 就是被进 A 点
+            # 时过冲回拉甩出的 +0.27 m/s 横向速度带出来的。
+            {'fsm/align_start_state': ParameterValue(
+                EnvironmentVariable('EGO_ALIGN_START_STATE', default_value='false'), value_type=bool)},
+            # [m/s] 横向分量超过它就不对齐（飞机确实在做横向机动，硬清零控制器吃不下）
+            {'fsm/align_max_lat_vel': ParameterValue(
+                EnvironmentVariable('EGO_ALIGN_MAX_LAT_VEL', default_value='0.5'), value_type=float)},
             {'manager/select_lambda_length': ParameterValue(
                 EnvironmentVariable('EGO_SELECT_LAMBDA_LENGTH', default_value='0.0'), value_type=float)},
             {'manager/select_lambda_turn': ParameterValue(
@@ -513,6 +535,23 @@ def generate_launch_description():
             {'optimization/swarm_clearance': swarm_clearance},
             {'optimization/max_vel': max_vel},
             {'optimization/max_acc': max_acc},
+            # 梯度投影锁直线（配合 ego_planner_lock_to_line.patch）。false=关闭，
+            # 行为不变。开了之后：优化器每个控制点的梯度被投影到"首->末控制点"的
+            # 弦方向上，横向分量清零 —— 横向自由度从问题里消失，空间路径恒等于
+            # 那条直线，优化器只剩"沿线重新分配时间"（速度剖面）。
+            # 跟 fsm/align_start_state 是一对：align 保证**初值**是直线，lock 保证
+            # 优化器不把它掰回去。align 没生效时 lock 会因"初值不共线"自动不锁，
+            # 所以两个开关的依赖关系是安全的（日志里会打一行说明原因）。
+            # ⚠️ 锁住期间**没有横向避障能力**，全靠下面那条"直线在膨胀图上通"的
+            # 判据兜底；逐次优化都重算，线上一旦出现占据就立刻不锁。
+            {'optimization/lock_to_line': ParameterValue(
+                EnvironmentVariable('EGO_LOCK_TO_LINE', default_value='false'), value_type=bool)},
+            # [m] 初值控制点离弦的最大横偏，超了就不锁（不锁 != 不规划，是退回原行为）
+            {'optimization/lock_max_init_dev': ParameterValue(
+                EnvironmentVariable('EGO_LOCK_MAX_INIT_DEV', default_value='0.15'), value_type=float)},
+            # [m] 弦长下限，比到达判据大；悬停在目标点上时弦方向由噪声决定，不能锁
+            {'optimization/lock_min_len': ParameterValue(
+                EnvironmentVariable('EGO_LOCK_MIN_LEN', default_value='0.5'), value_type=float)},
 
             {'bspline/limit_vel': max_vel},
             {'bspline/limit_acc': max_acc},
@@ -583,5 +622,13 @@ def generate_launch_description():
         ld.add_action(arg)
     ld.add_action(ego_planner_node)
     ld.add_action(traj_server_node)
-    ld.add_action(rviz_goal_bridge_node)
+    # 2026-10-17：RViz 关着就不起它。这个节点唯一的消费者是 RViz 的
+    # "2D Goal Pose"（订阅 rviz_goal_world 转发成 term_goal）；地面站的
+    # 指点飞行是自己算完局部坐标直发 /{ns}/term_goal 的**独立路径**
+    # （见 gcs/frontend/index.html "跟桌面版 rviz_goal_bridge_node.py
+    # 殊途同归"那段），不经过它，所以关掉不影响地面站。
+    # 实测它在 RViz 已关的情况下仍空转吃 16% 单核，而仿真的时间跳变
+    # 根因就是 CPU 峰值打满（见记忆 project_px4_param_relax_servicetype）。
+    if os.environ.get('USE_RVIZ', 'false').strip().lower() in ('1', 'true', 'yes', 'on'):
+        ld.add_action(rviz_goal_bridge_node)
     return ld

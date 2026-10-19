@@ -2,11 +2,16 @@
 # -*- coding: utf-8 -*-
 """编队飞行实时监视 + 落地后自动出 PNG 报告图。
 
-飞行中弹一个窗口，三张图实时刷新：
+飞行中弹一个田字格窗口，四格实时刷新：
   ① 俯视轨迹图——场地边界/三根立柱/两个起降点当底图，两机轨迹折线 + 当前位置
      （带机头方向的三角标）+ 两机连线，连线中点标实时间距；
-  ② 高度-时间曲线——两机各一条，叠一条巡航高度参考虚线；
-  ③ 间距-时间曲线——叠目标间距虚线和入列容差带。
+  ② 双机通信链路面板——拓扑/延迟/频率，以及**实时间距**那个大数字；
+  ③ 高度-时间曲线——两机各一条，叠一条巡航高度参考虚线；
+  ④ 电压-时间曲线——两机各一条（6S 锂电总电压），叠满电/低压告警参考线。
+
+2026-10-05（用户要求）：③ 原来是"间距 & 高度"、④ 原来是"速度 & 电压"双轴，
+现在各只留一个量——间距看 ② 那个实时大数字就够，均速看 ① 左下角的飞行统计；
+两者的历史数据照常落 CSV，要复盘再翻 CSV，不占图。
 
 两机都降落（高度低于 LANDED_AGL 且持续 LANDED_HOLD 秒）之后自动存 PNG 并退出；
 也可以 Ctrl-C 随时中断，同样会存图。
@@ -40,8 +45,12 @@ import matplotlib.patches      # 模块级导入：放 main() 里会把 matplotl
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Float64MultiArray
 from rclpy.node import Node
+# 电池话题要用 sensor data QoS（BEST_EFFORT），见下面订阅处的说明
+from rclpy.qos import qos_profile_sensor_data
+from mavros_msgs.msg import EstimatorStatus, State
 
 # 场地底图。2026-09-29 之前这几个常量是**写死的 fire_drill_room 坐标**，
 # 换成样题场景之后俯视图画的还是老房子（房间画在原点居中、立柱在 (4.5,7)
@@ -74,7 +83,11 @@ def load_scene(path):
     PADS = {p['id'].upper(): (float(p['x']), float(p['y']))
             for p in L['takeoff_landing_pads']}
     c = L.get('obstacle_cylinder')
-    CYLINDERS = [(float(c['x']), float(c['y']), float(c['diameter']) / 2)] if c else []
+    # 2026-10-11 用户去掉了这根柱子（yaml 里 `enabled: false`，键本身故意留着
+    # 给 pillar_detector_node 用），底图上就不能再画——监视窗口画一个世界里
+    # 不存在的障碍，看轨迹时会以为飞机在"绕障碍"。
+    CYLINDERS = ([(float(c['x']), float(c['y']), float(c['diameter']) / 2)]
+                 if c and c.get('enabled', True) else [])
     t = L.get('terrain_module')
     TERRAIN = (float(t['x']), float(t['y']), float(t['size_x']), float(t['size_y'])) if t else None
 COLORS = {'NX01': '#d62728', 'NX02': '#1f77b4'}   # 长机红、僚机蓝
@@ -84,6 +97,15 @@ HOVER_DONE_S = 20.0     # 没降落的飞机原地悬停这么久也算任务结
 HOVER_DONE_M = 0.8      # 这段时间内水平位移不超过这个算"原地"
 LANDED_AGL = 0.3        # 低于这个高度算落地
 LANDED_HOLD = 3.0       # 且要持续这么久
+# ---- 电池（2026-10-05 用户要求：电压按 6S 电池的**总电压**看）----
+# 实测 /{ns}/mavros/battery 的 voltage 本来就是整包总电压（NX01 实读 23.85 V
+# ≈ 6×3.97），cell_voltage 数组也只有一项、值等于总电压——所以正常情况下直接
+# 画 voltage 就是 6S 总电压，不需要换算。
+BATT_CELLS = 6
+PACK_FULL_V = 4.20 * BATT_CELLS   # 25.2 V 满电
+#: 低压告警线：**用户 2026-10-05 定 20.0 V**（≈3.33 V/cell），不是 3.50/cell
+#: 那个保守值。到这儿就该换电池，别再起飞。
+PACK_WARN_V = 20.0
 # 时间轴一律画全程，不滚动（用户 2026-09-28 要求）——起步那一段恰恰是要看的，
 # 滚动窗口会把它推出画面，之前那张报告图就只剩最后 90 秒。
 
@@ -137,7 +159,17 @@ class RoutePath:
     ALIAS_TOL_M = 0.5
 
     def project(self, px, py, last_s=None):
-        """投影到航线折线上，返回弧长坐标（钳在 [0, 全长] 内）。
+        """投影到航线折线上，只要弧长坐标（钳在 [0, 全长] 内）。"""
+        return self.project_d(px, py, last_s)[0]
+
+    def project_d(self, px, py, last_s=None):
+        """同 project()，但连**到航线的垂距**一起返回：(弧长, 垂距)。
+
+        垂距是用来判"这架飞机到底在不在航线上"的。投影本身永远有解——哪怕
+        飞机在十几米外，也会被按到最近的那个端点上，于是两机都被按到同一个
+        端点时弧长差读 0。2026-10-15 实测：僚机刚从发射点 (6.4,17.1) 往队列赶、
+        人还不在航线上时，和长机都投到航线起点 G 上，间距读 **0.00 m** 而两机
+        实际相距 11.5 m——这比读大更危险，因为 0 正是"两机快撞上"的警报值。
 
         `last_s` 是这架飞机上一次的弧长；传了就用它消歧义（见 ALIAS_TOL_M）。
         """
@@ -153,21 +185,27 @@ class RoutePath:
             d2 = (px - qx) ** 2 + (py - qy) ** 2
             cands.append((d2, self.arc[i-1] + t * math.sqrt(seg2)))
         if not cands:
-            return 0.0
+            return 0.0, float('inf')
         best_d2 = min(c[0] for c in cands)
         if last_s is None:
-            return min(cands, key=lambda c: c[0])[1]
-        tol = (math.sqrt(best_d2) + self.ALIAS_TOL_M) ** 2
-        near = [c for c in cands if c[0] <= tol]
-        return min(near, key=lambda c: abs(c[1] - last_s))[1]
+            pick = min(cands, key=lambda c: c[0])
+        else:
+            tol = (math.sqrt(best_d2) + self.ALIAS_TOL_M) ** 2
+            near = [c for c in cands if c[0] <= tol]
+            pick = min(near, key=lambda c: abs(c[1] - last_s))
+        # 垂距拿**最近那个候选**的，不是解缠绕后选中的那个：前者才是
+        # "离航线多远"这个几何事实，后者只是在几个同样近的候选里挑了一个。
+        return pick[1], math.sqrt(best_d2)
 
 
 class FormationMonitor(Node):
-    def __init__(self, names, spacing, cruise_agl, tol, route=None):
+    def __init__(self, names, spacing, cruise_agl, tol, route=None, min_sep=0.0):
         super().__init__('formation_monitor')
         self.names = names
         self.route = RoutePath(route) if route else None
+        self.names = list(names)
         self.spacing = spacing
+        self.min_sep = float(min_sep)   # ②面板的安全下限线，见 --min-sep
         self.cruise_agl = cruise_agl
         self.tol = tol
         self.t0 = time.monotonic()
@@ -185,15 +223,37 @@ class FormationMonitor(Node):
         self.diag_t, self.diag_lag = [], []   # 跟随节点自报的落后量
         self.diag_trim = []                   # 跟随距离的偏置补偿量（data[5]，可能没有）
         self.diag_gap = []                    # 节点自报的实际间距 = 长机轨迹全长 - 僚机投影（data[4]）
+        # 2026-10-10：参考点本身的三个量也存下来。排"僚机入列后不跟随"时，光有
+        # lag/gap/trim 推不出参考点到底有没有推进——lag 线性涨既可能是参考点被
+        # 钳住、也可能是参考点在走而飞机没执行，必须直接看 s_cmd。
+        self.diag_scmd = []                   # 参考点弧长 data[1]
+        self.diag_sproj = []                  # 僚机投影弧长 data[2]
+        self.diag_total = []                   # 长机清洗后轨迹总长 data[3]
+        self.diag_sepline = []                # 两机空间直线距离 data[8]
+        self.diag_vff = []                    # 速度前馈 data[6]（0 就是没驱动力）
+        self.diag_ffused = []                 # 用过长机轨迹前馈的次数 data[7]
         # 两机上一次的航线弧长，投影消歧义用。初值取 0.0 而不是 None：飞行总是
         # 从航线第一个点开始，这个先验是确定的。用 None 的话第一帧没有参考、
         # 只能任选，闭合航线上会选中末端（实测锁在 66 m 上把间距顶到 62）。
         self._last_s = [0.0, 0.0]
-        # 长机离开航线起点多远才开始记间距。编队开始之前这个指标没有意义——
-        # 僚机停在自己起降点时，按"沿航线弧长"算可能是几十米（本场地僚机的
-        # 起降点正好落在航线最后一段上，实测读数 61 m，数学上没错但没意义）。
-        self.GAP_START_MOVE_M = 1.0
-        self._gap_started = False
+        # 沿航线间距只在**编队真在跑**的时段才有意义，门控认僚机的编队
+        # diag：它是 formation_follower_node 在跟队时才发的，不跟队就没有。
+        #   2026-10-15 换成这个门。原来是"长机离航线起点超过 1 m 就开记"的
+        #   **一次性**开关，挡不住两类场景：① 长机起降点本来就不在航线起点上
+        #   （真机长机停 (8.0,2.8)、航线起点是 A(2.5,2.5)），门一上来就是开的；
+        #   ② 一旦打开就再也不关，而 mission 第 2/3 轮有大段时间根本没在编队
+        #   （长机独自飞 A->B->C->G、僚机停在起降点或物资点），那时弧长差
+        #   真的就是 36 m，数学上没错、作为"编队间距"却是器讻。
+        #   实测证据：2026-10-15 真机 mission 那趟，diag 的时间空洞
+        #   190.8->396.5 s 跟大间距那段完全重合。
+        self.DIAG_FRESH_S = 1.0
+        self._last_diag_t = None
+        # 第二道门：两机都得**真在航线上**，弧长差才有意义。见
+        # RoutePath.project_d() 的说明：人不在航线上时会被按到端点，两机按到
+        # 同一个端点就读 0.00。门限 3 m 的依据：line_goto 的直线横偏实测均值
+        # 0.11 m（ego 基线 1.96 m），编队中正常偏差远不到 3 m；而刚起步/入列前
+        # 那种"还在十几米外"的情形一定超。
+        self.ON_ROUTE_TOL_M = 3.0
         self._low_since = {n: None for n in names}
         self.landed = {n: False for n in names}
         # ---- 链路统计（2026-10-02 新增，田字格右上角那块面板用）----
@@ -215,6 +275,75 @@ class FormationMonitor(Node):
         # 基准不一样（折线、采样率、向后延伸段都不同），要判断控制好坏得看它自己的数
         self.create_subscription(Float64MultiArray, f'/{names[1]}/formation_diag',
                                  self._on_diag, 10)
+        # ---- 电压（2026-10-05 用户要求：偏航不再监测，改监测电压）----
+        # /{ns}/mavros/battery 是 sensor_msgs/BatteryState，实测 2Hz（飞控
+        # BATTERY_STATUS 的流速率），所以单独存一份时间序列，不挂在 10Hz 的
+        # pose 轨迹里——两者采样率差 5 倍，混在一个 dict 里画图会错位。
+        self.batt = {n: {'t': [], 'v': []} for n in names}
+        # ⚠️ **必须用 qos_profile_sensor_data（BEST_EFFORT）**。mavros 这一路是
+        # 传感器 QoS，用默认的 `10`（RELIABLE）订阅会 QoS 不兼容、**一条都收不到**，
+        # 而且不报错——只在节点日志里留一句
+        # "New publisher discovered on topic '/NX01/mavros/battery', offering
+        #  incompatible QoS. No messages will be received from it.
+        #  Last incompatible policy: RELIABILITY"，图上就是一片空白。
+        # 2026-10-05 第一趟真机实测踩到。`uwb/pose_abs` 是 RELIABLE，所以那边
+        # 照旧用 10，不要一起改。
+        # 注：用 `ros2 topic echo` 手验这个话题**验不出来**——CLI 会自动适配
+        # 发布端的 QoS，能打印不代表你的节点订得上。
+        for n in names:
+            self.create_subscription(
+                BatteryState, f'/{n}/mavros/battery',
+                self._make_batt_cb(n), qos_profile_sensor_data)
+
+        # ---- 飞控模式 / 定位健康（2026-10-19 新增，画在②面板底部的状态带）----
+        # 为什么加这个：10-18 两架飞机各掉过一次（NX02 从 2.15 m、NX01 从 1.94 m
+        # 被 PX4 盲降放到地上），共同指纹是 `mode: OFFBOARD -> ALTCTL` 同时
+        # `pos_horiz_rel_status_flag -> false`（EV 定位源停摆十几秒 ⇒ 水平位置
+        # 失效 ⇒ 掉出 OFFBOARD ⇒ 没有遥控器输入就盲降）。而当时**监视器上完全
+        # 看不出来**：只看到高度曲线往下掉，分不清是"控制跟不上"还是"定位丢了"，
+        # 只能事后去容器里翻 ulog。有了这条带，出事当场就能分清因果。
+        # 跟②的间距曲线共用同一条时间轴，所以"定位红了 → 间距随即崩"这种前后
+        # 关系一眼可见。
+        # ⚠️ QoS 跟电压那一路同理用 BEST_EFFORT：订阅端 BEST_EFFORT 能收
+        # RELIABLE 发布者的数据，反过来不行，所以这么写两边都兼容。
+        self.fcu = {n: {'mt': [], 'mode': [], 'pt': [], 'pos_ok': []} for n in names}
+        for n in names:
+            self.create_subscription(State, f'/{n}/mavros/state',
+                                     self._make_state_cb(n), qos_profile_sensor_data)
+            self.create_subscription(EstimatorStatus, f'/{n}/mavros/estimator_status',
+                                     self._make_est_cb(n), qos_profile_sensor_data)
+
+    def _make_state_cb(self, name):
+        def cb(msg):
+            f = self.fcu[name]
+            md = str(msg.mode or '')
+            # 只在**变化时**追加一个点：mode 是 1~2 Hz 的常量流，全存下来画
+            # broken_barh 要几百段；只记跳变，一次飞行通常不到 10 段。
+            if not f['mode'] or f['mode'][-1] != md:
+                f['mt'].append(time.monotonic() - self.t0)
+                f['mode'].append(md)
+        return cb
+
+    def _make_est_cb(self, name):
+        def cb(msg):
+            f = self.fcu[name]
+            ok = bool(msg.pos_horiz_rel_status_flag)
+            if not f['pos_ok'] or f['pos_ok'][-1] != ok:
+                f['pt'].append(time.monotonic() - self.t0)
+                f['pos_ok'].append(ok)
+        return cb
+
+    def _make_batt_cb(self, name):
+        def cb(msg):
+            v = float(msg.voltage)
+            if not (0.0 < v < 100.0):      # 没读到电压时 mavros 给 nan/0
+                return
+            if v < 6.0:                    # 万一换成单节电压，折算成 6S 总电压，
+                v *= BATT_CELLS            # 否则跟满电/告警参考线不是一个量纲
+            d = self.batt[name]
+            d['t'].append(time.monotonic() - self.t0)
+            d['v'].append(v)
+        return cb
 
     def _make_cb(self, name):
         def cb(msg):
@@ -257,12 +386,20 @@ class FormationMonitor(Node):
         if len(msg.data) >= 1:
             self.diag_recv.append(time.monotonic() - self.t0)
             self.diag_t.append(time.monotonic() - self.t0)
+            self._last_diag_t = self.diag_t[-1]   # 沿航线间距的门，见 DIAG_FRESH_S
             self.diag_lag.append(float(msg.data[0]))
             self.diag_trim.append(float(msg.data[5]) if len(msg.data) >= 6 else 0.0)
             # data[4] 是节点自己算的"长机轨迹全长 - 僚机投影弧长"，也就是控制回路
             # 眼里的真实间距。画 3.5+lag 是不对的：lag 是相对**补偿后**的跟随距离
             # 算的（lag = 实际间距 - fd_eff），3.5+lag 会恒比实际间距高出一个 trim。
             self.diag_gap.append(float(msg.data[4]) if len(msg.data) >= 5 else float('nan'))
+            _g = lambda i: (float(msg.data[i]) if len(msg.data) > i else float('nan'))
+            self.diag_scmd.append(_g(1))
+            self.diag_sproj.append(_g(2))
+            self.diag_total.append(_g(3))
+            self.diag_sepline.append(_g(8))
+            self.diag_vff.append(_g(6))
+            self.diag_ffused.append(_g(7))
 
     #: 里程用**锚点累加**而不是逐帧累加：离上一个锚点走够 DIST_ANCHOR_M 才记一笔，
     #: 然后把锚点挪过来。逐帧累加会把 UWB 的厘米级抖动全部攒进里程——第一版用
@@ -345,27 +482,29 @@ class FormationMonitor(Node):
             pts.append((d['x'][-1], d['y'][-1]))
         if len(pts) != 2:
             return
-        # 编队还没开始（长机还没离开航线起点）就不记——见 GAP_START_MOVE_M
-        if not self._gap_started:
-            if self.route is None or not self.route.ok():
-                self._gap_started = True       # 没航线就没这个问题，直接开记
-            else:
-                start = (self.route.xs[0], self.route.ys[0])
-                if math.dist(pts[0], start) < self.GAP_START_MOVE_M:
-                    return
-                self._gap_started = True
-
         # 两机都投影到**规划航线**上，间距 = 弧长差（同段内即直线距离，
         # 跨段即经过航点那几条线段之和）。没给航线就退回直线距离。
+        # ⚠️ 投影**每帧都算**，哪怕下面的门关着：project() 靠 last_s 解缠绕
+        #    （闭合航线上起降点同时属于首尾两段），断一段不算会让 last_s
+        #    停在几百秒前的陈值，编队恢复时第一帧就可能选错分支。
+        on_route = True
         if self.route is not None and self.route.ok():
-            s0 = self.route.project(*pts[0], last_s=self._last_s[0])
-            s1 = self.route.project(*pts[1], last_s=self._last_s[1])
+            s0, d0 = self.route.project_d(*pts[0], last_s=self._last_s[0])
+            s1, d1 = self.route.project_d(*pts[1], last_s=self._last_s[1])
             self._last_s = [s0, s1]
             gap = self.route.gap_between(s0, s1)
+            on_route = max(d0, d1) <= self.ON_ROUTE_TOL_M
         else:
             gap = math.dist(pts[0], pts[1])
+        # 门：最近 DIAG_FRESH_S 秒内收到过编队 diag 才算"正在编队"。没在编队
+        # 就记 NaN——不是丢样本：matplotlib 遇 NaN 自然**断线**，比跳过不记
+        # （那会把空洞两端连成一条直线，看上去像真有数据）诚实。
+        # 直线距离（橙线）照记不误：那个量任何时候都是有定义的。
+        active = (self._last_diag_t is not None
+                  and (t - self._last_diag_t) <= self.DIAG_FRESH_S
+                  and on_route)
         self.gap_t.append(t)
-        self.gap_d.append(gap)
+        self.gap_d.append(gap if active else float('nan'))
         self.gap_line.append(math.dist(pts[0], pts[1]))
         self.gap_xy.append((pts[0][0], pts[0][1], pts[1][0], pts[1][1]))
 
@@ -456,8 +595,32 @@ def _rate(times, now, win=5.0):
     return hz, jit
 
 
+def _last_valid(seq, default=float('nan')):
+    """最后一个非 NaN 的值。沿航线间距在"没在编队"的时段记的是 NaN
+    （见 FormationMonitor.DIAG_FRESH_S），直接取 [-1] 会拿到 nan。"""
+    for v in reversed(seq):
+        if v == v:
+            return v
+    return default
+
+
+def _live_line_gap(mon):
+    """两机当前位置的直线距离；任一机还没来过数据就返回 nan。"""
+    pts = []
+    for n in mon.names:
+        d = mon.track[n]
+        if not d['t']:
+            return float('nan')
+        pts.append((d['x'][-1], d['y'][-1]))
+    return math.dist(pts[0], pts[1])
+
+
 def draw_link_panel(ax, mon, now):
-    """田字格右上：双机通信链路面板。
+    """⚠️ 2026-10-14 起**不再被调用**（用户要求去掉双机通信链路图，
+    那一格换成了间距-时间曲线，见 draw() 里的 ②）。函数留着没删：
+    要恢复只需把 draw() 里 ② 那段换回 draw_link_panel(ax_link, mon, now)。
+
+    田字格右上：双机通信链路面板。
 
     一格里分三层画：上层拓扑动画(点在流=在收包)、中层三个大数字、
     下层延迟条带。全部用 axes 归一化坐标手画，不嵌套 inset——inset 在
@@ -505,7 +668,15 @@ def draw_link_panel(ax, mon, now):
     # ---------- 中层：三个大数字 ----------
     d_l = lk_l['delay'][-1][1] if lk_l['delay'] else float('nan')
     d_f = lk_f['delay'][-1][1] if lk_f['delay'] else float('nan')
+    # 2026-10-05：间距的曲线撤了之后，这个大数字就是唯一的实时间距显示，
+    # 所以编队还没开始记 gap_d（长机离起点不到 GAP_START_MOVE_M）那一段也得有
+    # 数——回退成两机当前位置的直线距离，跟俯视图连线上标的那个数同源。
+    # 最新一点是 NaN 就表示"此刻没在编队"（见 DIAG_FRESH_S），这时该退回
+    # **实时直线距离**而不是把数字冻在上一个有效值上——这是实时显示，
+    # 冻住了比没数还坑人。跟俯视图两机连线上标的那个数同源。
     gap_now = mon.gap_d[-1] if mon.gap_d else float('nan')
+    if gap_now != gap_now:
+        gap_now = _live_line_gap(mon)
     cells = (('延迟 ms', f'{d_l:.0f}/{d_f:.0f}', '#1f77b4'),
              ('频率 Hz', f'{hz_l:.0f}/{hz_f:.0f}', '#2ca02c'),
              ('间距 m', f'{gap_now:.2f}', '#9467bd'))
@@ -537,11 +708,11 @@ def draw_link_panel(ax, mon, now):
 
 
 def draw(fig, axes, mon):
-    # 田字格（2026-10-02 改）：
-    #   左上 俯视轨迹+障碍净距   右上 通信链路面板
-    #   左下 间距+高度(同为米)   右下 速度+偏航(双轴)
-    ax_xy, ax_link, ax_gap, ax_vel = axes.ravel()
-    for ax in (ax_xy, ax_gap, ax_vel):
+    # 田字格（2026-10-05 改）：
+    #   左上 俯视轨迹+障碍净距   右上 间距-时间（2026-10-14 从通信链路面板换的）
+    #   左下 高度-时间            右下 电压-时间（6S 总电压）
+    ax_xy, ax_link, ax_alt, ax_volt = axes.ravel()
+    for ax in (ax_xy, ax_link, ax_alt, ax_volt):
         ax.clear()
     now = time.monotonic() - mon.t0
 
@@ -577,7 +748,10 @@ def draw(fig, axes, mon):
     if len(last) == 2:
         (x1, y1), (x2, y2) = last[mon.names[0]], last[mon.names[1]]
         ax_xy.plot([x1, x2], [y1, y2], '--', color='#444', lw=1.0)
-        gap_now = mon.gap_d[-1] if mon.gap_d else math.dist((x1, y1), (x2, y2))
+        # 同上：没在编队就标实时直线距离，别标陈值。
+        gap_now = mon.gap_d[-1] if mon.gap_d else float('nan')
+        if gap_now != gap_now:
+            gap_now = math.dist((x1, y1), (x2, y2))
         ax_xy.annotate(f'{gap_now:.2f} m',
                        ((x1 + x2) / 2, (y1 + y2) / 2),
                        fontsize=9, color='#222',
@@ -616,65 +790,135 @@ def draw(fig, axes, mon):
     tmax = max([d['t'][-1] for d in mon.track.values() if d['t']] or [0.0])
     tlo = 0.0                                   # 全程，不滚动
 
-    # ---- ② 链路面板（田字格右上）----
-    draw_link_panel(ax_link, mon, now)
+    # ---- ② 间距-时间（2026-10-14 用户要求：双机通信链路图不要了）----
+    # 原来这格是链路面板（拓扑动画 + 延迟 + 实时间距大数字）。删掉不丢信息：
+    # 实时间距在 ① 左上角两机连线中点一直标着；链路延迟/频率本来就落在
+    # formation_diag.csv 里，真要查链路去看 CSV 比看动画准。
+    # 换成间距-时间曲线——gap_t/gap_d 一直在采集却从来没画出来过
+    # （2026-10-05 那次把曲线换成了大数字），而编队调试要看的恰恰是
+    # **间距随时间怎么走**：在哪个航点扎下去、在哪段窜上去，一眼就定位。
+    # 2026-10-19 用户要求：**沿航线间距（弧长）那条曲线去掉**。它是 10-15 记过
+    # 的伪值源——航线不闭合时弧长差会读成整条航线长（实测 67 m、占 38% 样本），
+    # 没在编队的时段还得靠僚机 diag 当门记 NaN 才不至于乱画。采集和 CSV 照旧
+    # （mon.gap_d 还在写 formation.csv / formation_diag.csv），只是不画了。
+    # 这一格现在只看**两机空间直线距离**：它才是"不许靠太近"那条安全要求的
+    # 直接量，也是 formation_follower_node 里 min_separation_m 守的那个量。
+    ax_link.clear()
+    ax_link.set_title('两机直线距离-时间')
+    if mon.gap_t and len(mon.gap_line) == len(mon.gap_t):
+        ax_link.plot(mon.gap_t, mon.gap_line, '-', color='#1f77b4', lw=1.6,
+                     label=f'空间直线距离 {mon.gap_line[-1]:.2f} m')
+    # 目标间距：编队要守的就是这条线，偏离它多少一目了然。
+    ax_link.axhline(mon.spacing, ls='--', color='#2ca02c', lw=1.2,
+                    label=f'目标 {mon.spacing:.1f} m')
+    # 安全下限：低于它 formation_follower_node 会冻住参考点（现象是僚机不跟队），
+    # 2026-10-07 真机两机相撞（最小直线间距 0.03 m）之后加的那道硬保护。
+    if mon.min_sep > 0:
+        ax_link.axhline(mon.min_sep, ls=':', color='#d62728', lw=1.4,
+                        label=f'安全下限 {mon.min_sep:.1f} m')
+    ax_link.set_xlim(tlo, max(tmax, tlo + 5)); ax_link.grid(alpha=0.3)
+    ax_link.set_xlabel('t (s)'); ax_link.set_ylabel('直线距离 (m)')
+    # ---- 底部状态带：飞控模式 + 定位健康（2026-10-19 新增）----
+    # 共用同一条时间轴，所以"定位红了 -> 距离随即崩"这种因果一眼可见。
+    _hi = max([v for v in mon.gap_line if v == v] or [mon.spacing])
+    _top = max(mon.spacing, _hi) + 0.5
+    _band_h = _top * 0.09                      # 每行高度，跟着量程缩放
+    _rows = []
+    for i, n in enumerate(mon.names):
+        y0 = -_band_h * (1.25 * i + 1.15)
+        _rows.append((n, y0, _band_h))
+        f = mon.fcu[n]
+        # mode 分段：把同色区间收一起批量画，几百段也不卡
+        buckets = {}
+        for k, t_s in enumerate(f['mt']):
+            t_e = f['mt'][k + 1] if k + 1 < len(f['mt']) else max(tmax, t_s)
+            if t_e <= t_s:
+                continue
+            md = f['mode'][k]
+            c = ('#2ca02c' if md == 'OFFBOARD' else
+                 '#ff7f0e' if md in ('ALTCTL', 'POSCTL') else
+                 '#bbbbbb')
+            buckets.setdefault(c, []).append((t_s, t_e - t_s))
+        for c, spans in buckets.items():
+            ax_link.broken_barh(spans, (y0, _band_h), facecolors=c, alpha=0.85)
+        # 定位失效叠在同一行上（红），它是因、模式降级是果，所以画在最上层
+        bad = []
+        for k, t_s in enumerate(f['pt']):
+            if f['pos_ok'][k]:
+                continue
+            t_e = f['pt'][k + 1] if k + 1 < len(f['pt']) else max(tmax, t_s)
+            if t_e > t_s:
+                bad.append((t_s, t_e - t_s))
+        if bad:
+            ax_link.broken_barh(bad, (y0, _band_h), facecolors='#d62728', alpha=1.0)
+        ax_link.text(tlo, y0 + _band_h * 0.5, f' {n}', va='center', ha='left',
+                     fontsize=6.5, color='#333', zorder=5)
+    if _rows:
+        ax_link.set_ylim(_rows[-1][1] - _band_h * 0.4, _top)
+        # 负半轴是状态带，不该出现在"距离"刻度上，所以刻度只留 >=0 的
+        ax_link.set_yticks([t for t in ax_link.get_yticks() if t >= 0])
+        ax_link.axhline(0.0, color='#888', lw=0.8)
+    else:
+        ax_link.set_ylim(0.0, _top)
+    ax_link.legend(loc='upper right', fontsize=7,
+                   title='带：绿=OFFBOARD 橙=ALTCTL/POSCTL 红=定位失效 灰=其它',
+                   title_fontsize=6)
 
-    # ---- ③ 间距 + 高度（都是米，共用一个 y 轴，省掉 twinx）----
+    # ---- ③ 高度-时间（2026-10-05 用户要求：这一格只看高度）----
+    # 间距的两条线（目标间距虚线 + 节点自报间距）撤掉了：实时值看右上角链路
+    # 面板那个大数字，历史值照常落 formation.csv / formation_diag.csv。
+    # 曲线用实线、各机一条，起飞段/定高段的台阶一眼能看出来——这一格现在就是
+    # 查"起飞到底停在几米""定高有没有把它拉上去"的地方。
+    ax_alt.set_title('高度-时间')
     for n in mon.names:
         d = mon.track[n]
         if d['t']:
-            ax_gap.plot(d['t'], d['z'], ':', color=COLORS[n], lw=1.1,
-                        alpha=0.75, label=f'{n} 高度')
+            ax_alt.plot(d['t'], d['z'], '-', color=COLORS[n], lw=1.4,
+                        label=f'{n} 高度'
+                              + (f' {d["z"][-1]:.2f} m' if d['z'] else ''))
     # 这条曲线是 uwb/pose_abs 的 z——仿真里它来自 uwb_ground_truth_node，
     # 是**绝对高度**；而定高钉的是测距雷达的**离地高度**。所以飞过仿地模块
     # 上空时曲线会整体抬起来一个模块高度再落回去，那是仿地效果本身，不是超调。
     # 虚线只是"平地上离地 2.0 m 对应的绝对高度"，仅供对照。
-    ax_gap.axhline(mon.cruise_agl, ls=':', color='#aaa', lw=1.0,
+    ax_alt.axhline(mon.cruise_agl, ls=':', color='#aaa', lw=1.0,
                    label=f'平地基准 {mon.cruise_agl:.1f} m')
+    ax_alt.set_xlim(tlo, max(tmax, tlo + 5)); ax_alt.grid(alpha=0.3)
+    ax_alt.set_xlabel('t (s)'); ax_alt.set_ylabel('高度 (m)')
+    # 地面到巡航高度之上留一点余量，且一定含 0——否则两机都在 1.5 m 附近时
+    # y 轴会被自动缩到 1.4~1.6，看着像在剧烈起伏。
+    zs = [z for n in mon.names for z in mon.track[n]['z']]
+    if zs:
+        ax_alt.set_ylim(min(0.0, min(zs) - 0.1),
+                        max(mon.cruise_agl, max(zs)) + 0.3)
+    ax_alt.legend(loc='upper right', fontsize=7, ncol=2)
 
-    # ---- 间距本体 ----
-    # 2026-09-28（用户要求）：这张图只留两条线——目标间距 + 节点自报间距。
-    # 之前叠的"按航线投影算的间距""直线距离""补偿后的有效跟随距离"都撤掉，
-    # 数据照常记进 CSV，要复盘再翻 CSV。
-    ax_gap.set_title('间距 & 高度-时间')
-    ax_gap.axhline(mon.spacing, ls='--', color='#888', lw=1.2,
-                   label=f'目标 {mon.spacing:.1f} m')
-    if mon.diag_t:
-        ax_gap.plot(mon.diag_t, mon.diag_gap,
-                    '-', color='#ff7f0e', lw=1.4, label='节点自报间距')
-    ax_gap.set_xlim(tlo, max(tmax, tlo + 5)); ax_gap.grid(alpha=0.3)
-    ax_gap.set_xlabel('t (s)'); ax_gap.set_ylabel('米')
-    ax_gap.legend(loc='upper right', fontsize=7, ncol=2)
-
-    # ---- ④ 速度 + 偏航（田字格右下，双 y 轴）----
-    # 协调转弯做得对不对就看这格：速度掉到 0 + yaw 急变 = 拐点悬停转向(要避免)；
-    # 速度平稳 + yaw 渐变 = 协调转弯。
-    ax_vel.set_title('速度 & 偏航-时间')
-    twin = getattr(draw, '_twin', None)
-    if twin is None or twin.figure is not fig:
-        twin = ax_vel.twinx()
-        draw._twin = twin
-    twin.clear()
+    # ---- ④ 电压-时间（2026-10-05 用户要求：这一格只看电压，纵轴是 6S 总电压）----
+    # 速度那条线撤了（均速在 ① 左下角的飞行统计里，瞬时速度也落在 CSV 里），
+    # 于是不再需要 twinx——单轴画电压，刻度就是真实伏数，跟满电/告警线对得上。
+    # 看什么：电压随负载下坠是正常的，要留意**台阶式骤降**（接触不良/线损）和
+    # 整段持续走低压到告警线附近（续航不够，起飞前就该换电池）。
+    ax_volt.set_title(f'电压-时间（{BATT_CELLS}S 总电压）')
     for n in mon.names:
-        d = mon.track[n]
-        if len(d['t']) >= 3:
-            ts = d['t']
-            sp = [0.0]
-            for i in range(1, len(ts)):
-                dt = ts[i] - ts[i - 1]
-                sp.append(math.hypot(d['x'][i] - d['x'][i - 1],
-                                     d['y'][i] - d['y'][i - 1]) / dt if dt > 1e-3 else sp[-1])
-            # 5 点滑动平均，压掉 10Hz 差分的毛刺
-            k = 5
-            sm = [sum(sp[max(0, i - k + 1):i + 1]) / len(sp[max(0, i - k + 1):i + 1])
-                  for i in range(len(sp))]
-            ax_vel.plot(ts, sm, '-', color=COLORS[n], lw=1.4, label=f'{n} 速度')
-            twin.plot(ts, [math.degrees(v) for v in d['yaw']], '--',
-                      color=COLORS[n], lw=1.0, alpha=0.55)
-    ax_vel.set_xlim(tlo, max(tmax, tlo + 5)); ax_vel.grid(alpha=0.3)
-    ax_vel.set_xlabel('t (s)'); ax_vel.set_ylabel('速度 (m/s)')
-    twin.set_ylabel('偏航 (°，虚线)'); twin.set_ylim(-190, 190)
-    ax_vel.legend(loc='upper right', fontsize=7)
+        b = mon.batt[n]
+        if b['t']:
+            ax_volt.plot(b['t'], b['v'], '-', color=COLORS[n], lw=1.4,
+                         label=f'{n} {b["v"][-1]:.2f} V')
+    ax_volt.axhline(PACK_FULL_V, ls=':', color='#aaa', lw=1.0,
+                    label=f'满电 {PACK_FULL_V:.1f} V')
+    ax_volt.axhline(PACK_WARN_V, ls='--', color='#d62728', lw=1.2,
+                    label=f'告警 {PACK_WARN_V:.1f} V')
+    ax_volt.set_xlim(tlo, max(tmax, tlo + 5)); ax_volt.grid(alpha=0.3)
+    ax_volt.set_xlabel('t (s)'); ax_volt.set_ylabel('电压 (V)')
+    # 纵轴始终含告警线和满电线：只按数据自适应的话，一整趟都在 23~24 V 时
+    # 看不出离告警线还有多远，台阶式骤降反而被放大成满屏震荡。
+    vs = [v for n in mon.names for v in mon.batt[n]['v']]
+    lo = min([PACK_WARN_V] + vs) - 0.3
+    hi = max([PACK_FULL_V] + vs) + 0.3
+    ax_volt.set_ylim(lo, hi)
+    if not vs:      # 一条都没收到：说明 /mavros/battery 没数据，别让人以为电压正常
+        ax_volt.text(0.5, 0.5, '没收到 /mavros/battery', transform=ax_volt.transAxes,
+                     ha='center', va='center', fontsize=10, color='#d62728')
+    ax_volt.legend(loc='lower left', fontsize=7, ncol=2)
     fig.tight_layout()
 
 
@@ -695,8 +939,17 @@ def summarize(mon):
                      f'最大 {max(mon.diag_trim):+.2f}，最小 {min(mon.diag_trim):+.2f}')
     if mon.gap_d:
         import statistics as st
-        lines.append(f'沿航线间距：中位 {st.median(mon.gap_d):.2f} m，'
-                     f'最小 {min(mon.gap_d):.2f}，最大 {max(mon.gap_d):.2f}')
+        # 只统计"正在编队"那些样本，NaN 是没编队的时段（见 DIAG_FRESH_S）。
+        gd = [v for v in mon.gap_d if v == v]
+        skipped = len(mon.gap_d) - len(gd)
+        if gd:
+            lines.append(f'沿航线间距：中位 {st.median(gd):.2f} m，'
+                         f'最小 {min(gd):.2f}，最大 {max(gd):.2f}'
+                         f'（编队中 {len(gd)} 点）')
+        else:
+            lines.append('沿航线间距：全程没收到编队 diag，这个指标没数')
+        if skipped:
+            lines.append(f'（其中 {skipped} 点没在编队，曲线上是断开的）')
         if mon.gap_line:
             lines.append(f'（直线距离对照：中位 {st.median(mon.gap_line):.2f} m，'
                          f'最小 {min(mon.gap_line):.2f}，最大 {max(mon.gap_line):.2f}）')
@@ -721,11 +974,22 @@ def main():
     ap.add_argument('--spacing', type=float, default=4.0)
     ap.add_argument('--cruise-agl', type=float, default=2.0)
     ap.add_argument('--tol', type=float, default=1.2, help='入列容差，画成间距的绿带')
+    # 2026-10-19：②面板那条红色安全下限线的值。默认 4.0 跟 .env 的
+    # FORMATION_MIN_SEPARATION_M 对齐（entrypoint 以它下发节点参数
+    # min_separation_m）；两边不一致时图上那条线就是错的，所以调参改了 .env
+    # 要记得也把这个值传进来。0 = 不画这条线。
+    ap.add_argument('--min-sep', type=float, default=4.0,
+                    help='两机直线距离的安全下限，画成②面板的红色虚线（0=不画）')
     ap.add_argument('--out', default='/logs/formation_report.png')
     ap.add_argument('--timeout', type=float, default=1800.0)
     ap.add_argument('--route', default='',
-                    help='规划航线（世界坐标，"x,y x,y ..."，第一个是长机起飞点）。'
-                         '给了才按"沿航线弧长"算间距，不给退回直线距离。')
+                    help='规划航线（世界坐标，"x,y x,y ..."），必须跟**长机实际带队跑的'
+                         '那条逐点一致**。给了才按"沿航线弧长"算间距，不给退回直线距离。'
+                         '⚠️ 闭合回路要把起点**再写一遍当末点**（lead_formation 会把 '
+                         'final_xy 接到尾巴上）：RoutePath.is_closed() 靠首尾距离 <0.5 m 判闭合，'
+                         '不闭合就不走"环上取短边"保护，两机停在起降点上时间距会读成'
+                         '整条航线长（2026-10-15 实测 67 m）。也**不要**把起降点接在开头——'
+                         '那正好会把闭合破掉。')
     ap.add_argument('--layout', default='',
                     help='布局 yaml（画俯视底图用：房间/立柱/起降点/障碍/仿地模块）。'
                          '不给就用脚本里写死的 fire_drill_room 那组老坐标。')
@@ -776,7 +1040,8 @@ def main():
     route = [tuple(float(v) for v in tok.split(','))
              for tok in args.route.split()] if args.route else None
     mon = FormationMonitor([args.leader, args.follower],
-                           args.spacing, args.cruise_agl, args.tol, route)
+                           args.spacing, args.cruise_agl, args.tol, route,
+                           min_sep=args.min_sep)
     fig, axes = plt.subplots(2, 2, figsize=(15, 9.5))   # 田字格
     if gui:
         plt.ion(); plt.show(block=False)
@@ -796,7 +1061,16 @@ def main():
                 next_draw = now + 0.5           # 2 Hz 重绘，够流畅也不抢 CPU
                 draw(fig, axes, mon)
                 if gui:
-                    plt.pause(0.001)
+                    # 2026-10-14：这里原来是 plt.pause(0.001)，用户反馈"监控图表
+                    # 老是置顶"。plt.pause() 内部每次都会调 show(block=False)，
+                    # TkAgg 下那一句会 deiconify + 把窗口抬到最前并抢焦点——2 Hz
+                    # 重绘就是每 0.5 秒抢一次，没法在它上面干别的活。
+                    # 换成"只重绘 + 只抽事件"，两者都不碰窗口层级。
+                    try:
+                        fig.canvas.draw_idle()
+                        fig.canvas.flush_events()
+                    except Exception:
+                        pass        # 窗口被用户关掉之后照常跑无窗口逻辑
             # 结束判据要**连续成立** END_CONFIRM_S 秒才算数。
             # 2026-09-30：任务2 里 NX02 是**真的降落**到物资点去抓灭火弹的，
             # 而那一刻 NX01 正在 G 点悬停等它——"一架已降落、另一架原地悬停"
@@ -829,13 +1103,21 @@ def main():
                 f.write('t,gap_route,gap_line,x1,y1,x2,y2\n')
                 for i, t in enumerate(mon.gap_t):
                     x1, y1, x2, y2 = mon.gap_xy[i]
-                    f.write(f'{t:.3f},{mon.gap_d[i]:.4f},{mon.gap_line[i]:.4f},'
+                    # 没在编队的那些点 gap_route 是 NaN，写成**空**而不是 "nan"：
+                    # 空在 awk/pandas 里都当缺失，写 "nan" 的话 awk 的 $2>40
+                    # 会按字符串比、判成真（踩过）。
+                    g = mon.gap_d[i]
+                    gs_ = f'{g:.4f}' if g == g else ''
+                    f.write(f'{t:.3f},{gs_},{mon.gap_line[i]:.4f},'
                             f'{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}\n')
             with open(os.path.splitext(args.out)[0] + '_diag.csv', 'w', encoding='utf-8') as f:
-                f.write('t,lag,gap_node,trim\n')
+                f.write('t,lag,gap_node,trim,s_cmd,s_proj,total_len,sep_line,v_ff,ff_used\n')
                 for i, t in enumerate(mon.diag_t):
                     f.write(f'{t:.3f},{mon.diag_lag[i]:.4f},'
-                            f'{mon.diag_gap[i]:.4f},{mon.diag_trim[i]:.4f}\n')
+                            f'{mon.diag_gap[i]:.4f},{mon.diag_trim[i]:.4f},'
+                            f'{mon.diag_scmd[i]:.4f},{mon.diag_sproj[i]:.4f},'
+                            f'{mon.diag_total[i]:.4f},{mon.diag_sepline[i]:.4f},'
+                            f'{mon.diag_vff[i]:.4f},{mon.diag_ffused[i]:.0f}\n')
             print(f'[监视] 原始数据已存 {csv_path}（+_diag.csv）', flush=True)
         except Exception as exc:                       # 存不下不影响报告
             print(f'[监视] CSV 没存成：{exc}', flush=True)

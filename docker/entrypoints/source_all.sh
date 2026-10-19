@@ -9,7 +9,7 @@
 # 顺序不是随便排的：
 # 1. /opt/ros/humble 必须最先——后面每个workspace的setup.bash都是在它之上
 #    做overlay（叠加ament前缀路径），底层环境没建好，后面全部作废。
-# 2. livox_ws 必须排在 point_lio_ws/fastlio_ws 之前——point_lio和FAST-LIO2都
+# 2. （已失效）livox_ws 必须排在 point_lio_ws/fastlio_ws 之前——point_lio和FAST-LIO2都
 #    原生依赖livox_ros_driver2::msg::CustomMsg，可执行文件运行时(不只是编译时)
 #    链接了这个类型支持库，顺序错了会找不到符号，表现是
 #    "Package 'point_lio'/'fast_lio' not found"，2026-08-14实测踩过（见
@@ -33,8 +33,13 @@ source /opt/decomp_ws/install/setup.bash 2>/dev/null || true
 source /opt/mighty_ws/install/setup.bash
 source /opt/dlio_ws/install/setup.bash
 source /opt/livox_ws/install/setup.bash
-source /opt/point_lio_ws/install/setup.bash
-source /opt/fastlio_ws/install/setup.bash
+# 2026-10-16：point_lio_ws / fastlio_ws 两行已删——这两个 SLAM 后端当天从镜像
+# 移除（它们从未被启动过，定位走 LOCALIZATION_SOURCE=uwb_imu）。
+# ⚠️ 删包时**最容易漏掉就是这里**：Dockerfile 的 COPY/RUN 和 entrypoint 的
+# ros2 launch 都清干净了，但这个文件还在 source 已经不存在的 setup.bash，
+# 而本脚本在 `set -e` 下跑 —— 结果是 flight-stack 容器**启动即退出(1)**，
+# 现象是 run.sh 卡在"等两机就绪"，日志里只有一行
+# "No such file or directory"（2026-10-16 实测）。
 source /opt/ros2_px4_stack_ws/install/setup.bash
 source /opt/px4ctrl_ws/install/setup.bash
 # contest_mission（2026大赛任务系统专属包，2026-09-08新增）用到

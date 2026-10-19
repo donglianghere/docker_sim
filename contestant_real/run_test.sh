@@ -76,7 +76,26 @@ BASENAME="$(basename "$SCRIPT")"
 # t1 要夹爪 -> 默认任务机；其余默认侦察机
 [ -n "$NS" ] || { case "$WHICH" in t1) NS=NX02 ;; *) NS=NX01 ;; esac; }
 case "$NS" in NX01) IP=$NX01_IP ;; NX02) IP=$NX02_IP ;; esac
-log "测试：$BASENAME    飞机：$NS ($IP)"
+# 角色按机号定，别写死（2026-10-16）：SDK 把 --role leader 映射成 role='recon'，
+# 而 takeoff()/land() 的**自动**声光播报前缀就取自它（recon=侦察机 / supply=任务机，
+# 见 capabilities.py 的 _SOUND_LIGHT_ROLE_PREFIX）。原来这里固定传 leader，于是在
+# NX02 上跑单机测试会播"侦察机起飞/侦察机降落"——程序里显式给了 sound= 的那几条
+# （"任务机抓取灭火弹"等）倒是对的，只有自动播报错，所以一直没人注意到。
+case "$NS" in NX01) ROLE=leader ;; NX02) ROLE=follower ;; *) ROLE=leader ;; esac
+
+# ---- 程序自己声明要不要飞机（2026-10-04）----
+# 有的测试压根不碰飞机（比如 t6 只测地面站上那块声光板），那些前置检查会把它
+# 卡死在"飞机不可达"上。**由程序声明、不由运行器按文件名猜**——文件名一改就
+# 失效，新测试还得回来改运行器的表，这个教训见 run_real.sh 里"相机不在这里配"
+# 那段。程序里写 `NEEDS_AIRCRAFT = False` 即可。
+NEEDS_AIRCRAFT=1
+grep -qE '^NEEDS_AIRCRAFT[[:space:]]*=[[:space:]]*False' "$SCRIPT" && NEEDS_AIRCRAFT=0
+if [ "$NEEDS_AIRCRAFT" = 1 ]; then
+    log "测试：$BASENAME    飞机：$NS ($IP)"
+else
+    log "测试：$BASENAME    **不连飞机**（本测试只用地面站设备）"
+    log "  供参考：飞机 IP 是 NX01=$NX01_IP / NX02=$NX02_IP，本测试不需要它们在线"
+fi
 
 # ---- 互斥：跟 run_real.sh 共用一把锁，不能同时飞 ----
 LOCK=/tmp/docker_sim_run_real.lock
@@ -92,6 +111,7 @@ ensure_gcs_web
 
 "$ROOT/scripts/check_env.sh" real || die "环境检查未通过"
 
+if [ "$NEEDS_AIRCRAFT" = 1 ]; then
 ping -c1 -W2 "$IP" >/dev/null 2>&1 || die "飞机 $IP 不可达"
 # 只检查机载栈、不代起（理由同 run_real.sh）。报错时把补救命令打出来。
 hint_stack() {   # hint_stack <ip> <flight|vision>
@@ -127,12 +147,17 @@ if [ "$vu" != "True" ]; then
     die "机载视觉栈未就绪，已中止"
 fi
 log "机载栈就绪：$ns_rep  flight_up=$fu  vision_up=$vu"
+fi
 
 # 相机：不在这里配，由程序自己声明（见 run_real.sh 同名处的说明）。
 # 但网络参数下面起容器要用，这里先算出来。
 # shellcheck source=/dev/null
 source "$ROOT/scripts/contestant_network.sh"
-contestant_net_args real "$ROOT" "$HOME/.cache/contest_sdk" || die "网络参数生成失败"
+# 不连飞机的测试用 local（域 20 + 仅回环）：它只跟本机的声光常驻程序说话，
+# 不该因为"地面站没连飞机那个 WiFi"就跑不了——2026-10-04 用户要求。
+_NET_MODE=real
+[ "$NEEDS_AIRCRAFT" = 1 ] || _NET_MODE=local
+contestant_net_args "$_NET_MODE" "$ROOT" "$HOME/.cache/contest_sdk" || die "网络参数生成失败"
 # t4/t5 跳过了上面的 source，这里补上
 [ ${#CONTESTANT_NET_ARGS[@]} -gt 0 ] 2>/dev/null || {
     source "$ROOT/scripts/contestant_network.sh"
@@ -140,22 +165,58 @@ contestant_net_args real "$ROOT" "$HOME/.cache/contest_sdk" || die "网络参数
 }
 log "网络：$CONTESTANT_NET_DESC"
 
+# ---- 机载 MAVLink 流收窄（降 CPU，2026-10-03）----
+# 飞控 SD 卡把 ODOMETRY / LOCAL_POSITION_NED / ATTITUDE_QUATERNION /
+# HIGHRES_IMU 四路顶到了 100Hz，实测白占机载整机 8-9 个百分点的 CPU。改那四
+# 行要拆机取 SD 卡，所以在这里用 MAV_CMD_SET_MESSAGE_INTERVAL(511) 运行时压
+# 回来。每一路关/降的依据和完整实测数据见 scripts/tune_mavlink_streams.sh
+# 文件头。失败只警告不中止（不收窄也能飞，只是 CPU 高一截）。
+# 必须放在 contestant_net_args 之后——它要靠 CONTESTANT_NET_ARGS 进真机域。
+if [ "$NEEDS_AIRCRAFT" = 1 ]; then
+    source "$ROOT/scripts/tune_mavlink_streams.sh"
+    log "收窄机载 MAVLink 高频流（降 CPU）"
+    tune_mavlink_streams "$NS"
+fi
+
 # ---- 监视（单机也开：高度曲线是 t5 的主要判据）----
+MON_OUT=""
+if [ "$NEEDS_AIRCRAFT" = 1 ]; then
 MON_OUT="/logs/${BASENAME%.py}_report.png"
 log "启动监视窗口（报告存 runtime_logs/$(basename "$MON_OUT")）"
 # ⚠️ 下面 --leader 和 --follower 传的是**同一个** $NS。单机测试只有一架飞机，
 # 而 monitor.py 要两个命名空间（它本来是给双机编队用的）。后果：报告图里的
 # "编队间距"那条曲线**恒为 0、没有意义**——单机测试看的是轨迹和高度。
 # 双机那条路（run_real.sh）传 NX01/NX02 两个不同的，间距才是真的。
+# 俯视底图：monitor.py 不给 --layout 就退回写死的 fire_drill_room 老坐标
+# （房间原点在**中心**、立柱 (4.5,7)），跟样题场景完全不是一套，轨迹会叠在
+# 错误的底图上。样题布局的权威来源是 src/contest_mission/config 下那份 yaml
+# （room/pillars/pads/obstacle_cylinder/terrain_module 都在里面）。
+# 2026-10-05 补：之前一直没传，每趟监视器都在打那条"没给 --layout"的警告。
+LAYOUT_YAML="${LAYOUT_YAML:-sample_room_layout.yaml}"
+LAYOUT_HOST="$ROOT/src/contest_mission/config/$LAYOUT_YAML"
+MON_LAYOUT_ARGS=()
+if [ -f "$LAYOUT_HOST" ]; then
+    MON_LAYOUT_ARGS=(-v "$(dirname "$LAYOUT_HOST")":/layout:ro)
+    MON_LAYOUT_OPT=(--layout "/layout/$LAYOUT_YAML")
+else
+    echo "!! 找不到布局 $LAYOUT_HOST —— 监视器底图会退回老坐标" >&2
+    MON_LAYOUT_OPT=()
+fi
 docker run -d --name "$C_MONITOR" --network host \
     -e DISPLAY="$DISPLAY" -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v /etc/localtime:/etc/localtime:ro \
     -v "$ROOT/scripts:/scripts:ro" -v "$LOGDIR:/logs" \
+    "${MON_LAYOUT_ARGS[@]}" \
     "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
     python3 -u /scripts/monitor.py --leader "$NS" --follower "$NS" \
-        --out "$MON_OUT" >/dev/null 2>&1 \
+        "${MON_LAYOUT_OPT[@]}" --out "$MON_OUT" >/dev/null 2>&1 \
     || { echo "!! 监视窗口没起来 —— 查 DISPLAY 和 xhost 授权" >&2
        echo "   不中止飞行，但这一轮没有编队间距记录和报告图" >&2; }
+else
+    # 不连飞机的测试没有轨迹可画，监视窗口没有意义。注意
+    # feedback"任何飞行测试都要同时起监视窗口"针对的是**飞行**测试，这里不是。
+    log "不起监视窗口（本测试不飞，没有轨迹）"
+fi
 
 # ---- 跑 ----
 BASE_PYPATH="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" \
@@ -168,7 +229,7 @@ docker run -d --name "$C_TEST" -e CONTEST_CONTROL_HOST="$IP" --network host \
     -v "$HERE:/workspace:ro" -v "$LOGDIR:/logs" \
     -e PYTHONPATH="$PYPATH" "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
     python3 -u "/workspace/单机测试/$BASENAME" \
-      --namespace "$NS" --role leader --teammate "$NS" "${EXTRA[@]}" >/dev/null
+      --namespace "$NS" --role "$ROLE" --teammate "$NS" "${EXTRA[@]}" >/dev/null
 
 echo
 log "测试中……（实时日志：docker logs -f $C_TEST）"
@@ -188,13 +249,20 @@ sleep 5
 docker run --rm -v "$LOGDIR:/logs" --entrypoint chown "$IMAGE" \
     -R "$(id -u):$(id -g)" /logs >/dev/null 2>&1 || true
 
+# 日志必须**先落盘再清容器**。2026-10-04 修：原来这里直接 grep
+# "$LOGDIR/..._test.log"，可是全脚本没有任何一步生成那个文件——于是错误摘要
+# 永远是空的，紧接着下面 docker rm -f 把容器删掉，异常原文彻底丢失。t4 那次
+# "飞完3趟一直悬停、退出码1"就是因为这个查不下去。
+docker logs "$C_TEST" > "$LOGDIR/${BASENAME%.py}_test.log" 2>&1 || true
+docker logs "$C_MONITOR" > "$LOGDIR/${BASENAME%.py}_monitor.log" 2>&1 || true
+
 echo
 echo "================ $BASENAME 结果 ================"
 code="$(docker inspect -f '{{.State.ExitCode}}' "$C_TEST" 2>/dev/null || echo '?')"
 echo "退出码 $code"
 grep -E 'Traceback|Error|错误|失败|!!' "$LOGDIR/${BASENAME%.py}_test.log" | tail -8 || true
 echo
-echo "报告图：runtime_logs/$(basename "$MON_OUT")"
+[ -n "$MON_OUT" ] && echo "报告图：runtime_logs/$(basename "$MON_OUT")"
 echo "完整日志：runtime_logs/${BASENAME%.py}_test.log"
 echo "监视日志：runtime_logs/${BASENAME%.py}_monitor.log"
 echo "机载栈仍在运行（本脚本不拆机载容器）。"

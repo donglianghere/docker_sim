@@ -48,7 +48,10 @@ def load_obstacles(path):
     d = yaml.safe_load(open(path, encoding='utf-8'))
     obs = []
     c = d.get('obstacle_cylinder')
-    if c:
+    # `enabled: false`（2026-10-11 用户去掉了这根柱子）时不能算进来——算了就是
+    # 拿一个世界里不存在的障碍去否掉本来干净的航段。键本身是故意留着的，
+    # 所以这里判 enabled，不是判键在不在（见 layout yaml 的注释）。
+    if c and c.get('enabled', True):
         obs.append((f"避障圆柱({c['x']},{c['y']})",
                     lambda p, c=c: math.hypot(p[0] - c['x'], p[1] - c['y']) - c['diameter'] / 2))
     size = float(d.get('pillar_size', 1.0))

@@ -46,6 +46,7 @@ dlio_extrinsics_mount.patch 用的是同一套外参，保持一致。
 """
 
 import argparse
+import os
 import subprocess
 import sys
 
@@ -95,7 +96,34 @@ MID360_SDF_TEMPLATE = """
              360万次光线投射，纯CPU raycasting，两架飞机各一份）。降到
              10Hz不影响点云图案/密度，只是采样节奏更贴近真实硬件，同时
              应该能显著降低gzserver负担、把RTF拉回接近1.0（详见DEBUG_
-             JOURNAL.md同日期"仿真real-time-factor"那条记录）。 -->
+             JOURNAL.md同日期"仿真real-time-factor"那条记录）。
+
+             2026-10-16 再砍一刀（用户定）：vertical samples 360->1、
+             range max 40->1 m、插件 samples 20000->20。射线从
+             100x360=36000 条/帧 降到 100x1=100 条/帧（-99.7%），
+             两架飞机合计从 72 万次/秒 降到 2000 次/秒。
+             ⚠️ 2026-10-16 补充前提：**避障要求已由用户取消**。所以点云现在
+             只需要"存在"（让 DLIO / grid_map 这些订阅者有输入、不报错），
+             不需要"看得见障碍物"。ego_planner 本身仍然**开着**，但那是为了
+             它带的 traj_server——face_yaw()/set_yaw_mode_*() 这套原地转向唯一
+             的执行者（关掉它实测会让侦察机在 G 点转不动、高层火情在 M 点机头
+             不转）。配套把 grid_map 缩到 26x30x4 @0.2m（原 60x60x5 @0.1m，
+             格子数 -98%），所以"ego_planner 开着"也不再吃那个满载核。
+             ⚠️ 哪天**避障要求恢复**，这三个值和 grid_map 的分辨率/尺寸都要一起
+             改回去，光开 ego_planner 没用——它看不见任何障碍物。
+
+             ⚠️ 为什么敢这么砍——**里程计不是 SLAM 算的**：
+             /NX0x/dlio/odom_node/odom 这条被 12 个节点订阅的"里程计总线"
+             （pt4ctrl / line_goto / precision_servo / takeoff_monitor /
+             formation_follower ...），实测发布者是 local_position_readback_node，
+             即从 PX4 local_position 回读，跟激光点云完全无关；定位本身走
+             LOCALIZATION_SOURCE=uwb_imu。DLIO 还在跑、还在消费点云，但它
+             去畸变后的输出 dlio/.../pointcloud/deskewed 订阅者为 0
+             （原来的消费者 ego_planner 已由 EGO_PLANNER_ENABLED=false 关掉）。
+             所以点云现在只需要"有"，不需要"准"。
+             ⚠️ 代价：点云退化成一圈 100 点、1 m 内的稀疏环，**任何真正依赖
+             点云的功能都会失效**——避障、地面站指点飞行的绕障都不再可用。
+             这是 2026-10-16 明确接受的取舍（避障要求已取消）。 -->
         <update_rate>10</update_rate>
         <plugin name='{ns}_livox_plugin' filename='libros2_livox.so'>
           <ray>
@@ -105,15 +133,15 @@ MID360_SDF_TEMPLATE = """
                 <min_angle>0</min_angle><max_angle>6.2831852</max_angle>
               </horizontal>
               <vertical>
-                <samples>360</samples><resolution>1</resolution>
+                <samples>1</samples><resolution>1</resolution>
                 <min_angle>-0.126000</min_angle><max_angle>0.963900</max_angle>
               </vertical>
             </scan>
-            <range><min>0.001</min><max>40.0</max><resolution>0.15</resolution></range>
+            <range><min>0.001</min><max>1.0</max><resolution>0.15</resolution></range>
             <noise><type>gaussian</type><mean>0.0</mean><stddev>0.0</stddev></noise>
           </ray>
           <visualize>false</visualize>
-          <samples>20000</samples>
+          <samples>20</samples>
           <downsample>1</downsample>
           <csv_file_name>{mid360_csv}</csv_file_name>
           <topic>mid360</topic>
@@ -720,6 +748,57 @@ def merge_mid360(iris_sdf_path: str, namespace: str, output_path: str) -> None:
         f.write(content)
 
 
+def set_lockstep(sdf_path: str, enable: bool) -> None:
+    """改 spawn 用的那份 sdf 里的 `<enable_lockstep>`（PX4 gazebo-classic 插件读它）。
+
+    2026-10-18 加这个开关的原因（**仿真里飞机"无故降落"的上游根因**）：
+    lockstep 下 PX4 的时钟由 Gazebo 步进驱动，而 ROS 侧节点用的是墙钟 epoch
+    —— **两套参考时间源**。实测 RTF=0.9992，两者以 −0.83 ms/s 分离
+    （每 51 s 差 −42 ms），mavros 把墙钟戳换算成 PX4 时钟戳、漂移累积到阈值就
+    一次性阶跃 ~50 ms（日志里每 51 s 一条 `Time jump detected`）。阶跃瞬间
+    vision_pose 的 PX4 时间戳跳 ±100 ms，样本落到 EKF2 融合窗外 ⇒ EV 整源停摆
+    十几秒 ⇒ 水平位置失效 ⇒ OFFBOARD 掉成 ALTCTL ⇒ 盲降把飞机放到地上
+    （10-18 两架都这么掉过，NX01 真值从 1.94 m 掉到 0.00 m）。
+    关掉 lockstep 让 Gazebo 自由按真实时间跑，就不再有"按步进喂时间"这条路。
+
+    ⚠️ **效果需要实测确认，不要当然**：这套 PX4 是**带 lockstep_scheduler 编译**的
+    （日志里有 `INFO [lockstep_scheduler] setting initial absolute time to ...`），
+    它的时钟仍然跟着收到的传感器时间戳走，而那个时间戳由 Gazebo 填的是仿真时间。
+    所以关掉插件侧的 lockstep 之后，两套时钟的分离**可能只是变小、不是消失**。
+    判据（跑一轮后看）：ulog 的 `timesync_status.estimated_offset` 还会不会每
+    51 s 跳一个台阶、`estimator_aid_src_ev_pos` 还有没有 >1 s 的空档。
+    真要彻底统一时间源，只有两条路：ROS 侧全体 `use_sim_time=true`（/clock 已经
+    在发，但 pt4ctrl/ego_planner/编队的定时逻辑全受影响），或者重编 PX4 不带
+    lockstep_scheduler。
+
+    ⚠️ 关掉 lockstep 的代价：Gazebo 物理与 PX4 不再严格步进同步，CPU 吃紧时
+    传感器数据会迟到（lockstep 的本意就是防这个）。RTF 已经 0.9992、接近实时，
+    所以风险有限；但**如果出现新的"传感器超时/EKF 不收敛"现象，先把这个开关
+    打回 1 做对照**——环境变量就能切，不用重建镜像：
+        SIM_ENABLE_LOCKSTEP=1 docker compose up -d sim-world
+    顺带：sim-world-entrypoint.sh 里记的那个"启动阶段 lockstep 错位就再也回不来、
+    一直刷 poll timeout"的竞态，关掉 lockstep 之后也不存在了。
+    """
+    want = "1" if enable else "0"
+    with open(sdf_path) as f:
+        content = f.read()
+
+    # 断言替换真的发生了：PX4 换版本后标签名/个数变了的话，这里要当场炸，
+    # 不能静默跳过——静默跳过的后果是"参数看起来改了、实际还在 lockstep"，
+    # 而那种失效只会在飞行中表现成飞机莫名掉地，极难往回查。
+    n = content.count("<enable_lockstep>")
+    if n != 1:
+        raise RuntimeError(
+            f"expected exactly one <enable_lockstep> in {sdf_path}, found {n}"
+        )
+    import re as _re
+    content = _re.sub(r"<enable_lockstep>[^<]*</enable_lockstep>",
+                      f"<enable_lockstep>{want}</enable_lockstep>", content)
+
+    with open(sdf_path, "w") as f:
+        f.write(content)
+
+
 def merge_cameras(
     sdf_path: str, namespace: str, camera_names: list, camera_type: str = "camera"
 ) -> None:
@@ -798,6 +877,13 @@ def main() -> None:
     merge_mid360(iris_tmp, args.namespace, args.output)
     merge_rangefinder(args.output, args.namespace)
     merge_body_color(args.output, args.namespace, args.body_color)
+    # 2026-10-18：默认**关掉 lockstep**（统一时间源，见 set_lockstep 的长注释）。
+    # `SIM_ENABLE_LOCKSTEP=1` 可以不重建镜像就切回去做对照。
+    _lockstep = os.environ.get("SIM_ENABLE_LOCKSTEP", "0").strip().lower() \
+        not in ("", "0", "false", "no")
+    set_lockstep(args.output, _lockstep)
+    print(f"[gen_iris_mid360_sdf] enable_lockstep={'1' if _lockstep else '0'}"
+          f"（SIM_ENABLE_LOCKSTEP={os.environ.get('SIM_ENABLE_LOCKSTEP', '未设/默认关')}）")
     if args.camera_type == "switchable":
         merge_switchable_camera(args.output, args.namespace, initial_view=args.camera_initial_view)
         print(

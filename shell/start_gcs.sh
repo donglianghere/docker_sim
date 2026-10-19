@@ -15,4 +15,4 @@ set -eo pipefail
 trap 'ec=$?; echo; if [[ $ec -ne 0 ]]; then echo "!! 执行失败（退出码 $ec），请查看上面的错误信息"; else echo "-- 执行完成 --"; fi; read -n 1 -s -r -p "按任意键关闭窗口..."; echo' EXIT
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-"$ROOT/scripts/up_gcs.sh" "$@"
+"$ROOT/scripts/start_gcs.sh" "$@"

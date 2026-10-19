@@ -96,6 +96,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-pcl-conversions \
     && rm -rf /var/lib/apt/lists/*
 
+# 2026-10-02新增：matplotlib + 中文字体，给编队监视脚本(scripts/monitor.py)用。
+# 这个脚本原来只在仿真的flight-stack容器里跑（那边镜像自带matplotlib），
+# 真机场景(ROS_DOMAIN_ID=20)订阅两机话题只能在GCS容器里跑，而这个镜像
+# 当时既没有matplotlib、**也没有pip**（ros:humble-ros-base-jammy基础镜像
+# 不含python3-pip），所以只能用apt装；临时办法是把宿主机
+# ~/.local/lib/python3.10/site-packages挂进来（容器是jammy/Python3.10，
+# 跟本机版本正好对得上），能跑但每次都要带一长串-v，固化进镜像省事。
+#
+# fonts-wqy-zenhei：monitor.py的字体列表第一项就是'WenQuanYi Zen Hei'，
+# 不装的话图上所有中文渲染成空心方框（matplotlib只会告警不会报错，
+# 2026-10-02实测真机出图就是这个样子），标题/图例/统计数字全看不懂。
+#
+# 单独一层：跟上面rviz2/libpcl-dev同样的道理——python3-matplotlib会拖
+# numpy/PIL/fonttools/kiwisolver一串依赖，体积比第一层那几个小包大一个
+# 量级，混进去一旦下载抖动失败，连累那层全部重来。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    -o Acquire::Retries=6 \
+    python3-matplotlib \
+    fonts-wqy-zenhei \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt
 
 COPY vendor/px4ctrl_ros2/quadrotor_msgs /opt/gcs_ws/src/quadrotor_msgs

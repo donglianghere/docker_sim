@@ -559,6 +559,19 @@ def main(args=None):
         executor.spin()
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        # 2026-10-14 加（takeoff_monitor_node 同款缺口）：原来只接 KeyboardInterrupt，
+        # 其余异常会穿过 spin() 落到 finally，节点被干净拆掉、进程**静默退出**，
+        # 异常从没被打印。空中表现就是"飞机正常悬停"，根因只能事后 ps 推断。
+        # 用 BaseException 而非 Exception：SystemExit/GeneratorExit 这类更难查。
+        import traceback
+        try:
+            node.get_logger().fatal('takeoff_monitor_node 因未捕获异常退出——完整栈：\n'
+                                    + traceback.format_exc())
+        except Exception:
+            pass
+        traceback.print_exc()
+        raise
     finally:
         node.destroy_node()
         rclpy.shutdown()

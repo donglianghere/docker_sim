@@ -1,0 +1,221 @@
+diff --git a/src/planner/bspline_opt/include/bspline_opt/bspline_optimizer.h b/src/planner/bspline_opt/include/bspline_opt/bspline_optimizer.h
+index 7fb2944..902d5b2 100755
+--- a/src/planner/bspline_opt/include/bspline_opt/bspline_optimizer.h
++++ b/src/planner/bspline_opt/include/bspline_opt/bspline_optimizer.h
+@@ -191,6 +191,16 @@ namespace ego_planner
+     void calcMovingObjCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
+     void calcSwarmCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
+     void calcFitnessCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
++    /* docker_sim 2026-10-13：梯度投影锁直线。见 .cpp 的 setupLineLock()。 */
++    bool lock_to_line_{false};                          // optimization/lock_to_line
++    double lock_max_init_dev_{0.15};                    // optimization/lock_max_init_dev [m]
++    double lock_min_len_{0.5};                          // optimization/lock_min_len [m]
++    bool lock_active_{false};                           // 本次优化是否真的锁上了
++    int lock_report_state_{-1};                         // 日志只在状态翻转时打一行
++    Eigen::Vector3d lock_dir_{Eigen::Vector3d::Zero()}; // 单位弦方向（首->末控制点）
++    void setupLineLock(void);
++    void projectGradToLine(Eigen::MatrixXd &grad_3D);
++
+     bool check_collision_and_rebound(void);
+ 
+     static int earlyExit(void *func_data, const double *x, const double *g, const double fx, const double xnorm, const double gnorm, const double step, int n, int k, int ls);
+diff --git a/src/planner/bspline_opt/src/bspline_optimizer.cpp b/src/planner/bspline_opt/src/bspline_optimizer.cpp
+index bffbb3d..0557aa8 100755
+--- a/src/planner/bspline_opt/src/bspline_optimizer.cpp
++++ b/src/planner/bspline_opt/src/bspline_optimizer.cpp
+@@ -31,6 +31,20 @@ namespace ego_planner
+     node->get_parameter("optimization/max_acc", max_acc_);
+ 
+     node->get_parameter("optimization/order", order_);
++
++    // docker_sim 2026-10-13：梯度投影锁直线。见 setupLineLock() 的说明。
++    // false = 关闭，行为与改造前逐位相同。
++    node->declare_parameter("optimization/lock_to_line", false);
++    node->get_parameter("optimization/lock_to_line", lock_to_line_);
++    // [m] 初值控制点离弦的最大横偏，超了就**不锁**——锁的语义是"横向不许再动"，
++    // 不是"把弯的掰直"；初值要是弯的，锁上只会把那个弯原样冻住。
++    node->declare_parameter("optimization/lock_max_init_dev", 0.15);
++    node->get_parameter("optimization/lock_max_init_dev", lock_max_init_dev_);
++    // [m] 弦长下限。悬停在目标点上时首末控制点只差几厘米，弦方向就成了由位置
++    // 噪声决定的随机方向，锁上去等于把轨迹钉在一个随机方向上。跟
++    // fsm/align_start_state 那边 0.5 m 的门槛同一个道理。
++    node->declare_parameter("optimization/lock_min_len", 0.5);
++    node->get_parameter("optimization/lock_min_len", lock_min_len_);
+   }
+ 
+   void BsplineOptimizer::setEnvironment(const GridMap::Ptr &map)
+@@ -1596,6 +1610,105 @@ namespace ego_planner
+   }
+ 
+   // 使用L-BFGS方法对目标函数进行优化，得到光滑、无碰撞、动力学可行、与其他无人机碰撞、结束项的轨迹。
++  // docker_sim 2026-10-13：梯度投影锁直线 —— 判断本次优化能不能锁，并记下弦方向。
++  //
++  // 为什么这么做有效：min-jerk 轨迹在**两端边界条件与航段共线**时，空间路径精确
++  // 就是直线（各轴共用同一条五次时间曲线，只差一个位移向量的缩放）；均匀 B 样条
++  // 的控制点共线 ⇒ 曲线共线（凸组合）。所以 fsm/align_start_state 把起点 v/a 投影
++  // 到航段方向之后，**初值已经是一条精确直线**，剩下的横向偏差全部来自优化器把
++  // 控制点往横向推（distance/swarm/feasibility 三项的横向梯度）。把每个控制点的
++  // 梯度投影到弦方向、横向分量清零，横向自由度就从问题里消失了：控制点只能沿线
++  // 滑动，空间路径恒等于直线，优化器退化成"只重新分配时间"（速度剖面），
++  // calcFeasibilityCost 的限速限加速照常生效。
++  //
++  // 弦取"首控制点 -> 末控制点"而不是 start_pt_->local_target_pt_：rebound 阶段
++  // end_id = cps_.size（Free end），末控制点是自由变量，但进优化之前它就是初值
++  // 多项式采到局部目标上的那一点，方向一致，而且这里拿不到 FSM 的那两个量。
++  // 航段两端等高时弦自然是水平的，z 方向自由度一并消失 —— 这就是"水平直线"。
++  //
++  // 四道门，任一不过就不锁（退回完整的 ego-planner 行为）：
++  //   ① 开关没开；② 弦太短；③ 初值本来就不共线；④ 直线在膨胀图上不通。
++  void BsplineOptimizer::setupLineLock(void)
++  {
++    lock_active_ = false;
++    lock_dir_.setZero();
++    if (!lock_to_line_)
++      return;
++
++    const int n = static_cast<int>(cps_.points.cols());
++    if (n < 2 * order_ + 1) // 控制点太少，锁了也没有自由度可谈
++      return;
++
++    const Eigen::Vector3d p0 = cps_.points.col(0);
++    Eigen::Vector3d seg = cps_.points.col(n - 1) - p0;
++    const double seg_len = seg.norm();
++    if (seg_len < lock_min_len_)
++      return;
++    const Eigen::Vector3d dir = seg / seg_len;
++
++    // ③ 初值共线性
++    double max_dev = 0.0;
++    for (int i = 0; i < n; ++i)
++    {
++      const Eigen::Vector3d d = cps_.points.col(i) - p0;
++      max_dev = std::max(max_dev, (d - dir * d.dot(dir)).norm());
++    }
++    if (max_dev > lock_max_init_dev_)
++    {
++      if (lock_report_state_ != 2)
++      {
++        printf("[lock_line] 不锁：初值不共线 max_dev=%.3f > %.3f（通常是 "
++               "fsm/align_start_state 没生效或起点横向速度超限）\n",
++               max_dev, lock_max_init_dev_);
++        lock_report_state_ = 2;
++      }
++      return;
++    }
++
++    // ④ 直线必须在膨胀图上通。判据跟 fsm/align_start_state 那段一致：锁住之后
++    //    横向避障能力为零，所以这一关是安全的全部依靠。每次优化都重算，线上一旦
++    //    出现占据就立刻不锁、退回正常规划（FSM 100 Hz，延迟一拍）。
++    if (grid_map_)
++    {
++      const double step = grid_map_->getResolution();
++      if (step > 1e-6)
++      {
++        for (double d = 0.0; d <= seg_len; d += step)
++        {
++          if (grid_map_->getInflateOccupancy(p0 + dir * d))
++          {
++            if (lock_report_state_ != 3)
++            {
++              printf("[lock_line] 不锁：直线第 %.2f/%.2f m 处被占据，退回正常规划\n",
++                     d, seg_len);
++              lock_report_state_ = 3;
++            }
++            return;
++          }
++        }
++      }
++    }
++
++    lock_dir_ = dir;
++    lock_active_ = true;
++    if (lock_report_state_ != 1)
++    {
++      printf("[lock_line] 锁住：弦长 %.2f m 方向(%.3f,%.3f,%.3f) 初值横偏 %.4f m\n",
++             seg_len, dir.x(), dir.y(), dir.z(), max_dev);
++      lock_report_state_ = 1;
++    }
++  }
++
++  // 把每个控制点的梯度投影到弦方向上，横向分量清零。
++  // 固定边界点（前 order_ 列）投不投都一样 —— 它们不在 memcpy 出去的范围里。
++  void BsplineOptimizer::projectGradToLine(Eigen::MatrixXd &grad_3D)
++  {
++    if (!lock_active_)
++      return;
++    for (Eigen::Index i = 0; i < grad_3D.cols(); ++i)
++      grad_3D.col(i) = lock_dir_ * grad_3D.col(i).dot(lock_dir_);
++  }
++
+   bool BsplineOptimizer::rebound_optimize(double &final_cost)
+   {
+     iter_num_ = 0;
+@@ -1605,6 +1718,10 @@ namespace ego_planner
+     // 变量个数
+     variable_num_ = 3 * (end_id - start_id);
+ 
++    // docker_sim: 锁直线的判定放在 do 循环**之前**——判据只依赖初值，
++    // 循环里的 restart 会改控制点，重算反而会自相矛盾。
++    setupLineLock();
++
+     rclcpp::Time t0 = rclcpp::Clock().now(), t1, t2;
+     int restart_nums = 0, rebound_times = 0;
+     ;
+@@ -1657,6 +1774,14 @@ namespace ego_planner
+           restart_nums++;
+           initControlPoints(cps_.points, false);
+           new_lambda2_ *= 2; // 提高规避权重
++          // docker_sim: 锁住时横向梯度恒为零，提权重也推不动——真撞上了就
++          // **解锁**，把横向自由度还给优化器。安全优先于直线。
++          if (lock_active_)
++          {
++            lock_active_ = false;
++            lock_report_state_ = 0;
++            printf("[lock_line] 解锁：僚机距离过近，交回横向自由度\n");
++          }
+ 
+           printf("\033[32miter(+1)=%d,time(ms)=%5.3f, swarm too close, keep optimizing\n\033[0m", iter_num_, time_ms);
+ 
+@@ -1770,6 +1895,13 @@ namespace ego_planner
+           restart_nums++;
+           initControlPoints(cps_.points, false);
+           new_lambda2_ *= 2;
++          // docker_sim: 同上——撞了就解锁，让它能往横向躲。
++          if (lock_active_)
++          {
++            lock_active_ = false;
++            lock_report_state_ = 0;
++            printf("[lock_line] 解锁：轨迹撞障碍，交回横向自由度\n");
++          }
+ 
+           printf("\033[32miter(+1)=%d,time(ms)=%5.3f, collided, keep optimizing\n\033[0m", iter_num_, time_ms);
+         }
+@@ -1803,6 +1935,12 @@ namespace ego_planner
+     int end_id = this->cps_.points.cols() - order_;
+     variable_num_ = 3 * (end_id - start_id);
+ 
++    // docker_sim: refine 阶段（重新分配时间）同样锁。它只对 drone_id<=0 的长机、
++    // 且只在 checkFeasibility() 失败时跑，但长机正是编队里最该直的那架。
++    // 这里重新判一次：refine 的初值是 rebound 结果按新 ts 重采样来的，锁住过的
++    // 话仍然共线，判据自洽。
++    setupLineLock();
++
+     double q[variable_num_];
+     double final_cost;
+ 
+@@ -1911,6 +2049,7 @@ namespace ego_planner
+ 
+     Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + new_lambda2_ * g_distance + lambda3_ * g_feasibility + new_lambda2_ * g_swarm + lambda2_ * g_terminal;
+     // Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + new_lambda2_ * g_distance + lambda3_ * g_feasibility + new_lambda2_ * g_mov_objs;
++    projectGradToLine(grad_3D); // docker_sim: 锁直线——横向梯度清零
+     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
+   }
+ 
+@@ -1938,6 +2077,7 @@ namespace ego_planner
+     // printf("origin %f %f %f %f\n", f_smoothness, f_fitness, f_feasibility, f_combine);
+ 
+     Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + lambda4_ * g_fitness + lambda3_ * g_feasibility;
++    projectGradToLine(grad_3D); // docker_sim: 锁直线——横向梯度清零
+     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
+   }
+ 

@@ -806,7 +806,7 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #    话题，是明确的已知限制。
 # ============================================================
 COPY staging/ego-planner-swarm/src/planner /opt/ego_planner_ws/src
-COPY patches/ego_planner_traj_server_relative_poscmd.patch patches/ego_planner_traj_server_yaw_rate_limit.patch patches/ego_planner_grid_map_ground_filter.patch patches/ego_planner_grid_map_min_ray_length.patch patches/ego_planner_visualization_namespace_frame.patch patches/ego_planner_manual_target_goal_marker.patch patches/ego_planner_terminal_collision_check.patch patches/ego_planner_waypoint_recursive_spin_fix.patch patches/ego_planner_swarm_frame_alignment.patch patches/ego_planner_rebound_replan_arclength_underflow.patch patches/ego_planner_segment_point_underflow.patch patches/ego_planner_exec_traj_reach_check.patch patches/ego_planner_progress_diag.patch patches/ego_planner_traj_server_stop_after_finish.patch patches/ego_planner_traj_server_yaw_mode.patch patches/ego_planner_traj_server_yaw_constant_no_slew.patch patches/ego_planner_traj_server_yaw_hold.patch patches/ego_planner_traj_server_fixed_altitude.patch patches/ego_planner_goal_z_from_msg.patch patches/ego_planner_grid_map_inflation_z.patch patches/ego_planner_multi_traj_select.patch patches/ego_planner_astar_diag.patch patches/ego_planner_max_vel_runtime.patch patches/ego_planner_poly_reset.patch /tmp/
+COPY patches/ego_planner_traj_server_relative_poscmd.patch patches/ego_planner_traj_server_yaw_rate_limit.patch patches/ego_planner_grid_map_ground_filter.patch patches/ego_planner_grid_map_min_ray_length.patch patches/ego_planner_visualization_namespace_frame.patch patches/ego_planner_manual_target_goal_marker.patch patches/ego_planner_terminal_collision_check.patch patches/ego_planner_waypoint_recursive_spin_fix.patch patches/ego_planner_swarm_frame_alignment.patch patches/ego_planner_rebound_replan_arclength_underflow.patch patches/ego_planner_segment_point_underflow.patch patches/ego_planner_exec_traj_reach_check.patch patches/ego_planner_progress_diag.patch patches/ego_planner_traj_server_stop_after_finish.patch patches/ego_planner_traj_server_yaw_mode.patch patches/ego_planner_traj_server_yaw_constant_no_slew.patch patches/ego_planner_traj_server_yaw_hold.patch patches/ego_planner_traj_server_fixed_altitude.patch patches/ego_planner_goal_z_from_msg.patch patches/ego_planner_grid_map_inflation_z.patch patches/ego_planner_multi_traj_select.patch patches/ego_planner_astar_diag.patch patches/ego_planner_max_vel_runtime.patch patches/ego_planner_poly_reset.patch patches/ego_planner_align_start_state.patch patches/ego_planner_lock_to_line.patch /tmp/
 RUN cd /opt/ego_planner_ws/src \
     && (git apply -p3 --check /tmp/ego_planner_traj_server_relative_poscmd.patch \
         && git apply -p3 /tmp/ego_planner_traj_server_relative_poscmd.patch \
@@ -879,7 +879,13 @@ RUN cd /opt/ego_planner_ws/src \
         || echo "!! ego_planner_max_vel_runtime.patch 未能自动应用，需人工核对后手动改 plan_manage/src/planner_manager.cpp：reboundReplan() 开头重读一次 manager/max_vel 写回 pp_.max_vel_。原来这个参数只在 initPlanModules() 读一次，运行时 ros2 param set 不生效，编队起步没法让长机缓慢加速。只改 pp_.max_vel_（进初值多项式的梯形时间分配），optimization/max_vel 那个动力学可行性罚项不动 !!") \
     && (git apply -p3 --check /tmp/ego_planner_poly_reset.patch \
         && git apply -p3 /tmp/ego_planner_poly_reset.patch \
-        || echo "!! ego_planner_poly_reset.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp 的 planFromCurrentTraj()：新参数 fsm/poly_reset_period_s（默认0=关闭，行为不变）让\"用多项式重置初值\"定期发生一次，切断\"弯被上一条轨迹一路继承\"。重置前必须确认起点到局部目标的直线在膨胀图上是通的——多项式种子不看障碍物，正绕障时重置会让 A* 重新选边、飞机当场拐一下 !!")
+        || echo "!! ego_planner_poly_reset.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp 的 planFromCurrentTraj()：新参数 fsm/poly_reset_period_s（默认0=关闭，行为不变）让\"用多项式重置初值\"定期发生一次，切断\"弯被上一条轨迹一路继承\"。重置前必须确认起点到局部目标的直线在膨胀图上是通的——多项式种子不看障碍物，正绕障时重置会让 A* 重新选边、飞机当场拐一下 !!") \
+    && (git apply -p3 --check /tmp/ego_planner_align_start_state.patch \
+        && git apply -p3 /tmp/ego_planner_align_start_state.patch \
+        || echo "!! ego_planner_align_start_state.patch 未能自动应用，需人工核对后手动改 plan_manage/src/ego_replan_fsm.cpp 的 callReboundReplan()：在 getLocalTarget() 之后、reboundReplan() 之前，把 start_vel_/start_acc_ **投影**到 start_pt_->local_target_pt_ 方向、清掉横向分量（新参数 fsm/align_start_state，默认 false=行为不变；fsm/align_max_lat_vel 是横向分量限幅）。⚠ 本 patch 的上下文包含 ego_planner_poly_reset.patch 加进去的行，必须排在它**之后**应用 !!") \
+    && (git apply -p3 --check /tmp/ego_planner_lock_to_line.patch \
+        && git apply -p3 /tmp/ego_planner_lock_to_line.patch \
+        || echo "!! ego_planner_lock_to_line.patch 未能自动应用，需人工核对后手动改 bspline_opt（.h 加 6 个成员 + 2 个方法声明；.cpp 的 setParam() 加 optimization/lock_to_line|lock_max_init_dev|lock_min_len 三参数，新增 setupLineLock()/projectGradToLine() 两方法，rebound_optimize()/refine_optimize() 入口各调一次 setupLineLock()，combineCostRebound()/combineCostRefine() 的 memcpy 之前各调一次 projectGradToLine(grad_3D)，两处碰撞 restart 里 lock_active_=false 解锁）。默认 false=行为不变。⚠ 本 patch 的 .cpp hunk 行号是在 terminal_collision_check/astar_diag 两个同文件 patch **之后**算的，必须排在它们后面应用 !!")
 COPY src/ego_planner_bridge /opt/ego_planner_ws/src/ego_planner_bridge
 RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
     source /opt/ros/humble/setup.bash \
@@ -1103,29 +1109,14 @@ RUN --mount=type=cache,target=/ccache,id=ai-uav-ccache \
 #     传感器是否严格共点未核实）——真机部署前需要单独核实。仅编译进
 #     镜像，不代表已经过完整实测验证。
 # ============================================================
-COPY staging/pointlio_ws_src/point_lio_ros2 /opt/point_lio_ws/src/point_lio
-COPY patches/point_lio_avia_custom_msg.patch patches/point_lio_docker_sim_launch.patch patches/point_lio_high_freq_diag.patch patches/point_lio_drop_stale_lidar_frames.patch patches/point_lio_arm_openmp.patch /tmp/
-RUN cd /opt/point_lio_ws/src/point_lio \
-    && (git apply --check /tmp/point_lio_avia_custom_msg.patch && git apply /tmp/point_lio_avia_custom_msg.patch \
-        || echo "!! point_lio_avia_custom_msg.patch 未能自动应用，需人工核对后手动改 package.xml、CMakeLists.txt、src/preprocess.h、src/preprocess.cpp、src/laserMapping.cpp !!") \
-    && (git apply --check /tmp/point_lio_docker_sim_launch.patch && git apply /tmp/point_lio_docker_sim_launch.patch \
-        || echo "!! point_lio_docker_sim_launch.patch 未能自动应用，需人工核对后手动改 launch/mapping_mid360.launch.py !!") \
-    && (git apply --check /tmp/point_lio_high_freq_diag.patch && git apply /tmp/point_lio_high_freq_diag.patch \
-        || echo "!! point_lio_high_freq_diag.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp !!") \
-    && (git apply --check /tmp/point_lio_drop_stale_lidar_frames.patch && git apply /tmp/point_lio_drop_stale_lidar_frames.patch \
-        || echo "!! point_lio_drop_stale_lidar_frames.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp 的livox_pcl_cbk/standard_pcl_cbk（点云buffer要改成只保留最新一帧，不能无限积压） !!") \
-    && (git apply --check /tmp/point_lio_arm_openmp.patch && git apply /tmp/point_lio_arm_openmp.patch \
-        || echo "!! point_lio_arm_openmp.patch 未能自动应用，需人工核对后手动改 CMakeLists.txt !!")
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
-    apt-get update \
-    && source /opt/ros/humble/setup.bash \
-    && source /opt/livox_ws/install/setup.bash \
-    && cd /opt/point_lio_ws \
-    && rosdep update \
-    && rosdep install --from-paths src --ignore-src -r -y || true \
-    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
-
+# 2026-10-16 **已移除**（用户要求）：point_lio（SLAM 后端）在本项目里从来没被启动过。
+# 仿真和真机的定位都走 LOCALIZATION_SOURCE=uwb_imu，entrypoint 的那条分支
+# 「定位模式=uwb_imu：跳过DLIO」整个绕开了 SLAM——/{ns}/dlio/odom_node/odom
+# 这个被 12 个节点订阅的"里程计总线"实际由 local_position_readback_node
+# （PX4 local_position 回读）发布，只是**沿用了 DLIO 的话题名**；
+# deskewed 点云则由 gt_cloud_bridge_node 转发。所以删掉它运行时零影响，
+# 省的是镜像体积。要恢复：git 历史里取回这几层，并把 entrypoint 里
+# SLAM_BACKEND 的对应分支改回来。
 # ============================================================
 # 7c. FAST-LIO2（hku-mars/FAST_LIO官方ROS2分支，2026-09-07新增）——第三个
 #     可选SLAM后端，仍通过SLAM_BACKEND环境变量切换（dlio/point_lio/
@@ -1227,31 +1218,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 #       SLAM_BACKEND=fast_lio的fail fast——去掉guard只代表"技术上接通
 #       了"，不代表这条链路已经过真机验证。
 # ============================================================
-COPY staging/pointlio_ws_src/FAST_LIO_official_ros2 /opt/fastlio_ws/src/fast_lio
-COPY patches/fast_lio_namespace.patch patches/fast_lio_docker_sim_launch.patch patches/fast_lio_hw_launch.patch patches/fast_lio_pointcloud_qos.patch patches/fast_lio_imu_last_lidar_end_time_init.patch patches/fast_lio_arm_openmp.patch /tmp/
-RUN cd /opt/fastlio_ws/src/fast_lio \
-    && (git apply --check /tmp/fast_lio_namespace.patch && git apply /tmp/fast_lio_namespace.patch \
-        || echo "!! fast_lio_namespace.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp !!") \
-    && (git apply --check /tmp/fast_lio_docker_sim_launch.patch && git apply /tmp/fast_lio_docker_sim_launch.patch \
-        || echo "!! fast_lio_docker_sim_launch.patch 未能自动应用，需人工核对后手动新增 launch/fast_lio_docker_sim.launch.py !!") \
-    && (git apply --check /tmp/fast_lio_hw_launch.patch && git apply /tmp/fast_lio_hw_launch.patch \
-        || echo "!! fast_lio_hw_launch.patch 未能自动应用，需人工核对后手动新增 launch/fast_lio_hw.launch.py（2026-09-08新增，DEPLOY_TARGET=hw时fast_lio的launch文件，点云密度调参未验证，见该文件头docstring） !!") \
-    && (git apply --check /tmp/fast_lio_pointcloud_qos.patch && git apply /tmp/fast_lio_pointcloud_qos.patch \
-        || echo "!! fast_lio_pointcloud_qos.patch 未能自动应用，需人工核对后手动改 src/laserMapping.cpp（Livox CustomMsg订阅改用rclcpp::SensorDataQoS()，否则收不到Gazebo发布的点云） !!") \
-    && (git apply --check /tmp/fast_lio_imu_last_lidar_end_time_init.patch && git apply /tmp/fast_lio_imu_last_lidar_end_time_init.patch \
-        || echo "!! fast_lio_imu_last_lidar_end_time_init.patch 未能自动应用，需人工核对后手动改 src/IMU_Processing.hpp（last_lidar_end_time_成员变量补上初始值-1，避免读到未初始化堆内存） !!") \
-    && (git apply --check /tmp/fast_lio_arm_openmp.patch && git apply /tmp/fast_lio_arm_openmp.patch \
-        || echo "!! fast_lio_arm_openmp.patch 未能自动应用，需人工核对后手动改 CMakeLists.txt（架构判断加上aarch64/arm64匹配，Jetson Orin NX Super真机实测确认CPU占用/稳定性良好后新增，2026-09-08，原版这个判断只认x86/amd64，Jetson走else分支导致laserMapping.cpp里唯一那处#pragma omp parallel for热点循环从未真正开启过、全程单线程，见该patch注释里的完整根因分析） !!")
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/ccache,id=ai-uav-ccache \
-    apt-get update \
-    && apt-get install -y --no-install-recommends python3-dev ros-humble-rclcpp-components ros-humble-std-srvs ros-humble-visualization-msgs \
-    && source /opt/ros/humble/setup.bash \
-    && source /opt/livox_ws/install/setup.bash \
-    && cd /opt/fastlio_ws \
-    && rosdep update \
-    && rosdep install --from-paths src --ignore-src -r -y || true \
-    && colcon build --parallel-workers "${BUILD_JOBS}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+# 2026-10-16 **已移除**（用户要求）：fast_lio（SLAM 后端）在本项目里从来没被启动过。
+# 仿真和真机的定位都走 LOCALIZATION_SOURCE=uwb_imu，entrypoint 的那条分支
+# 「定位模式=uwb_imu：跳过DLIO」整个绕开了 SLAM——/{ns}/dlio/odom_node/odom
+# 这个被 12 个节点订阅的"里程计总线"实际由 local_position_readback_node
+# （PX4 local_position 回读）发布，只是**沿用了 DLIO 的话题名**；
+# deskewed 点云则由 gt_cloud_bridge_node 转发。所以删掉它运行时零影响，
+# 省的是镜像体积。要恢复：git 历史里取回这几层，并把 entrypoint 里
+# SLAM_BACKEND 的对应分支改回来。
 
 # ============================================================
 # 8. 真实UWB驱动（nooploop LinkTrack，nlink_parser2官方仓库 + 本项目自己写的

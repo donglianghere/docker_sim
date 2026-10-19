@@ -105,7 +105,7 @@ cd contestant_sim && pyright        # 查一遍自己的程序
 
 ```bash
 ./run_test.sh t1              # 物资抓取（默认 NX02，带夹爪）
-./run_test.sh t3 --n          # 高层火情，用 N 点看 1# 楼
+./run_test.sh t3 --n          # 高层火情，用 N 点看 3# 楼
 ./run_test.sh t4 --nx02       # 避障，指定用 NX02
 ./run_test.sh t1 --restart    # 强制重起仿真（默认复用已在跑的）
 ```
@@ -124,7 +124,7 @@ cd contestant_sim && pyright        # 查一遍自己的程序
 
 ```bash
 # 飞之前：航线安全。算每一段离所有障碍的余量，用 goto_direct 时尤其要跑
-python3 tools/check_route.py --route "3,3 3,22 17,22 17,16"
+python3 tools/check_route.py --route "3,3 3,22 17,22 17,12.5"
 
 # 飞之后：时间线
 python3 tools/timeline.py --events     # 两机事件并排，排编队死锁用

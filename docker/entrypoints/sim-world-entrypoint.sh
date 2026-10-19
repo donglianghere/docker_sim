@@ -151,6 +151,51 @@ if [ "${WORLD_ENV}" = "sample_room" ]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# 把 gzserver 绑到大核（2026-10-16）
+# ---------------------------------------------------------------------------
+# 为什么要绑：gzserver 是单线程瓶颈，实时因子直接取决于它那一个线程的速度。
+# Intel 混合架构（12 代起的 HX/H 系列）上调度器可能把它甩到 E 核，单线程性能
+# 只有 P 核的 55~65%，实时因子就掉下来——而本项目**所有超时都是墙钟**
+# （SDK 的 _poll_until 用 time.monotonic），实时因子掉一半等于把所有超时预算
+# 砍一半，表现成"卡顿 + 逻辑出错"（goto 判不到点、精降没降完就交棒、事件等不到）。
+#
+# 核号**不写死**：内核在混合架构上直接给出分组，/sys/devices/cpu_core/cpus
+# 就是 P 核列表（i9-14900HX 上是 0-15，i7-14650HX 上会是别的范围），所以这套
+# 系统克隆到任何一台机器都能自己找对大核。非混合架构（AMD、老 Intel）没有这个
+# 文件，那时不绑——它们本来就没有大小核之分。
+bind_gzserver_to_pcores() {
+    local pcores pid n=0
+    pcores="$(cat /sys/devices/cpu_core/cpus 2>/dev/null || true)"
+    if [ -z "$pcores" ]; then
+        echo "== [sim-world] 非 Intel 混合架构（没有 cpu_core/cpus），gzserver 不绑核 =="
+        return 0
+    fi
+    # 等 gzserver 起来。用 pgrep -x（精确匹配**进程名**）不是 -f——后者会把
+    # 这条命令自己也匹配进去（踩过三次，见 feedback_avoid_self_matching_pkill）。
+    while [ "$n" -lt 90 ]; do
+        # ⚠️ 必须有 `|| true`：本脚本开头是 `set -eo pipefail`，gzserver 还没起来
+        # 时 pgrep 返回 1，赋值语句的退出码就是它 —— **整个后台子 shell 当场静默
+        # 退出**，一行日志都不会留（2026-10-16 实测就是这么失效的，手动跑同一条
+        # taskset 却成功，白查了一轮）。
+        pid="$(pgrep -x gzserver 2>/dev/null | head -1 || true)"
+        [ -n "$pid" ] && break
+        sleep 1; n=$((n + 1))
+    done
+    if [ -z "$pid" ]; then
+        echo "== [sim-world] 90 秒没等到 gzserver 进程，跳过绑核 =="
+        return 0
+    fi
+    # -a 连它的所有线程一起绑（gzserver 有物理引擎/传感器等多个线程）。
+    if taskset -apc "$pcores" "$pid" >/dev/null 2>&1; then
+        echo "== [sim-world] gzserver(PID $pid) 已绑到大核 CPU $pcores"
+        echo "   （E 核 $(cat /sys/devices/cpu_atom/cpus 2>/dev/null || echo '?') 留给其它容器） =="
+    else
+        echo "== [sim-world] taskset 失败（缺 util-linux 或权限不足），gzserver 未绑核 =="
+    fi
+}
+bind_gzserver_to_pcores &
+
 echo "== [sim-world] 启动Gazebo世界 env=${WORLD_ENV} rviz_config=${RVIZ_CONFIG} =="
 ros2 launch mighty base_mighty.launch.py \
     env:="${WORLD_ENV}" use_gazebo_gui:="${USE_GAZEBO_GUI}" \
@@ -355,7 +400,18 @@ for i in $(seq 1 "${NUM_AGENTS}"); do
 done
 
 echo "== [sim-world] 全部模型spawn完毕，等物理稳定后再统一起PX4 SITL实例 =="
-sleep 3
+# 2026-10-13：从写死的 3 秒改成 SPAWN_SETTLE_S（默认 12）。
+# 3 秒不够，而且**最后一个 spawn 的飞机受害最重**（它从落地弹稳到 PX4 开始
+# 估加速度计零偏之间的时间最短）。实测 NX02 的 IMU 水平偏置被烤成
+# √(0.403²+0.380²)=0.554 m/s²（机体真实姿态是 0.00°，完全水平），而
+# EKF2_ABL_LIM=0.4 是偏置修正上限 ⇒ **EKF2 永远修不掉**，残余约 0.15 m/s²
+# 持续泄进速度估计，静止时 odom 报 0.29 m/s（NX01 只有 0.025）。
+# pt4ctrl 写死 `odom_data.v.norm() > 0.1` 拒绝非静止起飞，于是 NX02 连拒 15 次、
+# 永远起不来——"为什么总是 NX02"就是这个先后顺序竞态。
+# 跟上面那段注释记录的"上一次"是同一类问题的镜像版本：那次受害者是先 spawn
+# 的 NX01（被后面的重活抢物理循环），这次是后 spawn 的 NX02（稳定时间不够）。
+# Gazebo 重载下 RTF < 1，所以墙钟 3 秒可能只有一两秒仿真时间。
+sleep "${SPAWN_SETTLE_S:-12}"
 
 # 2026大赛任务系统阶段7.2/7.3：自动裁判+场景重置，两个都归属sim-world
 # 容器（需要读写Gazebo模型状态的权限，见设计方案5.3容器归属表），不
@@ -398,6 +454,60 @@ ros2 run contest_mission scenario_reset_node \
     ros2 service call /scenario_reset_node/reset_scenario std_srvs/srv/Trigger "{}"
 ) &
 
+# ------------------------------------------------------------------
+# 2026-10-18：把 EKF2 的融合窗口开大，并把 vision 样本整体往过去挪 150 ms
+# ——治"飞机飞行中途无故降落"。**必须在起 PX4 之前改**，因为飞控启动时才读
+# 这个 airframe 文件（`-d "$PWD/ROMFS/px4fmu_common"`）。
+#
+# 现象与链条（当天实测，两架都掉过）：EKF2 停止融合 vision（cs_ev_pos/hgt/yaw
+# 1->0）-> vehicle_local_position 的 xy_valid/v_xy_valid 变 0 -> mode 从
+# OFFBOARD 掉成 ALTCTL -> 没有遥控器输入 -> mc_pos_control `invalid setpoints`
+# -> `Failsafe: blind land` 把飞机放到地上（NX02 从 2.15 m、NX01 从 1.94 m）。
+# 根因不是数据断流：停摆那十几秒 vehicle_visual_odometry 一直 33.3 Hz 在到
+# （最大间隔 48 ms、test_ratio 全程 0.00、innovation ±2 cm），而
+# `estimator_aid_src_ev_pos` 整段空白——**数据到了 uORB，EKF2 取不到**。
+# 上游根因是**两套参考时间源**：PX4 走 Gazebo 步进时钟、ROS 侧走墙钟，实测
+# RTF=0.9992、以 -0.83 ms/s 分离，mavros 每 51 s 重置一次时间同步，阶跃瞬间
+# vision 时间戳跳 ±100 ms，样本落到融合窗外。
+#
+# 为什么是这两个数：偏移实测 min -101.8 / p50 -9.5 / p95 +52.4 / max +117.3 ms，
+# **跨度 219 ms 超过出厂的 EKF2_DELAY_MAX=200**，单靠 EV_DELAY 平移盖不住两头。
+#   DELAY_MAX 400 -> 窗口 [now-400, now]
+#   EV_DELAY  150 -> 样本落在 [now-252, now-33]，两个方向都在窗口内
+# 🔴 **只改 EV_DELAY 不改 DELAY_MAX 会把飞机摔了**（当天实测）：先只设了
+#   EV_DELAY=150，负偏移 -98 叠加成 -248 ms、超出 200 ms buffer，样本因**太旧**
+#   被丢，照样停摆 17.8 s、NX01 从 1.94 m 掉到 0.00 m——而同样的 -98 ms 在
+#   EV_DELAY=0 下完全无害。两行必须一起生效，所以写在同一处、一次注入。
+#
+# 为什么不写进 patches/px4_iris_ekf2_vision_aiding.patch：那个 patch 的 COPY 在
+# Dockerfile 第 44 行，改它会让后面 500 行的层全部失效、连 PX4 和四个 colcon
+# 一起重编（几十分钟）；entrypoint 的 COPY 在倒数第四层，改这里重建是秒级。
+# 代价：EKF2 融合时刻更滞后、当前状态更多靠外推，控制带宽略降。
+# 回退（不用重建镜像）：SIM_EKF2_EV_WINDOW=off docker compose up -d sim-world
+# 判定修没修好的唯一硬指标：跑一轮后看 ulog 的 `estimator_aid_src_ev_pos`
+# 还有没有 >1 s 的空档（修之前 NX01 18 分钟 10 次）。
+# ------------------------------------------------------------------
+AIRFRAME_10015=/opt/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris
+if [ "${SIM_EKF2_EV_WINDOW:-on}" = "on" ]; then
+    # 幂等：容器重建后文件回到镜像初始状态，这里只在没注入过时追加
+    if ! grep -q "EKF2_DELAY_MAX" "$AIRFRAME_10015"; then
+        cat >> "$AIRFRAME_10015" <<'EKF2_WINDOW_EOF'
+
+# sim-world-entrypoint.sh 注入（SIM_EKF2_EV_WINDOW=on）：见该脚本里的长注释
+param set-default EKF2_DELAY_MAX 400
+param set-default EKF2_EV_DELAY 150
+EKF2_WINDOW_EOF
+    fi
+    # 断言：注入失败就当场停，不能让飞控带着出厂窗口起来、再在空中掉下去
+    if ! grep -q "^param set-default EKF2_DELAY_MAX 400$" "$AIRFRAME_10015"        || ! grep -q "^param set-default EKF2_EV_DELAY 150$" "$AIRFRAME_10015"; then
+        echo "!! [sim-world] EKF2 融合窗口注入失败（$AIRFRAME_10015），拒绝继续启动 !!" >&2
+        exit 1
+    fi
+    echo "== [sim-world] EKF2 融合窗口已注入：EKF2_DELAY_MAX=400 + EKF2_EV_DELAY=150 =="
+else
+    echo "== [sim-world] SIM_EKF2_EV_WINDOW=off：保持 PX4 出厂窗口（DELAY_MAX=200 / EV_DELAY=0），EV 可能周期性停摆 =="
+fi
+
 for i in $(seq 1 "${NUM_AGENTS}"); do
     NS="${AGENT_NS[$i]}"
     echo "== [sim-world] 启动 PX4 SITL 实例 $((i-1)) for ${NS} =="
@@ -412,6 +522,63 @@ for i in $(seq 1 "${NUM_AGENTS}"); do
     ) &
     sleep 2
 done
+
+# ---- 2026-10-17：收窄 MAVLink 流速率 ----
+# 背景：仿真反复出现"飞着飞着趴地"，根因链是 CPU 峰值打满 → mavros(单进程
+# 113%) 被调度延迟 → timesync 把累积偏移一次性清零(实测 offset 0.1277→0.0003，
+# stamp 前跳 127ms) → PX4 报 time jump → mc_pos_control 判 setpoint 失效 →
+# Failsafe: blind land。见记忆 project_px4_param_relax_servicetype。
+#
+# 为什么在这里下发、而不是改 px4-rc.mavlink 或固件默认值：
+#   · px4-rc.mavlink 里的覆盖跟 configure_streams_to_default() 有竞态，历史
+#     注释已记"实测没生效"；等实例完全起来后再发才稳（实测 100→50Hz 生效）。
+#   · 改固件默认值(mavlink_main.cpp)要重编译 PX4，而这里只动 entrypoint 末层。
+#   · 多实例必须用 `--instance N`，不带它 client 永远连实例 0
+#     （`-i N` 会被当成 mavlink 子命令自己的参数，静默打 usage 然后什么都没改）。
+#
+# 速率依据（静态分析 src/ scripts/ contestant_sim/ 里实际订阅的话题 + 实测对照）：
+#   · LOCAL_POSITION_NED 喂 local_position/odom(30处引用)+pose，是最核心的反馈 → 50
+#   · HIGHRES_IMU / ATTITUDE_QUATERNION 融合出 imu/data 喂 pt4ctrl → 50
+#   · ODOMETRY 和 LOCAL_POSITION_NED_COV 实测是**白发的**：把它们单独降到 1Hz，
+#     local_position/odom 频率纹丝不动(99.7→100.2/100.0) → 没有任何消费者 → 10
+#   · ATTITUDE 没有订阅者(imu/data 走的是 ATTITUDE_QUATERNION) → 10
+#   · DISTANCE_SENSOR 喂 hrlv_ez4_pub，是 line_goto 仿地高度环的唯一输入
+#     (见记忆 project_altitude_chain_real)。它原本只有 10Hz(实测到达 9Hz)，
+#     2026-10-17 用户要求**提到 50Hz**——这条是提速不是降速：仿地环的 agl
+#     更新越快，"地面抬高"判定越跟得上，高度指令抖动越小。
+#   · GCS 链路(18570)那 9 条 50Hz：仿真里没有 QGC 连它，地面站走 ROS 话题 → 全 10
+# ⚠️ HIGHRES_IMU 一度砍到 50，2026-10-17 **已回滚到 200**：它喂 imu/data_raw，
+#    而 uwb_imu_fusion_node 吃这路 IMU 做融合、再发 vision_pose/pose_cov 给 EKF2
+#    —— 这是 uwb_imu 模式下 EKF2 唯一的位置输入。砍到 50 之后实测出现
+#    **NX02 的 odom 瞬时发散 7 米**（odom 报 x=24.47 在场地外，而真值全程最大
+#    只有 17.28），随后位置被判不可信、降级 ALTCTL、invalid setpoints、盲降。
+#    这条是整条链上唯一直接作用于定位的流，不要再往下砍。
+(
+    sleep 25                       # 等两个实例都 boot_complete，避开上面说的竞态
+    PX4_MAVLINK_CLI=/opt/PX4-Autopilot/build/px4_sitl_default/bin/px4-mavlink
+    cd /opt/PX4-Autopilot || exit 0
+    for i in $(seq 1 "${NUM_AGENTS}"); do
+        inst=$((i-1)); off_port=$((14580+inst)); gcs_port=$((18570+inst))
+        # 板外控制链路：核心反馈降到 50，白发的降到 10
+        for spec in "LOCAL_POSITION_NED 50" "HIGHRES_IMU 200" "ATTITUDE_QUATERNION 50" \
+                    "DISTANCE_SENSOR 50" \
+                    "ATTITUDE 10" "ODOMETRY 10"; do
+            # 注：LOCAL_POSITION_NED_COV 不在 onboard 链路的流表里，下发会被
+            # PX4 回 "stream not found"（无害但刷错误日志），所以不列。
+            set -- ${spec}
+            "${PX4_MAVLINK_CLI}" --instance "${inst}" stream -r "$2" -s "$1" -u "${off_port}" \
+                >/dev/null 2>&1 || true
+        done
+        # GCS 链路：仿真里没有客户端，全部压到 10
+        for sname in POSITION_TARGET_LOCAL_NED LOCAL_POSITION_NED GLOBAL_POSITION_INT \
+                     ATTITUDE ATTITUDE_QUATERNION ATTITUDE_TARGET SERVO_OUTPUT_RAW_0 \
+                     RC_CHANNELS OPTICAL_FLOW_RAD; do
+            "${PX4_MAVLINK_CLI}" --instance "${inst}" stream -r 10 -s "${sname}" -u "${gcs_port}" \
+                >/dev/null 2>&1 || true
+        done
+        echo "== [sim-world] 实例 ${inst} 的 MAVLink 流速率已收窄（核心 50Hz / 其余 10Hz）=="
+    done
+) &
 
 echo "== [sim-world] 启动 UWB 真值模拟节点（读取双机ground truth，输出frame_align+各机/uwb/pose_abs绝对位置，供uwb_origin_bridge起飞点一键锁定使用）=="
 # 2026-08-12：publish_rate_hz从默认10Hz显式提到50Hz——LOCALIZATION_SOURCE=
@@ -448,6 +615,9 @@ echo "== [sim-world] 启动 UWB 真值模拟节点（读取双机ground truth，
 ros2 run uwb_sim uwb_ground_truth_node \
     --ros-args -p num_agents:="${NUM_AGENTS}" -p namespace_prefix:=NX \
         -p range_noise_std:="${UWB_NOISE_STD:-0.05}" \
+        # 2026-10-13：yaw 噪声原来**根本没下发**，一直在用节点默认 2.0°。
+        # uwb_imu 模式下这个 yaw 会进 vision_pose -> EKF2，是真噪声源之一。
+        -p yaw_noise_std_deg:="${UWB_YAW_NOISE_STD_DEG:-2.0}" \
         -p latency_ms:=30.0 -p publish_rate_hz:=50.0 \
         -p publish_frame_align:="${PUBLISH_FRAME_ALIGN:-true}" \
         -p publish_truth_pose:="${UWB_PUBLISH_TRUTH:-true}" \

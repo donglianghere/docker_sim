@@ -5,8 +5,23 @@
 {
   "extraPaths": ["./src/contest_sdk"],
   // 只查选手程序。整个仓库一起查会冒出大量跟选手无关的告警，淹掉真问题。
-  "include": ["contestant_sim/*.py"],
-  "exclude": ["**/__pycache__", "contestant_sim/API参考"],
+  // 2026-10-04 补全：原来只有 contestant_sim/*.py 一行——真机那一侧整个没纳入，
+  // 两边的 单机测试/ 子目录也没纳入，于是那些文件在编辑器里没有任何提示。
+  "include": [
+    "contestant_real/*.py", "contestant_real/单机测试/*.py",
+    "contestant_sim/*.py", "contestant_sim/单机测试/*.py"
+  ],
+  "exclude": ["**/__pycache__", "**/API参考", "**/*.bak*"],
+  // ⚠️ executionEnvironments 里的 extraPaths 是**相对项目根**（本文件所在目录），
+  // 不是相对那条 env 的 root。2026-10-04 按后者写过一次（"../src/contest_sdk"），
+  // 路径指到仓库外面去了，于是 `sdk.` 完全没有补全、而 `venue` 却正常——
+  // 后者是顶层 extraPaths 兜住的，很容易误判成"配置生效了"。
+  "executionEnvironments": [
+    {"root": "contestant_real/单机测试", "extraPaths": ["./src/contest_sdk", "./contestant_real"]},
+    {"root": "contestant_real", "extraPaths": ["./src/contest_sdk", "./contestant_real"]},
+    {"root": "contestant_sim/单机测试", "extraPaths": ["./src/contest_sdk", "./contestant_sim"]},
+    {"root": "contestant_sim", "extraPaths": ["./src/contest_sdk", "./contestant_sim"]}
+  ],
   "reportMissingImports": "none",
   "reportMissingModuleSource": "none",
   "typeCheckingMode": "basic"

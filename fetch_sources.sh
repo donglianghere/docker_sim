@@ -144,7 +144,11 @@ echo "#    暂不接入任何镜像的Dockerfile，只clone到staging/供分析�
 echo "#    官方hku-mars/Point-LIO没有ROS2分支，dfloreaa是目前star数   #"
 echo "#    最高(244)的第三方ROS2移植，支持Livox系列+Unitree Unilidar #"
 echo "############################################"
-clone_pin pointlio https://github.com/dfloreaa/point_lio_ros2.git pointlio_ws_src/point_lio_ros2 a8e2d0d5090af97ead8dd4fac3d37cf3dbb33ff7
+# 2026-10-17 停用：Dockerfile.flight-stack 里的 point_lio / fast_lio 构建块已删
+# （LOCALIZATION_SOURCE=uwb_imu 整个跳过 SLAM，这三个后端从没被启动过），
+# staging/pointlio_ws_src 那 1.4 GB 源码也已删除。要恢复 SLAM 选型评估时
+# 把下面三处的注释去掉即可。
+# clone_pin pointlio https://github.com/dfloreaa/point_lio_ros2.git pointlio_ws_src/point_lio_ros2 a8e2d0d5090af97ead8dd4fac3d37cf3dbb33ff7
 
 echo "############################################"
 echo "# 9. hku-mars/Point-LIO 官方仓库（ROS1，master分支，评估用）#"
@@ -153,11 +157,12 @@ echo "#    是point-lio-with-grid-map（2026-06-13还在更新），这里 #"
 echo "#    pin的是master——第三方ROS2移植(dfloreaa)fork自的就是   #"
 echo "#    这个分支，作为算法基线跟第三方移植做逐项对比更合适     #"
 echo "############################################"
-clone_pin pointlio_ros1 https://github.com/hku-mars/Point-LIO.git pointlio_ws_src/Point-LIO_official_ros1 1510c3bbf1743f254d83d0b22fbabb5b2d729f6b
+# 同上，2026-10-17 停用
+# clone_pin pointlio_ros1 https://github.com/hku-mars/Point-LIO.git pointlio_ws_src/Point-LIO_official_ros1 1510c3bbf1743f254d83d0b22fbabb5b2d729f6b
 # 带ikd-Tree/IKFoM两个submodule，clone_pin不处理submodule，跟前面PX4/nlink_parser2一样单独补一次
-if [[ -d pointlio_ws_src/Point-LIO_official_ros1/.git ]]; then
-  git -C pointlio_ws_src/Point-LIO_official_ros1 submodule update --init --recursive
-fi
+# if [[ -d pointlio_ws_src/Point-LIO_official_ros1/.git ]]; then
+#   git -C pointlio_ws_src/Point-LIO_official_ros1 submodule update --init --recursive
+# fi
 
 echo "############################################"
 echo "# 10. hku-mars/FAST_LIO 官方仓库ROS2分支（评估用）           #"
@@ -166,11 +171,12 @@ echo "#     Ericsii/FAST_LIO_ROS2同一血统/同一套代码，这里改clone  
 echo "#     官方仓库本身的ROS2分支，只用于源码级分析，不接入        #"
 echo "#     任何镜像构建                                           #"
 echo "############################################"
-clone_pin fastlio2ros2 https://github.com/hku-mars/FAST_LIO.git pointlio_ws_src/FAST_LIO_official_ros2 a4743b095409588842a5b30ddfa27e29d2f99164
+# 同上，2026-10-17 停用
+# clone_pin fastlio2ros2 https://github.com/hku-mars/FAST_LIO.git pointlio_ws_src/FAST_LIO_official_ros2 a4743b095409588842a5b30ddfa27e29d2f99164
 # 带ikd-Tree一个submodule，同上单独补一次
-if [[ -d pointlio_ws_src/FAST_LIO_official_ros2/.git ]]; then
-  git -C pointlio_ws_src/FAST_LIO_official_ros2 submodule update --init --recursive
-fi
+# if [[ -d pointlio_ws_src/FAST_LIO_official_ros2/.git ]]; then
+#   git -C pointlio_ws_src/FAST_LIO_official_ros2 submodule update --init --recursive
+# fi
 
 cat <<'EOF'
 

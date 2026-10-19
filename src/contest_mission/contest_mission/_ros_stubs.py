@@ -26,7 +26,10 @@ _ATTRS = {
     'rclpy.qos': ['QoSProfile', 'ReliabilityPolicy'],
     'rclpy.time': ['Time'],
     'rcl_interfaces.msg': ['Parameter', 'ParameterType', 'ParameterValue', 'SetParametersResult'],
-    'rcl_interfaces.srv': ['SetParameters'],
+    # GetParameters 是 2026-10-05 relay_mode 那批改动引入的（节点第 104 行
+    # `from rcl_interfaces.srv import GetParameters, SetParameters`），桩当时
+    # 没跟上，两个离线单元测试从那天起就 ImportError 跑不起来了。2026-10-12 补。
+    'rcl_interfaces.srv': ['GetParameters', 'SetParameters'],
     'geometry_msgs.msg': ['PoseStamped'],
     'nav_msgs.msg': ['Odometry'],
     'quadrotor_msgs.action': ['FormationFollow'],

@@ -42,7 +42,10 @@ GROUND = 'fire_point_marker'
 HIGH = 'fire_apriltag_marker'
 
 #: G 点世界坐标。侦察机进到这个半径内就算"过了 G 点"。
-G_XY = (17.0, 16.0)
+#: 2026-10-11 用户把 G 从 (17,16) 挪到 (17,12.5)（E 同时挪到 (10,12.5)）——
+#: 这个值必须跟 sample_room_layout.yaml 的 route_waypoints 里的 G 一致，
+#: 对不上的话裁判要么永远等不到"过 G 点"、一轮火情都不出，要么在错的地方出题。
+G_XY = (17.0, 12.5)
 G_NEAR_M = 1.5
 POLL_S = 0.2
 

@@ -50,6 +50,29 @@ services:
                            # 撞车导致指令发错目标。GCS网页"仿真模式"按钮切换时
                            # 会让GCS自己的容器也临时切到这个值，见gcs/docker-
                            # compose.yml的GCS_ROS_DOMAIN_ID。
+      - SIM_EKF2_EV_WINDOW=${SIM_EKF2_EV_WINDOW:-on}
+                                    # 2026-10-18：on=由 entrypoint 往 airframe 文件注入
+                                    # EKF2_DELAY_MAX=400 + EKF2_EV_DELAY=150（治 EV 源周期性
+                                    # 停摆导致的"飞行中途无故降落"，理由见 entrypoint 里的长
+                                    # 注释）。off=保持 PX4 出厂窗口做对照。⚠️ 这一行的透传必须
+                                    # 留着，否则宿主机 `VAR=x docker compose up` 进不到容器。
+      - SIM_ENABLE_LOCKSTEP=${SIM_ENABLE_LOCKSTEP:-1}
+                                    # 2026-10-18：PX4 gazebo-classic 插件的 lockstep 开关，
+                                    # 由 docker/scripts/gen_iris_mid360_sdf.py 的 set_lockstep()
+                                    # 写进 spawn 用的 sdf。**默认 1=开**，也就是 PX4 出厂行为。
+                                    # 当天为了治"两套参考时间源"（PX4 走 Gazebo 步进时钟、ROS 侧
+                                    # 走墙钟，RTF=0.9992 持续分离 ⇒ mavros 每 51 s 重置时间同步
+                                    # ⇒ vision 时间戳阶跃 ±100 ms ⇒ EKF2 的 EV 源停摆十几秒 ⇒
+                                    # 位置失效 ⇒ ALTCTL ⇒ 盲降）试过关掉它，**实测更糟**：编队段
+                                    # 两机同飞、CPU 吃紧时 Gazebo 与 PX4 不再步进同步，传感器
+                                    # 数据迟到，长机 line_goto 直接 tracking_lost（实测位置离
+                                    # 设定点太远）、飞机跑飞后 invalid setpoints -> blind land
+                                    # （22:52 那轮长机掉在 (3.0,17.7)、高度 0.05 m）。lockstep
+                                    # 的本意就是防这个，所以默认留 1。
+                                    # 要再做对照实验就 `SIM_ENABLE_LOCKSTEP=0 docker compose up -d sim-world`
+                                    # ——⚠️ 这一行的透传必须留着：gen 脚本读的是容器里的环境变量，
+                                    # compose 不写进 environment 的话，宿主机 `VAR=x docker compose up`
+                                    # 根本进不到容器（跟真机 compose 不透传 EGO_* 是同一个坑）。
       - WORLD_ENV=${WORLD_ENV:-sample_room}
                                     # 2026-09-30：默认从fire_drill_room改成sample_room。
                                     # 全部任务已对标2026-09-27商定的大赛样题，航点/起降点/
@@ -140,7 +163,10 @@ services:
       # 命令行/.env里显式赋值，例如：
       #   UWB_OUTLIER_PROB=0.1 UWB_OUTLIER_MAG_M=2.0 docker compose up -d
       #   SPAWN_YAW_DEG_NX01=90 SPAWN_YAW_DEG_NX02=180 docker compose up -d
+      - SPAWN_SETTLE_S=${SPAWN_SETTLE_S:-12}        # spawn完等物理稳定[s]，见.env
       - UWB_NOISE_STD=${UWB_NOISE_STD:-0.05}        # 绝对观测噪声σ[m]
+      - UWB_YAW_NOISE_STD_DEG=${UWB_YAW_NOISE_STD_DEG:-2.0}  # yaw噪声σ[度]，
+                                                    # 原来没透传、一直是节点默认2.0
       - UWB_BIAS_X=${UWB_BIAS_X:-0.0}               # 恒定偏置[m]，验证2.4节
       - UWB_BIAS_Y=${UWB_BIAS_Y:-0.0}
       - UWB_BIAS_DRIFT_X=${UWB_BIAS_DRIFT_X:-0.0}   # 偏置漂移率[m/s]，6.2节
@@ -159,6 +185,18 @@ services:
                                   # 不跑规划器、不受这个值影响别的行为。
                                   # 2026-08-10默认改成ego_planner（原默认mighty，
                                   # 显式传PLANNER=mighty可恢复旧默认）。
+      # 2026-10-16：**禁掉 Gazebo 的在线模型库**。不设这个变量时 gazebo 会去连
+      # fuel.ignitionrobotics.org 下载模型，而这台机器（以及比赛现场）上不去外网，
+      # 于是 gzclient 启动后硬等 217 秒超时：
+      #     [gzclient-2] libcurl: (28) Failed to connect to
+      #       fuel.ignitionrobotics.org port 443 after 217307 ms: Connection timed out
+      # 两架飞机的 spawn 正好落在这段阻塞窗口里，gzclient 漏掉了僚机的位姿订阅——
+      # 结果是**画面里僚机永远停在起降点不动，而 gzserver 里它在正常飞**
+      # （实测真值在 (10.5,12.5) 上下起落，画面纹丝不动）。这种"界面骗人"比少一点
+      # 功能危险得多：所有肉眼观察都不可信，排查会被带到完全错误的方向。
+      # 本项目用到的模型全部在本地（PX4 自带 + docker/scripts 现生成），不需要联网。
+      # 空字符串＝不查在线库，gazebo 只用 GAZEBO_MODEL_PATH 里的本地模型。
+      - GAZEBO_MODEL_DATABASE_URI=
       - USE_GAZEBO_GUI=${USE_GAZEBO_GUI:-false}  # 2026-08-21改回参数化默认值——
                                   # 之前写死`true`是TODO.md#11那次排查GUI崩溃
                                   # (OGRE渲染资源路径没source导致的空指针assert)
@@ -326,7 +364,12 @@ services:
                                   # up sim-world flight-stack-nx01`两个服务
                                   # 使用，详见flight-stack-entrypoint.sh文件头
                                   # 和README"单机仿真彩排"一节。
-      - SLAM_BACKEND=${SLAM_BACKEND:-fast_lio}  # 只在LOCALIZATION_SOURCE=uwb_slam/
+      # 2026-10-16 默认值 fast_lio -> dlio：fast_lio 和 point_lio 两个后端当天
+      # 已从镜像移除（它们从未被启动过——定位走 LOCALIZATION_SOURCE=uwb_imu，
+      # 那条分支整个绕开 SLAM）。留着 fast_lio 当默认值的话，哪天有人把
+      # LOCALIZATION_SOURCE 切回 SLAM 模式就会直接撞 entrypoint 的 exit 1。
+      # dlio 仍在镜像里（/opt/dlio_ws），是唯一还能用的后端。
+      - SLAM_BACKEND=${SLAM_BACKEND:-dlio}  # 只在LOCALIZATION_SOURCE=uwb_slam/
                                   # single_uwb_slam/single_slam_only（即"真的
                                   # 起SLAM"这几个值）下生效，dlio=原默认，
                                   # point_lio=2026-08-14新增的可选SLAM后端
@@ -372,6 +415,19 @@ services:
                                   # 四者两架飞机必须给一样的值。2026-08-10默认改成
                                   # px4ctrl（原默认ros2_px4_stack，显式传
                                   # CONTROLLER=ros2_px4_stack可恢复旧默认）。
+      # 2026-10-16：ego_planner **本体**的开关，独立于上面的 PLANNER。
+      # PLANNER 不能拿来关它——position_cmd_relay / line_goto / pillar_detector
+      # 都在 entrypoint 的 `elif PLANNER = ego_planner` 分支里，改 PLANNER 会把
+      # 精降和航点飞行一起关掉。航线飞行 10-13 起走 line_goto，ego_planner 只剩
+      # 地面站指点飞行和避障，仿真调试时可关掉省一个满载核（两架飞机 = 两个核）。
+      # ⚠️ 这一行必须有：本仓库的 compose **没有 env_file**，.env 里的变量不会
+      # 自动进容器，不在这里显式列出来就永远是 entrypoint 里的默认值（同类坑
+      # 已经踩过三次，见 project_sim_hw_migration_gaps）。
+      - EGO_PLANNER_ENABLED=${EGO_PLANNER_ENABLED:-true}
+      # 2026-10-17：rviz_goal_bridge_node 跑在**本容器**（ego_planner 的 launch 里），
+      # 它按 USE_RVIZ 决定起不起。原来 USE_RVIZ 只透传给 sim-world，这里读不到就
+      # 永远是默认 false——关是关掉了，但以后开 RViz 也不会恢复。同类坑第四次。
+      - USE_RVIZ=${USE_RVIZ:-false}
       - PLANNER=${PLANNER:-ego_planner}  # mighty=原默认。ego_planner=集成
                                   # ego-planner-swarm的规划器核心，三种CONTROLLER都
                                   # 支持（ros2_px4_stack靠poscmd_to_goal_node桥接），
@@ -424,6 +480,7 @@ services:
                                   # 小于它就提前收油——长机每个航点都要悬停转向，这是可预告的
                                   # 减速事件，不必等落后量涨起来才从反馈里发现。0=关闭。
       - FORMATION_CORNER_FF_MIN=${FORMATION_CORNER_FF_MIN:-0.4}  # 前馈最多把速率压到这个比例
+      - FORMATION_FOLLOW_BASIS=${FORMATION_FOLLOW_BASIS:-leader_traj}
       - FORMATION_RATE_HEADROOM=${FORMATION_RATE_HEADROOM:-1.5}  # 僚机参考点变化率相对巡航速度的余量。
                                   # 1.0=参考点最快只能跟长机同速（旧行为，落后就追不回来，
                                   # 实测间距在 2.7~5.3 m 之间摆）；>1 时"落后长机 N 米弧长"
@@ -434,6 +491,10 @@ services:
                                   # 超过死区就按比例提速。0=关闭（恢复恒速）。
       - FORMATION_CATCHUP_RATIO_MAX=${FORMATION_CATCHUP_RATIO_MAX:-1.3}  # 最多比长机快多少倍
       - FORMATION_CATCHUP_DEADBAND_M=${FORMATION_CATCHUP_DEADBAND_M:-0.5}  # [m] 落后多少以内不追
+      - FORMATION_MIN_SEPARATION_M=${FORMATION_MIN_SEPARATION_M:-4.0}  # [m] 两机**空间直线距离**
+        # 下限，低于它僚机参考点冻结等待。跟上面那些"间距"不是一回事——它们都是沿长机轨迹的
+        # 弧长差，长机打圈/折返时弧长飞涨而空间位置不动。2026-10-12 从真机移植，见
+        # formation_follower_node.py 里 min_separation_m 的声明。0=关闭。
       - STATIC_OBSTACLES_ENABLED=${STATIC_OBSTACLES_ENABLED:-true}  # 已知立柱是否每帧注入障碍点云
                                   # （gt_cloud_bridge_node）。grid_map每帧推倒重建、没有
                                   # 时间累积，雷达哪一帧没扫到柱子那一帧就等于没柱子；
@@ -443,6 +504,30 @@ services:
                                   # ⚠️ 每个数都要带小数点（0.0不能写成0），否则ROS
                                   # 会把它当整数数组、跟double数组参数类型对不上而启动失败。
       - EGO_POLY_RESET_PERIOD_S=${EGO_POLY_RESET_PERIOD_S:-0.0}  # [s] 多久强制用多项式重置一次初值。
+      - EGO_ALIGN_START_STATE=${EGO_ALIGN_START_STATE:-false}  # 起点速度/加速度投影到航段方向、
+        # 清掉横向分量。治 poly_reset 治不了的那一半（边界条件里的横向残速），见 .env 说明。
+      - EGO_ALIGN_MAX_LAT_VEL=${EGO_ALIGN_MAX_LAT_VEL:-0.5}  # [m/s] 横向分量超过它就不对齐
+      - EGO_LOCK_TO_LINE=${EGO_LOCK_TO_LINE:-false}  # 梯度投影锁直线：优化器每个控制点的
+        # 梯度投影到"首->末控制点"弦方向、横向清零，空间路径恒等于那条直线（两端等高
+        # 时即水平直线）。跟 EGO_ALIGN_START_STATE 成对：align 保证初值是直线，lock
+        # 保证优化器不把它掰回去。⚠️ 锁住期间无横向避障，靠"直线在膨胀图上通"兜底，
+        # 逐次重算、撞上就当场解锁。见 .env 说明。
+      - EGO_LOCK_MAX_INIT_DEV=${EGO_LOCK_MAX_INIT_DEV:-0.15}  # [m] 初值离弦超过它就不锁
+      - EGO_LOCK_MIN_LEN=${EGO_LOCK_MIN_LEN:-0.5}  # [m] 弦长下限，比到达判据大
+      # ---- 2026-10-13（见 .env 同名项的完整说明）----
+      - UWB_GLOBAL_FRAME=${UWB_GLOBAL_FRAME:-true}
+      - ODOM_SOURCE_TOPIC=${ODOM_SOURCE_TOPIC:-uwb_imu_odom}
+      - LINE_CRUISE_MPS=${LINE_CRUISE_MPS:-0.8}
+      - TAKEOFF_STATIC_SPEED_MAX=${TAKEOFF_STATIC_SPEED_MAX:-0.08}
+      - TAKEOFF_INSTANT_SPEED_MAX=${TAKEOFF_INSTANT_SPEED_MAX:-0.09}
+      - LINE_ACCEL_MPS2=${LINE_ACCEL_MPS2:-0.5}
+      - LINE_DECEL_MPS2=${LINE_DECEL_MPS2:-0.0}
+      - LINE_CORNER_DV_MAX=${LINE_CORNER_DV_MAX:-0.4}
+      - LINE_ALT_RATE_MPS=${LINE_ALT_RATE_MPS:-0.6}
+      - LINE_DWELL_S=${LINE_DWELL_S:-2.0}
+      - LINE_MAX_LEAD_M=${LINE_MAX_LEAD_M:-1.5}
+      - LINE_CMD_RATE_HZ=${LINE_CMD_RATE_HZ:-50.0}
+      - SERVO_MAX_Z_SPEED_MPS=${SERVO_MAX_Z_SPEED_MPS:-0.6}
                                   # 每次重规划都拿上一条轨迹当初值，而代价函数里没有长度/
                                   # 转角项，绕出来的弯会被一路继承。定期重置切断这条链。
                                   # 0=关闭。建议 2.0 起步；重置只在"起点到局部目标的直线
@@ -610,12 +695,22 @@ services:
                                   # 保持一致；默认值2026-09-07从gt改成
                                   # uwb_slam，之前写死字面量"dlio"是个真实
                                   # bug，均见flight-stack-nx01那边的完整注释
-      - SLAM_BACKEND=${SLAM_BACKEND:-fast_lio}  # 两架飞机必须保持一致，见
+      # 2026-10-16 默认值 fast_lio -> dlio：fast_lio 和 point_lio 两个后端当天
+      # 已从镜像移除（它们从未被启动过——定位走 LOCALIZATION_SOURCE=uwb_imu，
+      # 那条分支整个绕开 SLAM）。留着 fast_lio 当默认值的话，哪天有人把
+      # LOCALIZATION_SOURCE 切回 SLAM 模式就会直接撞 entrypoint 的 exit 1。
+      # dlio 仍在镜像里（/opt/dlio_ws），是唯一还能用的后端。
+      - SLAM_BACKEND=${SLAM_BACKEND:-dlio}  # 两架飞机必须保持一致，见
                                   # flight-stack-nx01那边的完整注释
       - POINT_LIO_CPU_CORES=${POINT_LIO_CPU_CORES:-4}  # 同上，见
                                   # flight-stack-nx01那边的完整注释
       - CONTROLLER=${CONTROLLER:-px4ctrl}  # 同上，两架飞机必须保持一致，
                                   # 见flight-stack-nx01那边的完整注释
+      # 2026-10-16：ego_planner 本体开关，跟 nx01 保持一致（说明见那边）。
+      - EGO_PLANNER_ENABLED=${EGO_PLANNER_ENABLED:-true}
+      # 2026-10-17：跟 nx01 保持一致（说明见那边）。nx02 是独立定义的服务，
+      # 漏了这里就只有一架飞机生效——这个坑 EGO_PLANNER_ENABLED 那次刚踩过。
+      - USE_RVIZ=${USE_RVIZ:-false}
       - PLANNER=${PLANNER:-ego_planner}  # 同上，两架飞机必须保持一致，见flight-stack-nx01
                                   # 那边的完整注释
       - PX4CTRL_YAW_LOCK_ENABLED=${PX4CTRL_YAW_LOCK_ENABLED:-false}  # 同上，两架飞机
@@ -637,13 +732,39 @@ services:
       - FORMATION_REF_ACCEL=${FORMATION_REF_ACCEL:-0.3}  # 见NX01那边的说明
       - FORMATION_CORNER_FF_R=${FORMATION_CORNER_FF_R:-2.0}
       - FORMATION_CORNER_FF_MIN=${FORMATION_CORNER_FF_MIN:-0.4}
+      - FORMATION_FOLLOW_BASIS=${FORMATION_FOLLOW_BASIS:-leader_traj}
       - FORMATION_RATE_HEADROOM=${FORMATION_RATE_HEADROOM:-1.5}  # 见NX01那边的说明
       - FORMATION_CATCHUP_GAIN=${FORMATION_CATCHUP_GAIN:-0.0}  # 僚机追赶项，见NX01那边的说明
       - FORMATION_CATCHUP_RATIO_MAX=${FORMATION_CATCHUP_RATIO_MAX:-1.3}
       - FORMATION_CATCHUP_DEADBAND_M=${FORMATION_CATCHUP_DEADBAND_M:-0.5}
+      - FORMATION_MIN_SEPARATION_M=${FORMATION_MIN_SEPARATION_M:-4.0}  # 见NX01那边的说明
       - STATIC_OBSTACLES_ENABLED=${STATIC_OBSTACLES_ENABLED:-true}  # 见NX01那边的说明
       - STATIC_OBSTACLES_XY=${STATIC_OBSTACLES_XY:-4.5,7.0,-4.5,7.0,0.0,0.0}
       - EGO_POLY_RESET_PERIOD_S=${EGO_POLY_RESET_PERIOD_S:-0.0}  # [s] 多项式重置周期，见NX01那边的说明
+      - EGO_ALIGN_START_STATE=${EGO_ALIGN_START_STATE:-false}  # 起点速度/加速度投影到航段方向、
+        # 清掉横向分量。治 poly_reset 治不了的那一半（边界条件里的横向残速），见 .env 说明。
+      - EGO_ALIGN_MAX_LAT_VEL=${EGO_ALIGN_MAX_LAT_VEL:-0.5}  # [m/s] 横向分量超过它就不对齐
+      - EGO_LOCK_TO_LINE=${EGO_LOCK_TO_LINE:-false}  # 梯度投影锁直线：优化器每个控制点的
+        # 梯度投影到"首->末控制点"弦方向、横向清零，空间路径恒等于那条直线（两端等高
+        # 时即水平直线）。跟 EGO_ALIGN_START_STATE 成对：align 保证初值是直线，lock
+        # 保证优化器不把它掰回去。⚠️ 锁住期间无横向避障，靠"直线在膨胀图上通"兜底，
+        # 逐次重算、撞上就当场解锁。见 .env 说明。
+      - EGO_LOCK_MAX_INIT_DEV=${EGO_LOCK_MAX_INIT_DEV:-0.15}  # [m] 初值离弦超过它就不锁
+      - EGO_LOCK_MIN_LEN=${EGO_LOCK_MIN_LEN:-0.5}  # [m] 弦长下限，比到达判据大
+      # ---- 2026-10-13（见 .env 同名项的完整说明）----
+      - UWB_GLOBAL_FRAME=${UWB_GLOBAL_FRAME:-true}
+      - ODOM_SOURCE_TOPIC=${ODOM_SOURCE_TOPIC:-uwb_imu_odom}
+      - LINE_CRUISE_MPS=${LINE_CRUISE_MPS:-0.8}
+      - TAKEOFF_STATIC_SPEED_MAX=${TAKEOFF_STATIC_SPEED_MAX:-0.08}
+      - TAKEOFF_INSTANT_SPEED_MAX=${TAKEOFF_INSTANT_SPEED_MAX:-0.09}
+      - LINE_ACCEL_MPS2=${LINE_ACCEL_MPS2:-0.5}
+      - LINE_DECEL_MPS2=${LINE_DECEL_MPS2:-0.0}
+      - LINE_CORNER_DV_MAX=${LINE_CORNER_DV_MAX:-0.4}
+      - LINE_ALT_RATE_MPS=${LINE_ALT_RATE_MPS:-0.6}
+      - LINE_DWELL_S=${LINE_DWELL_S:-2.0}
+      - LINE_MAX_LEAD_M=${LINE_MAX_LEAD_M:-1.5}
+      - LINE_CMD_RATE_HZ=${LINE_CMD_RATE_HZ:-50.0}
+      - SERVO_MAX_Z_SPEED_MPS=${SERVO_MAX_Z_SPEED_MPS:-0.6}
       - EGO_SELECT_LAMBDA_LENGTH=${EGO_SELECT_LAMBDA_LENGTH:-0.0}  # 多候选挑选的弧长权重，见NX01那边的说明
       - EGO_SELECT_LAMBDA_TURN=${EGO_SELECT_LAMBDA_TURN:-0.0}
       - EGO_OBSTACLES_INFLATION_Z=${EGO_OBSTACLES_INFLATION_Z:-0.1}  # [m] 竖直膨胀半径，见NX01那边的说明

@@ -584,6 +584,38 @@ MAVROS_LAUNCH_DIR = "/opt/ros/humble/share/mavros/launch"
 with open(f"{MAVROS_LAUNCH_DIR}/px4_pluginlists.yaml") as f:
     lines = f.readlines()
 lines = [l for l in lines if l.strip() not in ("- distance_sensor", "- rangefinder")]
+
+# 2026-10-17：改用 allowlist 只加载真正用到的插件。
+# 背景：mavros 默认加载 **62 个**插件，而静态分析(src/ scripts/ contestant_sim/)
+# 加上实时订阅者计数显示，真正有消费者的只有下面这十来个；其余插件照样建
+# publisher、参与 DDS 发现与维护，`ros2 topic list` 里一大片 gpsstatus_* /
+# gimbal_control_* / esc_* / debug_value_* / adsb_* 全是零订阅者在空转。
+# mavros_node 单进程常驻 115% CPU，而仿真"飞着飞着趴地"的根因链正是
+# CPU 峰值打满 → mavros 被调度延迟 → timesync 把累积偏移一次性清零 →
+# PX4 报 time jump → mc_pos_control 判 setpoint 失效 → Failsafe: blind land
+# （见记忆 project_px4_param_relax_servicetype）。
+#
+# ⚠️ 漏掉某个插件的后果是**对应话题直接消失**，依赖它的节点静默等超时。
+#    改这个清单后必须跑一次完整任务验证。每条都注明了消费者，别凭印象删：
+MAVROS_PLUGIN_ALLOWLIST = [
+    "sys_status",          # state / battery / extended_state / statustext，以及 set_mode 服务
+    "sys_time",            # timesync。**不能删**：关掉后 header.stamp 会退回 PX4 的
+                           # lockstep 仿真时间，与墙钟差 17 亿秒（实测 PASSTHROUGH 就是这样），
+                           # pt4ctrl 会立刻判所有 odom 超时
+    "command",             # cmd/arming、cmd/command —— pt4ctrl 解锁上锁
+    "param",               # param/set —— px4_param_relax 放宽 COM_DISARM_LAND 等保护参数
+    "local_position",      # local_position/odom + pose —— 全系统最核心的反馈，静态分析 30 处引用
+    "imu",                 # imu/data_raw -> uwb_imu_fusion_node -> vision_pose/pose_cov -> EKF2
+                           # （实测订阅者就是它；imu/data 反而零订阅者）
+    "distance_sensor",     # hrlv_ez4_pub -> line_goto 的仿地高度环（见 project_altitude_chain_real）
+    "setpoint_raw",        # pt4ctrl 发 setpoint_raw/attitude 的唯一通道
+    "setpoint_trajectory", # pt4ctrl 的 setpoint_trajectory/local
+    "vision_pose",         # vision_pose/pose_cov -> EKF2，uwb_imu 定位链路的输入端
+    "rc_io",               # rc/in（pt4ctrl 判遥控器模式）、rc/override
+]
+lines.append("    plugin_allowlist:\n")
+lines.extend(f"      - {name}\n" for name in MAVROS_PLUGIN_ALLOWLIST)
+
 with open("/tmp/px4_pluginlists_contest.yaml", "w") as f:
     f.writelines(lines)
 
@@ -872,8 +904,19 @@ case "${LOCALIZATION_SOURCE}" in
         # EKF2_EV_DELAY 配置正确——配错时 EKF2 会静默拒绝融合 vision，下游只
         # 看到"一个频率正常的odom"，没有任何报错。验收判据：静置时
         # mavros/local_position/odom 应收敛到跟 uwb/pose_abs（减去起点）一致。
+        # 2026-10-13：odom 源 = mavros/local_position/odom（EKF2 输出）。
+        # EKF2_EV_CTRL=11 融合的 vision_pose 喂的是 uwb/pose_abs 的**绝对值**，
+        # 所以 EKF2 输出本来就在 UWB 绝对系（实测 NX01 偏 0.023 m、NX02 偏
+        # 0.029 m），readback 节点只改标签不改数值，world->{ns}/odom 仍恒等。
+        # ⚠️ 这一项当天上午曾改成 uwb_imu_odom，理由是"EKF2 原点在它自己初始化
+        # 的地方、带一层偏移"——实测否证（见上面的偏差数字），那层偏移是起飞点
+        # 锁定时代的事。而 uwb_imu_odom 是 uwb_imu_fusion_node 吃 imu/data_raw
+        # 做纯积分的输出，**没有加速度偏置估计这一环**，静止时报假速度
+        # 0.292 m/s（EKF2 同时刻 0.056），pt4ctrl 拿它跟写死的 0.1 比，
+        # NX02 连拒 15 次起不来。别再指回去，详见 .env 同名项的长注释。
         ros2 run gt_odom_bridge local_position_readback_node \
             --ros-args -r __ns:="/${NAMESPACE}" \
+            -p local_position_topic:="${ODOM_SOURCE_TOPIC:-mavros/local_position/odom}" \
             -p lidar_mount_t:="${LIDAR_MOUNT_T:-0.0,0.0,0.0}" \
             -p lidar_tilt_deg:="${LIDAR_TILT_DEG:-0.0}" &
         sleep 2
@@ -941,115 +984,32 @@ case "${LOCALIZATION_SOURCE}" in
                 sleep 3
                 ;;
             point_lio)
-                # 2026-08-19：hw下的fail fast已撤掉——mid360_real.launch.py
-                # 的xfer_format现在可配置（上面统一启动livox驱动那段按
-                # SLAM_BACKEND算好了），point_lio这边common.lid_topic也改成
-                # 可覆盖的launch参数了（见point_lio_docker_sim_launch.patch
-                # 2026-08-19那次修订）。真机第一次实测这条路径，
-                # point_lio本身连仿真都还没验证过，真机这次是首次实测。
-                echo "== [flight-stack:${NAMESPACE}] 定位模式=${LOCALIZATION_SOURCE}：启动 point_lio（SLAM_BACKEND=point_lio，2026-08-19真机首次实测） =="
-                # 跟上面DLIO同样的坑：point_lio_docker_sim_launch.patch让
-                # laserMapping这个Node自己namespace=namespace，lid_topic/
-                # imu_topic/输出remap目标都必须是"相对"话题名，这里的
-                # namespace:=只是传给launch文件去拼{ns}/odom等TF frame名字，
-                # 不能再手动拼一次话题前缀。common.imu_topic仍然写死
-                # "mid360/imu"（真机/仿真这路话题名一直一致，不用改）；
-                # common.lid_topic：DEPLOY_TARGET=hw时传
-                # lid_topic:=mid360_PointCloud2（真机driver remap的实际话题
-                # 名，不管xfer_format是0还是1都是这个名字，只是消息类型不同），
-                # 仿真下保留launch文件里的默认值'mid360'（Gazebo插件专属，
-                # 不能传hw的话题名，仿真根本没有这个话题）。
-                if [ "${DEPLOY_TARGET}" = "hw" ]; then
-                    _point_lio_lid_topic_arg="lid_topic:=mid360_PointCloud2"
-                else
-                    _point_lio_lid_topic_arg=""
-                fi
-                # POINT_LIO_CPU_CORES（2026-08-14新增，默认4）——2026-08-14
-                # 实测双机场景下单个pointlio_mapping进程CPU占用冲到~1150%
-                # （11+核），host load average冲到52（32核机器），点云/里程计
-                # 速率被拖到个位数Hz。查源码：point_lio自己和ikd-Tree都没调
-                # omp_set_num_threads()限流，CMakeLists.txt里
-                # find_package(OpenMP)把-fopenmp加进全局编译选项，libgomp
-                # 默认按nproc开线程池；ikd_Tree.cpp:201的pthread_create另外
-                # 开一条增量重建后台线程（日志里"Multi thread started"的
-                # 来源）——不管具体是哪部分贡献的，taskset钉核这个手段跟
-                # 具体是OpenMP还是pthread无关，直接在OS调度层面把这个进程
-                # 后续开出来的所有线程都摁在固定核范围内。按AGENT_INDEX
-                # (1-based)错开NX01/NX02各自的核范围，避免两架飞机的
-                # point_lio抢同一批核（跟Gazebo/mavros/ego_planner等同容器
-                # 内其它进程之间没有隔离，taskset只管这一个进程）。
-                # OMP_NUM_THREADS同时设成一样的值，直接封顶OpenMP线程池
-                # 大小（即使taskset已经在调度层面限制了核数，libgomp线程池
-                # 大小本身默认还是按nproc算的，线程数远多于能跑的核数会有
-                # 额外的上下文切换开销，两个都设更稳妥）。
-                POINT_LIO_CPU_CORES="${POINT_LIO_CPU_CORES:-4}"
-                # 2026-09-06新增：mapping_mid360.launch.py的high_freq_odom参数
-                # （对应odometry.publish_odometry_without_downsample）此前
-                # entrypoint从未传递，永远吃launch文件自己的默认值false，没有
-                # 任何地方能打开它——外置成环境变量，跟POINT_LIO_CPU_CORES同一个
-                # 模式。
-                # ⚠️⚠️ 2026-09-06真机实测确认：这个模式目前不可用，不要在任何
-                # 实际场景下打开——环境变量/launch参数确认生效、频率确认提升到
-                # ~100Hz，但发布的位置/速度不跟随真实运动，飞机被实际移动时
-                # 数值只有1-2厘米量级噪声，不反映真实位移。已排除开关未生效/
-                # 频率未提升/use_imu_as_input分支不匹配这几种可能，根因还在
-                # point_lio上游`publish_odometry_without_downsample`实现更深层，
-                # 需要实际调试才能继续，详见DEBUG_JOURNAL.md/read_hw.md同日
-                # 记录。此前的内存增长风险（200Hz IMU+高频10分钟+437MB，100Hz
-                # IMU下+2.6MB）依然有效，但现在有更优先的不可用结论——默认
-                # false不变，在根因定位修复之前不要打开。
-                POINT_LIO_HIGH_FREQ_ODOM="${POINT_LIO_HIGH_FREQ_ODOM:-false}"
-                _point_lio_core_start=$(( (AGENT_INDEX - 1) * POINT_LIO_CPU_CORES ))
-                _point_lio_core_end=$(( _point_lio_core_start + POINT_LIO_CPU_CORES - 1 ))
-                echo "== [flight-stack:${NAMESPACE}] point_lio限制在CPU核${_point_lio_core_start}-${_point_lio_core_end}（POINT_LIO_CPU_CORES=${POINT_LIO_CPU_CORES}，按AGENT_INDEX=${AGENT_INDEX}错开，POINT_LIO_HIGH_FREQ_ODOM=${POINT_LIO_HIGH_FREQ_ODOM}） =="
-                OMP_NUM_THREADS="${POINT_LIO_CPU_CORES}" taskset -c "${_point_lio_core_start}-${_point_lio_core_end}" \
-                    ros2 launch point_lio mapping_mid360.launch.py \
-                    namespace:="${NAMESPACE}" \
-                    rviz:="false" \
-                    high_freq_odom:="${POINT_LIO_HIGH_FREQ_ODOM}" \
-                    ${_point_lio_lid_topic_arg} &
-                sleep 3
+                # 2026-10-16 **point_lio 已从镜像移除**（用户要求，见
+                # Dockerfile.flight-stack 同日说明）。它在本项目里从来没被启动过：
+                # 仿真和真机都走 LOCALIZATION_SOURCE=uwb_imu，那条分支整个绕开
+                # SLAM——被 12 个节点订阅的 dlio/odom_node/odom 实际由
+                # local_position_readback_node（PX4 回读）发布，只是沿用了 DLIO
+                # 的话题名。这里**明确报错**而不是让 ros2 launch 去撞一个不存在的
+                # 包：后者的报错淹在一堆启动日志里，很难看出是"包没了"。
+                echo "!! [flight-stack:${NAMESPACE}] SLAM_BACKEND=point_lio 不可用：" >&2
+                echo "   point_lio 已于 2026-10-16 从镜像移除（它从未被启动过）。" >&2
+                echo "   仿真/真机的定位都用 LOCALIZATION_SOURCE=uwb_imu，不需要 SLAM；" >&2
+                echo "   真要用 SLAM 请选 SLAM_BACKEND=dlio（仍在镜像里）。" >&2
+                exit 1
                 ;;
             fast_lio)
-                # 2026-09-07新增，当时仅sim——fast_lio_docker_sim_launch.patch
-                # 新增的launch/fast_lio_docker_sim.launch.py是仿真专属。
-                # 2026-09-08：接通hw——新增fast_lio_hw_launch.patch/
-                # launch/fast_lio_hw.launch.py，去掉原来无条件fail fast的
-                # guard。接通不等于验证过：fast_lio目前只在仿真里做过部分
-                # 实测（QoS/点云稀疏两个问题已修，地图无界增长那个问题
-                # 缓解措施效果待确认，见DEBUG_JOURNAL.md），真机这条路径
-                # 是首次接入，跟point_lio当年"真机首次实测"是同一个阶段，
-                # 不是"已验证可用"。
-                # ⚠️ 已知限制：本地这份docker/entrypoints/hw_launch/
-                # mid360_real.launch.py目前xfer_format仍是硬编码的Python
-                # 字面量0，不是可覆盖的launch参数——下面统一启动真实
-                # Mid-360驱动那段传的xfer_format:="${_mid360_xfer_format}"
-                # 对这份本地文件不会生效，驱动实际会一直发PointCloud2格式，
-                # 不是fast_lio/point_lio需要的CustomMsg。这个限制point_lio
-                # 也一样受影响，不是fast_lio独有的新问题，这次没有改动
-                # mid360_real.launch.py本身（不在这次任务授权范围内）。
-                if [ "${DEPLOY_TARGET}" = "hw" ]; then
-                    _fast_lio_lid_topic_arg="lid_topic:=mid360_PointCloud2"
-                    _fast_lio_launch_file="fast_lio_hw.launch.py"
-                    echo "== [flight-stack:${NAMESPACE}] DEPLOY_TARGET=hw：启动 FAST-LIO2（SLAM_BACKEND=fast_lio，2026-09-08真机首次接通，未经真机实测验证） =="
-                else
-                    _fast_lio_lid_topic_arg=""
-                    _fast_lio_launch_file="fast_lio_docker_sim.launch.py"
-                    echo "== [flight-stack:${NAMESPACE}] 定位模式=${LOCALIZATION_SOURCE}：启动 FAST-LIO2（SLAM_BACKEND=fast_lio，仅做过部分仿真实测） =="
-                fi
-                # 跟DLIO/point_lio同样的坑：fast_lio的两份launch文件都让
-                # fastlio_mapping这个Node自己namespace=namespace，lid_topic/
-                # 输出remap目标都必须是"相对"话题名，这里的namespace:=只是
-                # 传给launch文件去拼{ns}/odom等TF frame名字，不能再手动拼
-                # 一次话题前缀。fast_lio没有point_lio那种taskset/CPU核数
-                # 限制——point_lio加这个是2026-08-14双机实测CPU冲到1150%
-                # 之后才补的针对性修复，fast_lio这边2026-09-07仿真实测过
-                # loadavg（32核机器1.94，远没占满），没有同样的证据支撑，
-                # 这里不照搬taskset，避免加一个没有依据的"优化"。
-                ros2 launch fast_lio "${_fast_lio_launch_file}" \
-                    namespace:="${NAMESPACE}" \
-                    ${_fast_lio_lid_topic_arg} &
-                sleep 3
+                # 2026-10-16 **fast_lio 已从镜像移除**（用户要求，见
+                # Dockerfile.flight-stack 同日说明）。它在本项目里从来没被启动过：
+                # 仿真和真机都走 LOCALIZATION_SOURCE=uwb_imu，那条分支整个绕开
+                # SLAM——被 12 个节点订阅的 dlio/odom_node/odom 实际由
+                # local_position_readback_node（PX4 回读）发布，只是沿用了 DLIO
+                # 的话题名。这里**明确报错**而不是让 ros2 launch 去撞一个不存在的
+                # 包：后者的报错淹在一堆启动日志里，很难看出是"包没了"。
+                echo "!! [flight-stack:${NAMESPACE}] SLAM_BACKEND=fast_lio 不可用：" >&2
+                echo "   fast_lio 已于 2026-10-16 从镜像移除（它从未被启动过）。" >&2
+                echo "   仿真/真机的定位都用 LOCALIZATION_SOURCE=uwb_imu，不需要 SLAM；" >&2
+                echo "   真要用 SLAM 请选 SLAM_BACKEND=dlio（仍在镜像里）。" >&2
+                exit 1
                 ;;
             *)
                 echo "!! [flight-stack:${NAMESPACE}] SLAM_BACKEND=${SLAM_BACKEND} 不是已知值(dlio/point_lio/fast_lio)，退出 !!" >&2
@@ -1083,6 +1043,18 @@ ros2 run gt_odom_bridge name_label_node \
 ros2 run tf2_ros static_transform_publisher \
     0 0 0 0 0 0 "${NAMESPACE}/lidar" "${NAMESPACE}/${NAMESPACE}_livox" \
     --ros-args -r __node:="${NAMESPACE}_static_tf_livox_alias" &
+
+# 2026-10-13：{ns}/map -> {ns}/odom 这条恒等 TF 从"mighty 分支和 ego_planner
+# 分支各发一次"挪到这里，变成**无条件**。
+# 为什么必须挪：C 步要关掉规划器，而原来发这条 TF 的两处都在
+# `if PLANNER = mighty` / `if PLANNER = ego_planner` 里面。规划器一下线这条边
+# 就没人发了，而 SDK 的 world_to_local() 查的是 world -> {ns}/odom，要经过
+# world -> {ns}/map -> {ns}/odom 两跳——缺这一跳整条坐标换算直接超时报错。
+# 数值上 map 和 odom 在这套集成里从来就是同一份数据的两个名字（理由见下面
+# 原来那两处的长注释），零偏移不是凑合的近似。
+ros2 run tf2_ros static_transform_publisher \
+    0 0 0 0 0 0 "${NAMESPACE}/map" "${NAMESPACE}/odom" \
+    --ros-args -r __node:="${NAMESPACE}_static_tf_map_odom" &
 
 if [ "${PLANNER}" = "mighty" ]; then
 echo "== [flight-stack:${NAMESPACE}] 启动 mighty（含 use_frame_alignment/num_agents）=="
@@ -1181,9 +1153,12 @@ sleep 2
 # DLIO里程计，不是另一条独立SLAM/回环修正过的位姿），mighty自己没有对
 # "map"做任何额外的漂移修正，"map"和"odom"从一开始就是同一份数据的两个
 # 名字，零偏移完全合适，不是凑合的近似值。
-ros2 run tf2_ros static_transform_publisher \
-    0 0 0 0 0 0 "${NAMESPACE}/map" "${NAMESPACE}/odom" \
-    --ros-args -r __node:="${NAMESPACE}_static_tf_mighty_map_odom" &
+# 2026-10-13：这一处已挪到上面"无条件"那段（静态 TF 同一条边被两个
+# publisher 发会在 /tf_static 上互相覆盖），保留注释是为了留住上面那段
+# "为什么 map 和 odom 零偏移合适"的说明。
+# ros2 run tf2_ros static_transform_publisher \
+#     0 0 0 0 0 0 "${NAMESPACE}/map" "${NAMESPACE}/odom" \
+#     --ros-args -r __node:="${NAMESPACE}_static_tf_mighty_map_odom" &
 
 # 2026-08-10用户再次实测反馈：补了上面那条map<->odom的TF之后，"显示错位"
 # 还在——回头查错了层：上面那条TF解决的是"RViz怎么把已经算对的坐标画
@@ -1216,7 +1191,6 @@ ros2 run ego_planner_bridge rviz_goal_bridge_node \
     --ros-args -r __ns:="/${NAMESPACE}" &
 
 elif [ "${PLANNER}" = "ego_planner" ]; then
-echo "== [flight-stack:${NAMESPACE}] 启动 ego_planner（ego-planner-swarm规划器核心，drone_id=${DRONE_ID}）=="
 # 前端直接吃dlio/odom_node/odom + dlio/odom_node/pointcloud/deskewed（跟
 # mighty同一份数据源的odom部分，点云则是DLIO已经配准到odom系的版本——
 # ego_planner自己的plan_env/grid_map.cpp不做TF lookup，纯粹信任收到的点云
@@ -1225,9 +1199,21 @@ echo "== [flight-stack:${NAMESPACE}] 启动 ego_planner（ego-planner-swarm规�
 # 打过）。2026大赛任务系统阶段3起，px4ctrl_bridge那边不再直接remap接
 # position_cmd，中间插了position_cmd_relay_node（下面紧接着启动）转一手，
 # 默认normal模式下行为透传等价，见该节点文件头拓扑说明。
+# 2026-10-16：EGO_PLANNER_ENABLED=false 时只跳过规划器**本体**，下面的
+# position_cmd_relay / line_goto / pillar_detector 照常启动（它们在同一个
+# elif 分支里，但跟 ego_planner 没有依赖关系）。航线飞行 10-13 起走
+# line_goto，ego_planner 只剩地面站指点飞行和避障用，调试时可关掉省一个
+# 满载核（实测单线程饱和，两架飞机 = 两个核）。
+if [ "${EGO_PLANNER_ENABLED:-true}" = "false" ]; then
+    echo "== [flight-stack:${NAMESPACE}] EGO_PLANNER_ENABLED=false，跳过 ego_planner 本体"
+    echo "   （position_cmd_relay / line_goto / pillar_detector 照常起；"
+    echo "     影响：地面站的指点飞行/航点飞行不可用、goto 没有避障） =="
+else
+echo "== [flight-stack:${NAMESPACE}] 启动 ego_planner（ego-planner-swarm规划器核心，drone_id=${DRONE_ID}）=="
 ros2 launch ego_planner_bridge ego_planner_docker_sim.launch.py \
     namespace:="${NAMESPACE}" drone_id:="${DRONE_ID}" &
 sleep 2
+fi
 
 # 2026大赛任务系统阶段3：position_cmd中继/仲裁节点，只在PLANNER=ego_planner
 # 时启动（mighty模式下traj_server不存在，goal_to_poscmd直接发到'cmd'相对名，
@@ -1238,6 +1224,23 @@ sleep 2
 echo "== [flight-stack:${NAMESPACE}] 启动 position_cmd_relay（阶段3中继/仲裁节点，relay_mode默认normal） =="
 ros2 run contest_mission position_cmd_relay_node \
     --ros-args -r __ns:="/${NAMESPACE}" &
+
+# 2026-10-13：直线航点飞行，替代 ego_planner + traj_server 走航点。
+# p(s) = 航点 + û·s，直线是结构性的（无优化器/代价函数/地图）；整条航线一个
+# 连续速度剖面，终点速度恰好 0、起步按 LINE_ACCEL_MPS2 缓慢加速。
+# relay 的第 6 路输入（line_goto_cmd），SDK 切 relay_mode=line_goto 才生效，
+# 所以起着不影响任何现有链路——没人切模式时它发的指令会被 relay 丢弃。
+echo "== [flight-stack:${NAMESPACE}] 启动 line_goto_node（直线航点飞行，替代规划器） =="
+ros2 run contest_mission line_goto_node \
+    --ros-args -r __ns:="/${NAMESPACE}" \
+    -p cruise_mps:="${LINE_CRUISE_MPS:-0.8}" \
+    -p accel_mps2:="${LINE_ACCEL_MPS2:-0.5}" \
+    -p decel_mps2:="${LINE_DECEL_MPS2:-0.0}" \
+    -p corner_dv_max_mps:="${LINE_CORNER_DV_MAX:-0.4}" \
+    -p alt_rate_mps:="${LINE_ALT_RATE_MPS:-0.6}" \
+    -p dwell_s:="${LINE_DWELL_S:-2.0}" \
+    -p max_lead_m:="${LINE_MAX_LEAD_M:-1.5}" \
+    -p cmd_rate_hz:="${LINE_CMD_RATE_HZ:-50.0}" &
 
 # 2026大赛任务系统阶段4.1：立柱检测节点，同样只在PLANNER=ego_planner时
 # 启动——订阅的'grid_map/occupancy'是ego_planner的plan_env/grid_map.cpp
@@ -1272,6 +1275,7 @@ echo "== [flight-stack:${NAMESPACE}] 启动 formation_follower_node（阶段A3�
 # 不变），这里给本项目一个生效的默认值，改 .env 即可调。
 ros2 run contest_mission formation_follower_node \
     --ros-args -r __ns:="/${NAMESPACE}" \
+    -p follow_basis:="${FORMATION_FOLLOW_BASIS:-leader_traj}" \
     -p reference_rate_headroom:="${FORMATION_RATE_HEADROOM:-1.5}" \
     -p reference_accel_limit:="${FORMATION_REF_ACCEL:-0.3}" \
     -p corner_ff_radius_m:="${FORMATION_CORNER_FF_R:-2.0}" \
@@ -1286,7 +1290,9 @@ ros2 run contest_mission formation_follower_node \
     -p bias_trim_max_m:="${FORMATION_BIAS_TRIM_MAX_M:-1.5}" \
     -p path_prune_max_chord_m:="${FORMATION_PRUNE_CHORD_M:-2.5}" \
     -p yaw_turn_in_place:="${FORMATION_TURN_IN_PLACE:-true}" \
-    -p yaw_slew_rate_dps:="${FORMATION_YAW_SLEW_DPS:-60.0}" &
+    -p yaw_slew_rate_dps:="${FORMATION_YAW_SLEW_DPS:-60.0}" \
+    -p min_separation_m:="${FORMATION_MIN_SEPARATION_M:-4.0}" \
+    -p cruise_speed_mps:="${FORMATION_CRUISE_MPS:-${V_MAX:-1.0}}" &
 # yaw_turn_in_place=true（2026-09-29 用户改要求："无论编队还是单独飞行、无论
 # 长机还是僚机，每个航点处都停顿 2 秒同时调整航向，航点之间航向不再变化"）：
 # 僚机到拐点停下、把机头转到下一段航向、转到位再走。长机侧的对应实现在
@@ -1341,9 +1347,12 @@ fi
 # 补一条恒等静态TF——ego_planner里grid_map/odom直接remap吃DLIO的odom
 # （见ego_planner_docker_sim.launch.py），"map"和"odom"在这套集成里数值上
 # 就是同一个坐标系，没有实际的位姿差异，零偏移刚好合适。
-ros2 run tf2_ros static_transform_publisher \
-    0 0 0 0 0 0 "${NAMESPACE}/map" "${NAMESPACE}/odom" \
-    --ros-args -r __node:="${NAMESPACE}_static_tf_ego_planner_map_odom" &
+# 2026-10-13：这一处已挪到上面"无条件"那段（静态 TF 同一条边被两个
+# publisher 发会在 /tf_static 上互相覆盖），保留注释是为了留住上面那段
+# "为什么 map 和 odom 零偏移合适"的说明。
+# ros2 run tf2_ros static_transform_publisher \
+#     0 0 0 0 0 0 "${NAMESPACE}/map" "${NAMESPACE}/odom" \
+#     --ros-args -r __node:="${NAMESPACE}_static_tf_ego_planner_map_odom" &
 
 # 2026-08-27新增，2026-08-28收窄范围：只给地面站/RViz显示用的障碍点云
 # (grid_map/occupancy_inflate)高度过滤，DEPLOY_TARGET=hw才起——封闭空间
@@ -1531,9 +1540,33 @@ if [ "${LOCALIZATION_SOURCE}" != "single_slam_only" ]; then
         sleep 1
     fi
 
-    echo "== [flight-stack:${NAMESPACE}] 启动 uwb_origin_bridge（起飞点一键锁定+frame_align_bridge跨机map对齐，跟PLANNER/CONTROLLER无关）=="
-    ros2 launch uwb_origin_bridge uwb_origin_bridge.launch.py \
-        namespace:="${NAMESPACE}" &
+    # 2026-10-13 UWB_GLOBAL_FRAME（默认 true）：取消起飞点锁定。
+    # odom 的数值已经是 UWB 全局坐标（见上面 ① 那段），所以
+    # world -> {ns}/map 的真值就是**恒等**，发一条静态 TF 即可：
+    #   · 不用再调 origin_setter 的锁定服务，也就没有"里程计没收敛就锁死、
+    #     world->odom 永久带偏"那类瞬态坑；
+    #   · origin_setter 的在线 SE(2) 旋转估计 θ*（rotation_min_segments=1、
+    #     无抗差、一次 UWB 野值就能定下一个假角度）在这个口径下只能往里加
+    #     误差——它解的是"局部 SLAM 系 vs 全局系"的问题，而这里没有局部系。
+    # SDK 的 world_to_local()/local_to_world() 因此退化成恒等，33 个调用点、
+    # 选手程序、任务逻辑**一个字都不用改**。
+    # frame_align_bridge_node 照常起：ego_planner 的跨机轨迹广播要用它。
+    # 参数跟 uwb_origin_bridge.launch.py 里逐字一致（num_agents 取 NUM_AGENTS
+    # 默认 2，namespace_prefix 那边是写死的 'NX'）。
+    if [ "${UWB_GLOBAL_FRAME:-true}" = "true" ]; then
+        echo "== [flight-stack:${NAMESPACE}] UWB 绝对系：world -> ${NAMESPACE}/map 发恒等静态 TF（不起 origin_setter_node，无需起飞点锁定）=="
+        ros2 run tf2_ros static_transform_publisher \
+            0 0 0 0 0 0 world "${NAMESPACE}/map" \
+            --ros-args -r __node:="${NAMESPACE}_static_tf_world_map" &
+        ros2 run uwb_origin_bridge frame_align_bridge_node \
+            --ros-args -r __ns:="/${NAMESPACE}" \
+            -p num_agents:="${NUM_AGENTS:-2}" \
+            -p namespace_prefix:="NX" &
+    else
+        echo "== [flight-stack:${NAMESPACE}] 启动 uwb_origin_bridge（起飞点一键锁定+frame_align_bridge跨机map对齐，跟PLANNER/CONTROLLER无关）=="
+        ros2 launch uwb_origin_bridge uwb_origin_bridge.launch.py \
+            namespace:="${NAMESPACE}" &
+    fi
 
     # 2026-09-15用户要求：容器启动就自动触发一次`set_origin_from_uwb`，
     # 不用每次都手动`ros2 service call`——`uwb_ground_truth_node.py`
@@ -1556,25 +1589,34 @@ if [ "${LOCALIZATION_SOURCE}" != "single_slam_only" ]; then
     # sim-world和flight-stack是两个独立容器，各自启动耗时本来就会跨run
     # 波动（PX4 SITL/DLIO/px4ctrl这些都要起来才有稳定odom），"该试几次"
     # 交给服务自己的就绪判断决定，比在这里猜一个次数上限更准确。
-    (
-        _attempt=0
-        while true; do
-            _attempt=$((_attempt + 1))
-            sleep 3
-            _result="$(ros2 service call "/${NAMESPACE}/set_origin_from_uwb" std_srvs/srv/Trigger "{}" 2>&1)"
-            echo "== [flight-stack:${NAMESPACE}] set_origin_from_uwb第${_attempt}次尝试 =="
-            echo "${_result}"
-            # 2026-09-15实测踩坑：`ros2 service call`对`std_srvs/srv/
-            # Trigger`打印的实际是Python repr格式`success=True`（等号+
-            # 首字母大写，不是YAML格式`success: true`）——写成后者匹配
-            # 不上，哪怕服务早就真的返回成功了也会误判成失败、无限重试
-            # 下去，实测复现过锁定成功后还傻等了几十次。
-            if echo "${_result}" | grep -q "success=True"; then
-                echo "== [flight-stack:${NAMESPACE}] set_origin_from_uwb锁定成功（第${_attempt}次尝试） =="
-                break
-            fi
-        done
-    ) &
+    # 2026-10-13：UWB_GLOBAL_FRAME=true 时**跳过**这段自动锁定。
+    # 那个口径下不起 origin_setter_node（world -> {ns}/map 发恒等静态 TF），
+    # `set_origin_from_uwb` 服务不存在；而下面这段是 while true、**不设重试
+    # 上限**的，会每 3 秒调一次不存在的服务并打印一遍失败，永久刷屏 + 白耗
+    # CPU。恒等 TF 在容器起来那一刻就有了，本来也不需要"锁"这一步。
+    if [ "${UWB_GLOBAL_FRAME:-true}" = "true" ]; then
+        echo "== [flight-stack:${NAMESPACE}] UWB 绝对系：跳过起飞点自动锁定（world -> ${NAMESPACE}/map 已是恒等静态 TF，无需 set_origin_from_uwb） =="
+    else
+        (
+            _attempt=0
+            while true; do
+                _attempt=$((_attempt + 1))
+                sleep 3
+                _result="$(ros2 service call "/${NAMESPACE}/set_origin_from_uwb" std_srvs/srv/Trigger "{}" 2>&1)"
+                echo "== [flight-stack:${NAMESPACE}] set_origin_from_uwb第${_attempt}次尝试 =="
+                echo "${_result}"
+                # 2026-09-15实测踩坑：`ros2 service call`对`std_srvs/srv/
+                # Trigger`打印的实际是Python repr格式`success=True`（等号+
+                # 首字母大写，不是YAML格式`success: true`）——写成后者匹配
+                # 不上，哪怕服务早就真的返回成功了也会误判成失败、无限重试
+                # 下去，实测复现过锁定成功后还傻等了几十次。
+                if echo "${_result}" | grep -q "success=True"; then
+                    echo "== [flight-stack:${NAMESPACE}] set_origin_from_uwb锁定成功（第${_attempt}次尝试） =="
+                    break
+                fi
+            done
+        ) &
+    fi
 else
     echo "== [flight-stack:${NAMESPACE}] LOCALIZATION_SOURCE=single_slam_only：不启动 uwb_origin_bridge（纯SLAM单机模式，不依赖任何UWB硬件）=="
 fi
@@ -1657,8 +1699,13 @@ if [ "${DEPLOY_TARGET}" != "hw" ]; then
     # 是发布到precision_land_cmd，阶段3的position_cmd_relay不切到
     # precision_land模式的话这些消息没有任何下游消费者，不会误控制。
     echo "== [flight-stack:${NAMESPACE}] 启动 precision_servo_node（阶段6.2精降视觉伺服） =="
+    # 2026-10-13：垂直速率上限。这个节点的 z 一直是裸的——
+    # coordinate_max_speed_mps 的夹限只作用在水平两轴（那段 hypot 只含 x/y），
+    # cmd.velocity.z 也从来没赋值过，一次 2 m 的高度变化第一拍设定点就跳 1 m。
+    # 单独一个参数：_direct_leg() 会把水平限速临时提到 1.0，垂直不该跟着变。
     ros2 run contest_mission precision_servo_node \
-        --ros-args -r __ns:="/${NAMESPACE}" &
+        --ros-args -r __ns:="/${NAMESPACE}" \
+        -p coordinate_max_z_speed_mps:="${SERVO_MAX_Z_SPEED_MPS:-0.6}" &
 
     # 2026大赛任务系统阶段6.1：执行器（符号化动作）节点，纯状态记录，
     # 不依赖odom/vision/position_cmd任何一路话题，理论上sim/hw都能跑，
@@ -1673,8 +1720,48 @@ if [ "${DEPLOY_TARGET}" != "hw" ]; then
     # 下这个节点不起作用（既有约束，不是这次引入的）。SDK侧探测不到这个
     # server时会自动退回原来的选手侧判定，所以镜像可以分开重建。
     echo "== [flight-stack:${NAMESPACE}] 启动 takeoff_monitor_node（起飞完成判定，机载） =="
+    # 2026-10-13 用户要求关掉起飞前的静止判据（两次明确要求）。门限抬到
+    # 实际不会触发的值即可，走参数不改代码。想恢复把这两个环境变量设回
+    # 0.08/0.09。实测背景：NX02 静止时 odom 速度一直报 0.29 m/s（NX01 只有
+    # 0.025），45 秒凑不够"连续 3 秒 < 0.08"，起飞指令根本发不出去。
     ros2 run contest_mission takeoff_monitor_node \
-        --ros-args -r __ns:="/${NAMESPACE}" &
+        --ros-args -r __ns:="/${NAMESPACE}" \
+        -p static_speed_max_mps:="${TAKEOFF_STATIC_SPEED_MAX:-0.08}" \
+        -p instant_speed_max_mps:="${TAKEOFF_INSTANT_SPEED_MAX:-0.09}" &
 fi
+
+# ---- 2026-10-14：机载节点退出监视 ----
+# 背景：真机 mission_slim 实测 formation_follower_node 在第 1 轮编队干净收尾
+# (stage=break) 之后**静默消失**——这些节点都是 `ros2 run ... &` 起的，进程死了
+# 没有任何人报（下面那个 `wait` 等的是全部后台任务，不会告诉你少了谁），而节点
+# main() 当时只接 KeyboardInterrupt、异常穿过 spin() 落到 finally 就把进程干净
+# 拆了、栈从没打印。后果：第 2 轮 follow_formation 的 leg_route 参数设置等满
+# 10 秒抛异常，两机双双悬停，根因只能靠事后 ps / ros2 node list 推断。
+# 节点侧已补 `except BaseException` 打栈（五个节点都补了），这里再加一道外部
+# 点名：少了谁就醒目打一行，带上它活了多久。
+# ⚠️ pgrep -f 会匹配到自己这条命令，所以用方括号技巧
+# （见记忆 feedback_avoid_self_matching_pkill，一天踩过三次）。
+_NODE_WATCH="position_cmd_relay_node line_goto_node formation_follower_node \
+precision_servo_node takeoff_monitor_node target_locate_node"
+(
+    sleep 40                      # 等节点起齐再记基线
+    declare -A _alive
+    for _n in ${_NODE_WATCH}; do
+        if pgrep -f "[${_n:0:1}]${_n:1}" >/dev/null 2>&1; then
+            _alive[${_n}]=$(date +%s)
+        fi
+    done
+    echo "== [flight-stack:${NAMESPACE}] 节点退出监视已起，纳入 ${#_alive[@]} 个节点：${!_alive[*]} =="
+    while [ ${#_alive[@]} -gt 0 ]; do
+        for _n in "${!_alive[@]}"; do
+            if ! pgrep -f "[${_n:0:1}]${_n:1}" >/dev/null 2>&1; then
+                echo "!! [flight-stack:${NAMESPACE}] **节点 ${_n} 已退出**（存活约 $(( $(date +%s) - ${_alive[$_n]} )) 秒）——它起来过、现在不在了。往上翻它自己的 FATAL/Traceback；空中表现通常是\"飞机正常悬停\"或某个 SDK 动作等到超时。" >&2
+                unset "_alive[${_n}]"
+            fi
+        done
+        sleep 5
+    done
+    echo "!! [flight-stack:${NAMESPACE}] 监视名单里的节点全没了，停止监视 ==" >&2
+) &
 
 wait

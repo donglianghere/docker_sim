@@ -47,7 +47,8 @@ from quadrotor_msgs.msg import PositionCommand
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 
-VALID_MODES = ('normal', 'precision_land', 'orbit_yaw_override', 'pillar_aim', 'formation')
+VALID_MODES = ('normal', 'precision_land', 'orbit_yaw_override', 'pillar_aim',
+               'formation', 'line_goto')
 
 
 class PositionCmdRelayNode(Node):
@@ -75,6 +76,10 @@ class PositionCmdRelayNode(Node):
         # formation_cmd——跟随者的设定点逐点复现长机走过的轨迹，必须绕开
         # ego_planner（规划器会自己重新规划、抄近道切内弯，实测轨迹很乱）。
         self.create_subscription(PositionCommand, 'formation_cmd', self._on_formation_cmd, 10)
+        # 2026-10-13：直线航点飞行（line_goto_node）。它替代 ego_planner +
+        # traj_server 走航点，所以跟 precision_land/pillar_aim 一样是
+        # **完全接管**模式——见下面 _on_position_cmd 的丢弃列表。
+        self.create_subscription(PositionCommand, 'line_goto_cmd', self._on_line_goto_cmd, 10)
         # 跟px4ctrl_docker_sim.launch.py里px4ctrl_node_ego_planner的odom
         # remap用同一个话题名——两边应该看到同一份"控制器实际在用的里程计"，
         # 不是另开一路可能跟控制器不一致的定位源。
@@ -105,8 +110,16 @@ class PositionCmdRelayNode(Node):
 
     def _on_position_cmd(self, msg: PositionCommand):
         mode = self.relay_mode
-        if mode in ('precision_land', 'pillar_aim'):
-            # 完全接管：traj_server这一路在这两个模式下都被丢弃，不转发。
+        if mode in ('precision_land', 'pillar_aim', 'formation', 'line_goto'):
+            # 完全接管：traj_server这一路在这几个模式下都被丢弃，不转发。
+            #
+            # 2026-10-13 修：原来这个列表里**没有 formation**，尽管
+            # _on_formation_cmd 的注释写着"跟上面两个完全接管模式同一个形状"。
+            # 于是 formation 模式下 traj_server 和 formation_follower_node 两路
+            # 都往 position_cmd_relayed 发，控制器拿到的是谁后到算谁。
+            # 一直没出事是因为 ego_planner_traj_server_stop_after_finish.patch
+            # 让 traj_server 飞完 1 秒就停发、僚机编队期间它恰好是静默的——
+            # 属于被掩盖，不是不存在。line_goto 一并加进来。
             return
         if mode == 'orbit_yaw_override':
             self._publish_with_orbit_yaw(msg)
@@ -121,6 +134,13 @@ class PositionCmdRelayNode(Node):
 
     def _on_pillar_aim_cmd(self, msg: PositionCommand):
         if self.relay_mode != 'pillar_aim':
+            return
+        self.pub.publish(msg)
+
+    def _on_line_goto_cmd(self, msg: PositionCommand):
+        """直线航点飞行指令（2026-10-13新增）。只在 relay_mode='line_goto' 下
+        转发，其余模式原样丢弃——跟上面几个完全接管模式同一个形状。"""
+        if self.relay_mode != 'line_goto':
             return
         self.pub.publish(msg)
 
@@ -171,6 +191,19 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        # 2026-10-14 加（position_cmd_relay_node 同款缺口）：原来只接 KeyboardInterrupt，
+        # 其余异常会穿过 spin() 落到 finally，节点被干净拆掉、进程**静默退出**，
+        # 异常从没被打印。空中表现就是"飞机正常悬停"，根因只能事后 ps 推断。
+        # 用 BaseException 而非 Exception：SystemExit/GeneratorExit 这类更难查。
+        import traceback
+        try:
+            node.get_logger().fatal('position_cmd_relay_node 因未捕获异常退出——完整栈：\n'
+                                    + traceback.format_exc())
+        except Exception:
+            pass
+        traceback.print_exc()
+        raise
     finally:
         node.destroy_node()
         rclpy.shutdown()

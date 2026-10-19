@@ -52,6 +52,24 @@ class ImagePublisherNode(Node):
         self.declare_parameter('frame_id', 'camera_down')
         # imx219常见配置约78度水平视场角，按针孔模型粗估fx/fy——不是标定值，
         # 见文件头注释
+        #
+        # ⚠️⚠️ 2026-10-10：这是**占位内参**，不要用它做目标定位。
+        #   本节点只在 set_camera_mode(cam, 'apriltag') 这条链上起来
+        #   （control_server.py 的 mode=="apriltag" 分支 -> apriltag_stack.launch.py），
+        #   那条链**不传** fx/fy/cx/cy，只能用下面这个 hfov 现算，误差无法控制。
+        #
+        #   真实内参在 **control_server.py 的 _calib**（每台机器各自一份，
+        #   `-p fx:= -p fy:= -p cx:= -p cy:=` 传给 yolo_detector_node），
+        #   2026-10-10 任务机换摄像头后实测 fx=735.46；按这里 78° 算出来是
+        #   fx = 1280/(2*tan(39°)) ≈ 788，**差 7%**，换了镜头只会更偏。
+        #
+        #   ⚠️ 火情定位必须走 **yolo** 模式：`yolo_detector_node` 是 AprilTag 与
+        #   YOLO **并行**检测、复用同一帧（见该文件 2026-10-03 注释），所以
+        #   `apriltag:0/1/2` 这类目标在 yolo 模式下照样能找到，而且吃的是实测内参。
+        #   四个选手程序（groundfire/highrise/mission/mission_nofire）用的都是
+        #   yolo 模式：`set_camera_mode()` 的 mode 默认值就是 'yolo'。
+        #   谁要是图省事写成 mode='apriltag'，target_locate_node 的像素->射线解算
+        #   会静默偏掉——没有任何报错，只是火点坐标不对。
         self.declare_parameter('approx_hfov_deg', 78.0)
         # 2026-08-25加了MJPEG预览（跟yolo_detector_node.py/qr_detect_node.py
         # 同款做法）：AprilTag桥接跑的这一路相机也要能拉流看画面。这里显示

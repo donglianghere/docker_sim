@@ -26,7 +26,7 @@ from venue import ROUTE_G, ROUTE_D, CRUISE_AGL_M
 LAPS = 3
 
 
-def test(sdk):
+def test(sdk: DroneSDK):
     sdk.progress('=== 测试 5：G↔D 往返仿地 ===')
     sdk.progress(f'G{ROUTE_G} <-> D{ROUTE_D}，共 {LAPS} 个来回')
     sdk.takeoff(height_m=CRUISE_AGL_M)

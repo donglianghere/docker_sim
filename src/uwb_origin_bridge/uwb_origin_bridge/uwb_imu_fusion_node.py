@@ -290,15 +290,24 @@ class UwbImuFusionNode(Node):
         self._last_range_time = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
 
     def _uwb_cb(self, msg: PoseStamped):
+        # 2026-10-13：**不再减起点坐标**，直接用 uwb/pose_abs 的绝对值。
+        # 用户指出得对：GPS/mocap 飞行里起飞点从来不是原点，"起飞点必须是零"
+        # 是这个减法留下的包袱、不是 PX4 的要求。EKF2_EV_CTRL=11 融合外部视觉的
+        # 位置+偏航，喂绝对值它就工作在绝对系里，不需要任何起飞点锁定。
+        # 纯惯性传播的初值要跟着搬到第一帧观测上，否则 _p_state 从 [0,0,0] 起步、
+        # 要被互补滤波拉 8~12 米才收敛。
+        # _origin_xyz 字段保留但恒为零，免得动其它引用点。
         if self._origin_xyz is None:
-            self._origin_xyz = (
-                msg.pose.position.x, msg.pose.position.y, msg.pose.position.z)
+            self._origin_xyz = (0.0, 0.0, 0.0)
+            self._p_state[0] = msg.pose.position.x
+            self._p_state[1] = msg.pose.position.y
+            self._p_state[2] = msg.pose.position.z
 
         prev_uwb_xyz = self._last_uwb_xyz  # 修正用，取本次覆盖之前的上一帧
         self._last_uwb_xyz = (
-            msg.pose.position.x - self._origin_xyz[0],
-            msg.pose.position.y - self._origin_xyz[1],
-            msg.pose.position.z - self._origin_xyz[2])
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z)
         q = msg.pose.orientation
         self._last_uwb_yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))

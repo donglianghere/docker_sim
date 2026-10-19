@@ -1,0 +1,95 @@
+--- a/src/planner/plan_manage/src/ego_replan_fsm.cpp
++++ b/src/planner/plan_manage/src/ego_replan_fsm.cpp
+@@ -9,6 +9,10 @@
+   static double g_poly_reset_period_s = 0.0;
+   static double g_last_poly_reset_s = 0.0;
+ 
++  // docker_sim: 起点速度/加速度对齐到"起点->局部目标"方向用的开关。
++  static bool g_align_start_state = false;
++  static double g_align_max_lat_v = 0.5;
++
+ 
+   void EGOReplanFSM::init(rclcpp::Node::SharedPtr &node)
+   {
+@@ -37,6 +41,25 @@
+     // 0 = 关闭（只在重规划失败时才退回多项式，即改造前的行为）。
+     node_->declare_parameter("fsm/poly_reset_period_s", 0.0);
+     node_->get_parameter("fsm/poly_reset_period_s", g_poly_reset_period_s);
++    // docker_sim 2026-10-12：把起点速度/加速度**投影**到"起点->局部目标"方向，
++    // 清掉横向分量（false=关闭，行为不变）。
++    // 为什么需要：B 样条前 order_(3) 个控制点不是优化变量（bspline_optimizer.cpp
++    // 的 start_id = order_），它们由起点的位置/速度/加速度唯一确定。重规划时
++    // start_vel_ 取自**上一条轨迹**（planFromCurrentTraj），上一条是弯的，它在
++    // 该点的速度就带横向分量，于是新轨迹继承这个横向速度——改代价函数、换初值
++    // 种子都动不了它。poly_reset 只换种子不换边界条件，所以实测 0.5 秒重置了
++    // 236 次、A->B 的鼓包一点没小。
++    // 实测（2026-10-12 formation_lite）：长机以 1.25 m/s 冲进 A(3,3)，过冲 0.65 m
++    // 回拉，带着 +0.27 m/s 的横向速度进入 A->B，轨迹被甩到 x=4.96、19 米才摊平，
++    // 横偏峰值 1.96 m；同期 B->C/C->G/G->D 三段横偏都 <= 0.52 m。
++    // 清掉横向分量之后，那点速度改由 pt4ctrl 在一两秒内吃掉，而不是让规划器
++    // 用 19 米去磨。
++    node_->declare_parameter("fsm/align_start_state", false);
++    node_->get_parameter("fsm/align_start_state", g_align_start_state);
++    // [m/s] 横向分量超过这个值就**不**对齐：说明飞机确实在做横向机动（刚拐弯、
++    // 正绕障），硬清零会让期望速度跳变太大，控制器吃不下反而更糟。
++    node_->declare_parameter("fsm/align_max_lat_vel", 0.5);
++    node_->get_parameter("fsm/align_max_lat_vel", g_align_max_lat_v);
+ 
+     node_->get_parameter("fsm/flight_type", target_type_);
+     node_->get_parameter("fsm/thresh_replan_time", replan_thresh_);
+@@ -1112,6 +1135,55 @@
+ 
+     getLocalTarget();
+ 
++    // docker_sim 2026-10-12：起点速度/加速度沿"起点->局部目标"方向投影。
++    // 放在 getLocalTarget() 之后、reboundReplan() 之前：local_target_pt_ 刚算出来，
++    // 而所有规划入口（planFromGlobalTraj 用 odom_vel_、planFromCurrentTraj 用上一条
++    // 轨迹的采样值）都汇到这一处，改这里就全覆盖。
++    // **投影而不是赋值**：沿线分量原样保留（不凭空造速度、不影响时间分配），
++    // 只把横向分量清零。理由见 init() 里 fsm/align_start_state 的注释。
++    if (g_align_start_state)
++    {
++      Eigen::Vector3d seg = local_target_pt_ - start_pt_;
++      double seg_len = seg.norm();
++      // 门槛必须比"到达判据"大：飞机悬停在目标点上时 start_pt_ 和
++      // local_target_pt_ 只差零点几米，dir 就成了由位置噪声决定的随机方向，
++      // 再把速度投影上去等于凭空给一个随机朝向的起点速度。2026-10-12 自查
++      // 发现，原来写的 1e-3 太松，而这个窗口恰好跟 face_yaw 原地转向
++      //（靠 traj_server 的 yaw_hold 发 position_cmd）的竞争窗口重叠。
++      // 0.5 m > GOAL_RADIUS(0.3)，也远小于任何一个真实航段（最短 5.3 m）。
++      if (seg_len > 0.5)
++      {
++        Eigen::Vector3d dir = seg / seg_len;
++        double v_along = start_vel_.dot(dir);
++        double v_lat = (start_vel_ - dir * v_along).norm();
++        if (v_lat > 1e-4 && v_lat <= g_align_max_lat_v)
++        {
++          // 直线在膨胀图上通才对齐——正绕障时把起点速度拉成指向目标，等于让
++          // 轨迹起步朝障碍物冲，再靠 collision 项推回来，白白绕一下。判据跟
++          // poly_reset 那段一致。
++          bool line_free = true;
++          double step = planner_manager_->grid_map_->getResolution();
++          if (step > 1e-6)
++          {
++            for (double d = 0.0; d <= seg_len; d += step)
++            {
++              if (planner_manager_->grid_map_->getInflateOccupancy(start_pt_ + seg * (d / seg_len)))
++              {
++                line_free = false;
++                break;
++              }
++            }
++          }
++          if (line_free)
++          {
++            // max(0,·)：飞机沿线倒退时不要喂负速度进去
++            start_vel_ = dir * std::max(0.0, v_along);
++            start_acc_ = dir * start_acc_.dot(dir);
++          }
++        }
++      }
++    }
++
+     bool plan_and_refine_success =
+         planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_, (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj);
+     have_new_target_ = false;

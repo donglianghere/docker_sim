@@ -193,28 +193,9 @@
       </link>
     </model>
 
-    <model name='obstacle_cylinder'>
-      <static>1</static>
-      <pose>3.0 8.0 3.0 0 0 0</pose>
-      <link name='link'>
-        <collision name='collision'>
-          <geometry><cylinder><radius>0.25</radius><length>6.0</length></cylinder></geometry>
-        </collision>
-        <visual name='visual'>
-          <geometry><cylinder><radius>0.25</radius><length>6.0</length></cylinder></geometry>
-          <material>
-            <script>
-              <uri>file://media/materials/scripts/gazebo.material</uri>
-              <name>Gazebo/Blue</name>
-            </script>
-          </material>
-        </visual>
-      </link>
-    </model>
-
     <model name='pillar_1'>
       <static>1</static>
-      <pose>13.5 19.5 3.0 0 0 0</pose>
+      <pose>6.0 12.5 3.0 0 0 0</pose>
       <link name='link'>
         <collision name='collision'>
           <geometry><box><size>1.0 1.0 6.0</size></box></geometry>
@@ -279,7 +260,7 @@
 
     <model name='pillar_1_e'>
       <static>1</static>
-      <pose>14.5 19.5 3.0 0 0 0</pose>
+      <pose>7.0 12.5 3.0 0 0 0</pose>
       <link name='link'>
         <collision name='collision'>
           <geometry><box><size>1.0 1.0 6.0</size></box></geometry>
@@ -336,7 +317,7 @@
 
     <model name='pillar_2'>
       <static>1</static>
-      <pose>5.5 19.5 3.0 0 0 0</pose>
+      <pose>6.0 19.5 3.0 0 0 0</pose>
       <link name='link'>
         <collision name='collision'>
           <geometry><box><size>1.0 1.0 6.0</size></box></geometry>
@@ -401,7 +382,7 @@
 
     <model name='pillar_2_e'>
       <static>1</static>
-      <pose>6.5 19.5 3.0 0 0 0</pose>
+      <pose>7.0 19.5 3.0 0 0 0</pose>
       <link name='link'>
         <collision name='collision'>
           <geometry><box><size>1.0 1.0 6.0</size></box></geometry>
@@ -458,7 +439,7 @@
 
     <model name='pillar_3'>
       <static>1</static>
-      <pose>5.5 12.5 3.0 0 0 0</pose>
+      <pose>13.0 19.5 3.0 0 0 0</pose>
       <link name='link'>
         <collision name='collision'>
           <geometry><box><size>1.0 1.0 6.0</size></box></geometry>
@@ -523,7 +504,7 @@
 
     <model name='pillar_3_e'>
       <static>1</static>
-      <pose>6.5 12.5 3.0 0 0 0</pose>
+      <pose>14.0 19.5 3.0 0 0 0</pose>
       <link name='link'>
         <collision name='collision'>
           <geometry><box><size>1.0 1.0 6.0</size></box></geometry>
@@ -585,7 +566,7 @@
         <visual name='visual_base'>
           <cast_shadows>0</cast_shadows>
           <pose>0 0 0.01 0 0 0</pose>
-          <geometry><cylinder><radius>0.4</radius><length>0.02</length></cylinder></geometry>
+          <geometry><box><size>2.0 1.0 0.02</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/gazebo.material</uri>
@@ -609,7 +590,7 @@
 
     <model name='fire_point_marker'>
       <static>1</static>
-      <pose>13.0 16.0 0 0 0 0</pose>
+      <pose>13.0 12.5 0 0 0 0</pose>
       <link name='link'>
         <visual name='visual_base'>
           <cast_shadows>0</cast_shadows>
@@ -638,7 +619,7 @@
 
     <model name='fire_apriltag_marker'>
       <static>1</static>
-      <pose>5.50 18.99 2.5 0 0 3.1415927</pose>
+      <pose>6.00 18.99 2.5 0 0 0.0000000</pose>
       <link name='link'>
         <visual name='visual'>
           <cast_shadows>0</cast_shadows>
@@ -655,15 +636,15 @@
 
     <model name='terrain_module'>
       <static>1</static>
-      <pose>17.0 9.5 0.0 0 0 0</pose>
+      <pose>17.0 7.5 0.0 0 0 0</pose>
       <link name='link'>
         <collision name='top_col'>
-          <pose>0 0 0.25 0 0 0</pose>
-          <geometry><box><size>4.0 1.0 0.5</size></box></geometry>
+          <pose>0 0 0.3 0 0 0</pose>
+          <geometry><box><size>1.5 1.0 0.6</size></box></geometry>
         </collision>
         <visual name='top_vis'>
-          <pose>0 0 0.25 0 0 0</pose>
-          <geometry><box><size>4.0 1.0 0.5</size></box></geometry>
+          <pose>0 0 0.3 0 0 0</pose>
+          <geometry><box><size>1.5 1.0 0.6</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/gazebo.material</uri>
@@ -672,12 +653,12 @@
           </material>
         </visual>
         <collision name='ramp_north_col'>
-          <pose>0 1.000 0.000 -0.463648 0 0</pose>
-          <geometry><box><size>4.0 1.118 0.600</size></box></geometry>
+          <pose>0 1.000 -0.000 -0.540420 0 0</pose>
+          <geometry><box><size>1.5 1.166 0.720</size></box></geometry>
         </collision>
         <visual name='ramp_north_vis'>
-          <pose>0 1.000 0.000 -0.463648 0 0</pose>
-          <geometry><box><size>4.0 1.118 0.600</size></box></geometry>
+          <pose>0 1.000 -0.000 -0.540420 0 0</pose>
+          <geometry><box><size>1.5 1.166 0.720</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/gazebo.material</uri>
@@ -686,12 +667,12 @@
           </material>
         </visual>
         <collision name='ramp_south_col'>
-          <pose>0 -1.000 0.000 0.463648 0 0</pose>
-          <geometry><box><size>4.0 1.118 0.600</size></box></geometry>
+          <pose>0 -1.000 -0.000 0.540420 0 0</pose>
+          <geometry><box><size>1.5 1.166 0.720</size></box></geometry>
         </collision>
         <visual name='ramp_south_vis'>
-          <pose>0 -1.000 0.000 0.463648 0 0</pose>
-          <geometry><box><size>4.0 1.118 0.600</size></box></geometry>
+          <pose>0 -1.000 -0.000 0.540420 0 0</pose>
+          <geometry><box><size>1.5 1.166 0.720</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/gazebo.material</uri>

@@ -152,6 +152,13 @@ class GtOdomBridgeNode(Node):
         # 注册到全局系"功能真正有意义的前提（如果局部系本来就已经是
         # 全局系，注册这个动作永远是平凡的零偏移，测不出真实逻辑）。
         self._spawn_xyz = None
+        # True = odom 直接发 Gazebo 世界真值（全局坐标，world->odom 恒等）。
+        # False = 旧行为，减掉第一帧当局部系原点。见 _model_states_cb 里的说明。
+        # 2026-10-13 默认改回 False：gt 模式喂 PX4 的 repub_odom 不设协方差，
+        # 发绝对值会让 EKF2 发散（实测几百米）。要用 gt+绝对系，先把那条
+        # 视觉链的协方差补上。
+        self.declare_parameter('absolute', False)
+        self._absolute = bool(self.get_parameter('absolute').value)
         self.imu_sub = self.create_subscription(
             Imu, 'mid360/imu', self._imu_cb,
             QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -183,11 +190,22 @@ class GtOdomBridgeNode(Node):
         # 地方（uwb_sim的broadcast_map_tf等）一致，假设spawn时yaw≈0，
         # 没有额外的旋转需要移除。
         p = msg.pose[idx].position
-        if self._spawn_xyz is None:
-            self._spawn_xyz = (p.x, p.y, p.z)
-        lx = p.x - self._spawn_xyz[0]
-        ly = p.y - self._spawn_xyz[1]
-        lz = p.z - self._spawn_xyz[2]
+        # 2026-10-13 用户要求"只要全局坐标，不需要锁定"：
+        # absolute=True（默认）时**不减** spawn 偏移，odom 直接就是 Gazebo 世界
+        # 真值，于是 world -> {ns}/odom 真的是恒等变换，不需要 origin_setter 去
+        # 测那个偏移、也就没有"起飞点锁定"这回事，两机完全同条件。
+        # 上面那段长注释讲的是减法原来的用意（模仿 DLIO 的局部系行为、让
+        # origin_setter 的"注册"动作非平凡，才能测出真实逻辑）——那是仿真保真度
+        # 的考虑，跟现在"全局坐标"的口径冲突，所以做成开关：要回到旧行为就
+        # GT_ODOM_ABSOLUTE=false。
+        if self._absolute:
+            lx, ly, lz = p.x, p.y, p.z
+        else:
+            if self._spawn_xyz is None:
+                self._spawn_xyz = (p.x, p.y, p.z)
+            lx = p.x - self._spawn_xyz[0]
+            ly = p.y - self._spawn_xyz[1]
+            lz = p.z - self._spawn_xyz[2]
 
         odom = Odometry()
         odom.header.stamp = stamp

@@ -9,20 +9,20 @@
 
 | 行 | API | 分类 | 做什么 |
 |---|---|---|---|
-| 20 | [`takeoff`](#takeoff) | 起飞 / 降落 / 返航 | 起飞：发布TakeoffLand{TAKEOFF}，阻塞直到armed=True且飞控自己的起飞状态机真 |
-| 24 | [`lead_formation`](#lead_formation) | 编队 | 长机带队飞一条航线。只管空中段，起降由调用方自己决定。 |
-| 26 | [`hold_at`](#hold_at) | 航线飞行 | 飞到某个世界坐标悬停待命，不降落。seconds>0 就停够这么久再返回。 |
-| 27 | [`announce`](#announce) | 声光播报 | 播报一次声光事件。play_sound_light() 的别名，名字更贴近用途。 |
-| 33 | [`follow_formation`](#follow_formation) | 编队 | 僚机跟队。只管空中段，起降由调用方自己决定。 |
-| 34 | [`return_home`](#return_home) | 起飞 / 降落 / 返航 | 回自己的起飞点，默认降落。返回是否真的落在自己的起降点上。 |
-| 38 | [`run`](#run) | 程序入口 | 选手程序的 main()：解析命令行 -> 建 SDK -> 按角色分派 -> 收尾。 |
+| 28 | [`takeoff`](#takeoff) | 起飞 / 降落 / 返航 | 起飞：发布TakeoffLand{TAKEOFF}，阻塞直到armed=True且飞控自己的起飞状态机真 |
+| 32 | [`lead_formation`](#lead_formation) | 编队 | 长机带队飞一条航线。只管空中段，起降由调用方自己决定。 |
+| 34 | [`hold_at`](#hold_at) | 航线飞行 | 飞到某个世界坐标悬停待命，不降落。seconds>0 就停够这么久再返回。 |
+| 35 | [`announce`](#announce) | 声光播报 | 播报一次声光事件。play_sound_light() 的别名，名字更贴近用途。 |
+| 41 | [`follow_formation`](#follow_formation) | 编队 | 僚机跟队。只管空中段，起降由调用方自己决定。 |
+| 42 | [`return_home`](#return_home) | 起飞 / 降落 / 返航 | 回自己的起飞点，默认降落。返回是否真的落在自己的起降点上。 |
+| 46 | [`run`](#run) | 程序入口 | 选手程序的 main()：解析命令行 -> 建 SDK -> 按角色分派 -> 收尾。 |
 
 ## 逐个说明
 
 <a id="takeoff"></a>
 ### `takeoff(timeout: float=60.0, height_m: Optional[float]=None)`
 
-*formation_lite.py 第 20 行首次用到 · 起飞 / 降落 / 返航*
+*formation_lite.py 第 28 行首次用到 · 起飞 / 降落 / 返航*
 
 起飞：发布`TakeoffLand{TAKEOFF}`，阻塞直到`armed=True`**且**飞控自己的起飞状态机真正爬升到位、转入稳定悬停——不是`armed=True`就立刻返回。
 
@@ -32,9 +32,9 @@
 - height_m: 起飞到多高（米，离地）。不给就用飞控 `pt4ctrl` 里 配置的 takeoff_height。
 
 <a id="lead_formation"></a>
-### `lead_formation(route: Sequence[Tuple[float, float]], spacing_m: Optional[float]=None, agl_m: float=2.0, hold_s: float=2.0, start_xy: Optional[Tuple[float, float]]=None, final_xy: Optional[Tuple[float, float]]=None, disband_at: Optional[Tuple[float, float]]=None, wait_follower_s: float=300.0, tail_direct: bool=False)`
+### `lead_formation(route: Sequence[Tuple[float, float]], spacing_m: Optional[float]=None, agl_m: float=2.0, hold_s: float=2.0, start_xy: Optional[Tuple[float, float]]=None, direct_legs: Optional[Sequence[Tuple[Tuple[float, float], Tuple[float, float]]]]=None, final_xy: Optional[Tuple[float, float]]=None, disband_at: Optional[Tuple[float, float]]=None, wait_follower_s: float=300.0, tail_direct: bool=False, turn_at_waypoint: bool=False)`
 
-*formation_lite.py 第 24 行首次用到 · 编队*
+*formation_lite.py 第 32 行首次用到 · 编队*
 
 长机带队飞一条航线。**只管空中段**，起降由调用方自己决定。
 
@@ -45,17 +45,19 @@
 - agl_m: 全程锁的离地高度（米）。
 - hold_s: 每个航点停多久（秒）。转向跟停顿同时进行，不足的部分补足。
 - start_xy: 从哪儿起步（默认自己当前位置换算成的起飞点）。编队段从 半路开始时要给，否则僚机算出来的起始站位会跑到场外。
+- direct_legs: 指定哪些航段走**直飞**（`goto_direct`，不经规划器、 **没有避障**），元素是世界坐标的 `(起点, 终点)` 对，比如 `[(ROUTE_B, ROUTE_C), (ROUTE_C, ROUTE_G)]`。不在表里的航段照常 走规划器。 ⚠️ **每一段都必须先用 `tools/check_route.py --direct` 核过余量**。 2026-10-01 就是手算漏了 `obstacle_cylinder`，把正穿 6 米高柱子的 航段判成"干净"改成直飞，结果擦墙摔机（那根圆柱 2026-10-11 已被 用户去掉，但"不手算、用工具"这条照旧）。工具会把布局文件里的 立柱/避障圆柱/仿地模块/四面墙**全部**读出来算。 ⚠️ 工具只算**水平**余量，不看障碍高度。像"仿地模块"这种高 0.6 m （2026-10-11 用户从 0.5 改的）的地面凸起，它会报余量 0、判定 不可直飞，但巡航 1.5 m 时从上方飞过是安全的——这种例外要自己判断，并且记住：**巡航高度一旦降低， 结论就不再成立**。
 - final_xy: 航线跑完再飞到哪儿（默认 route[0]）。
 - disband_at: 给了就按"**僚机过了这个航点**"解散；不给按"长机飞回 自己起飞点上空"解散。
 - wait_follower_s: 等僚机到站位的上限，等不到也照飞。
 - tail_direct: 最后一段（飞往 final_xy 那一段）走直线。 **解散就发生在这一段上**——disband_at 的判据是"长机已经离开 那个航点 spacing+lag 米"，所以长机走到这一段中途才解散，剩下 的路本质上是"解散后各自回家"。前提同 `goto_world()` 的 direct：必须算过这条直线的余量。
+- turn_at_waypoint: 拐点要不要把机头转到下一段航向。**默认 False=不转** （2026-10-05 用户要求改成默认不转向）。 · False：机头保持进入编队段时的朝向不变，整条航线不动。`hold_s` 仍然照停——那个停顿是给僚机收间距用的，跟转不转向无关。 · True：拐点先停下把机头转到该段航向再前飞（`face_yaw()`，容差 5°、超时 15 秒）。实际转速受两级限幅：traj_server 的 `yaw_dot_max`（EGO_YAW_DOT_MAX，真机 0.8 rad/s ≈ 45.8 °/s）和 飞控的 `MPC_YAWRAUTO_MAX`（真机 45.0 °/s，实际瓶颈），所以 90° 左右的拐点约 2 秒转完，跟 `hold_s=2.0` 刚好吻合。 ⚠️ 这一项只管长机。僚机那侧是 `follow_formation()` 的**同名参数** （默认值也是 False），它往下传成 `formation_follower_node` 的 `yaw_follow_leg`。两边分别设置、互不联动——要一致就两边给同一个值。
 
 > ⚠️ disband_at 要显式给。不给的话默认判据是“长机飞回自己起飞点上空”，而起飞点不一定在航线上，编队可能在半路散掉。
 
 <a id="hold_at"></a>
 ### `hold_at(wx: float, wy: float, agl_m: float=2.0, seconds: float=0.0, direct: bool=False)`
 
-*formation_lite.py 第 26 行首次用到 · 航线飞行*
+*formation_lite.py 第 34 行首次用到 · 航线飞行*
 
 飞到某个世界坐标悬停待命，**不降落**。seconds>0 就停够这么久再返回。
 
@@ -70,7 +72,7 @@
 <a id="announce"></a>
 ### `announce(event: str)`
 
-*formation_lite.py 第 27 行首次用到 · 声光播报*
+*formation_lite.py 第 35 行首次用到 · 声光播报*
 
 播报一次声光事件。`play_sound_light()` 的别名，名字更贴近用途。
 
@@ -79,9 +81,9 @@
 - event: 声光事件名。**必须是固定枚举里的一项**（见 `_sound_light_port.py` 的 SOUND_LIGHT_EVENTS），自造名字会 直接抛 ValueError 把整个任务打断。
 
 <a id="follow_formation"></a>
-### `follow_formation(spacing_m: Optional[float]=None, agl_m: float=2.0, join: str='station', route_wait_s: float=60.0, done_wait_s: float=600.0)`
+### `follow_formation(spacing_m: Optional[float]=None, agl_m: float=2.0, join: str='station', route_wait_s: float=60.0, done_wait_s: float=600.0, turn_at_waypoint: bool=False)`
 
-*formation_lite.py 第 33 行首次用到 · 编队*
+*formation_lite.py 第 41 行首次用到 · 编队*
 
 僚机跟队。**只管空中段**，起降由调用方自己决定。
 
@@ -92,11 +94,12 @@
 - join: `'station'` 先飞到"航线起点后方 spacing 米"的站位点再入列 （编队从头开始时用）；`'nearest'` 就地入列（任务流程里僚机刚 做完事就在长机附近，再飞一趟站位点纯属绕路）。
 - route_wait_s: 等长机下发航线的上限（秒）。等不到就只跟队、不做 分段航向，机头全程不变。
 - done_wait_s: 等长机发"解散"的上限（秒）。等不到也会自己出列， 免得长机那边出问题时僚机永远挂着。
+- turn_at_waypoint: 拐点要不要把机头转到下一段航向。**默认 False=不转** （2026-10-05 跟长机 `lead_formation()` 的同名参数对齐，默认值 也一样，两边一起不转才不会出现"长机机头不动、僚机在拐点转"的 不一致）。 · False：传 `turn_in_place=False` 给 `formation_follower_node` （也就是把它的 `yaw_follow_leg` 关掉），僚机全程机头不变； 入列前飞站位点那一次 `face_yaw()` 也一并跳过。 · True：拐点先停下转到该段航向再前飞。⚠️ 那条路的门控 （`_yaw_turning`）**只有"机头真的转到位"一个出口、没有超时逃生**， 航向指令一旦不生效（例如 PX4CTRL_YAW_LOCK_ENABLED=true）僚机会 永久悬停——2026-10-04 真机就是这么挂的。 ⚠️ 不管这一项取什么值，`leg_route` 都照常下发：它除了定航向，还 用来算**航线里程尺**（清洗长机轨迹）和**拐点前馈收油** （`corner_ff_radius_m`），关掉航向不等于不需要航线。
 
 <a id="return_home"></a>
 ### `return_home(land: bool=True, agl_m: float=2.0, sound: Optional[str]=None, report: Optional[str]=None, direct: bool=False)`
 
-*formation_lite.py 第 34 行首次用到 · 起飞 / 降落 / 返航*
+*formation_lite.py 第 42 行首次用到 · 起飞 / 降落 / 返航*
 
 回自己的起飞点，默认降落。返回**是否真的落在自己的起降点上**。
 
@@ -111,9 +114,9 @@
 > ⚠️ 自带落点核对：落在起降点上才播 sound、才算数。任务流程里会降落好几次（取器材、放器材、回家），“降落动作完成”本身说明不了任务结束。
 
 <a id="run"></a>
-### `run(leader: Any, follower: Any, description: Optional[str]=None, spacing_m: float=4.0)`
+### `run(leader: Any, follower: Any, description: Optional[str]=None, spacing_m: float=5.0)`
 
-*formation_lite.py 第 38 行首次用到 · 程序入口*  ·  *staticmethod*
+*formation_lite.py 第 46 行首次用到 · 程序入口*  ·  *staticmethod*
 
 选手程序的 main()：解析命令行 -> 建 SDK -> 按角色分派 -> 收尾。
 

@@ -101,7 +101,7 @@ def _ang_diff(a: float, b: float) -> float:
     return abs((a - b + math.pi) % (2 * math.pi) - math.pi)
 from rcl_interfaces.msg import Parameter as ParameterMsg
 from rcl_interfaces.msg import ParameterType, ParameterValue, SetParametersResult
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.parameter import Parameter
 from rclpy.node import Node
 from rclpy.publisher import Publisher
@@ -573,6 +573,48 @@ class RouteRuler:
     def total(self) -> float:
         return self._arc[-1] if self._arc else 0.0
 
+    # ---- 2026-10-14：下面三个方法让这把"尺"也能当**几何基准**用 ----
+    # 原设计是"只量进度、不决定飞哪儿"（见类文档），因为僚机没有独立避障、
+    # 必须沿长机实飞轨迹飞才安全。现在两个前提都变了：①用户确认不需要避障；
+    # ②长机自己也走 line_goto 的结构性直线了（横偏均值 0.11 m），"长机实飞
+    # 轨迹"和"航线折线"本来就几乎重合，跟轨迹反而是在复刻长机的跟踪误差
+    # （09-28 复盘记的拐点冲过头 0.5 m、倒退 2.2 m、悬停 3 s 就是被原样复刻的）。
+    # 方法名与 LeaderPathBuffer 保持一致，好让 _basis_path() 直接互换。
+    def total_length(self) -> float:
+        return self.total()
+
+    def project_arc_length(self, own_x: float, own_y: float,
+                           last_s: Optional[float] = None) -> Optional[float]:
+        return self.project(own_x, own_y, last_s)
+
+    def point_at_arc_length(self, s_query: float):
+        """取折线上弧长为 s_query 的点，返回 (x, y, z)。
+
+        z 恒为 0.0：高度这一路**本来就不走路径**（见文件头"高度不走轨迹、
+        也不跟长机"那段），调用方只取 [0]/[1]，给个占位值即可。
+        """
+        n = len(self._xs)
+        if n < 2:
+            return None
+        s = max(0.0, min(float(s_query), self._arc[-1]))
+        lo, hi = 0, n - 2
+        while lo < hi:                      # 二分找 s 落在第几段
+            mid = (lo + hi) // 2
+            if s >= self._arc[mid + 1]:
+                lo = mid + 1
+            else:
+                hi = mid
+        seg = self._arc[lo + 1] - self._arc[lo]
+        t = ((s - self._arc[lo]) / seg) if seg > 1e-9 else 0.0
+        return (self._xs[lo] + (self._xs[lo + 1] - self._xs[lo]) * t,
+                self._ys[lo] + (self._ys[lo + 1] - self._ys[lo]) * t,
+                0.0)
+
+    def last_xy(self) -> Optional[Tuple[float, float]]:
+        if not self._xs:
+            return None
+        return (self._xs[-1], self._ys[-1])
+
     def project(self, x: float, y: float, last_s: Optional[float] = None) -> Optional[float]:
         """位置投到航线上，返回弧长坐标。消歧同 LeaderPathBuffer：滑动窗口+逃逸。"""
         n = len(self._xs)
@@ -853,6 +895,16 @@ class FormationFollowerNode(Node):
         # 落后了就追不回来）；>1 时 s_limit_gap 才是真正的约束，弧长间距被钉死。
         # 别设太大：参考点跑太快只会顶到 lookahead_m 那条线空转，而且设定点
         # 单步还受 max_lead_m(1.5) 限幅、实际速度由 PX4 位置环决定。
+        #: 几何基准：僚机**飞哪条线**。2026-10-14 加。
+        #: · 'leader_traj'（默认，旧行为）= 沿长机实飞轨迹。长机走 ego_planner
+        #:   弯曲轨迹的年代这是僚机**唯一的避障保证**（见 RouteRuler 类文档）。
+        #: · 'route' = 直接在航点折线上取点。前提是①不需要避障②长机自己也飞
+        #:   折线（line_goto）。好处：不复刻长机的跟踪误差/拐点回钩/悬停抖动，
+        #:   不依赖长机轨迹流，不用逐点做跨机 TF 变换。
+        #: ⚠️ 两种基准下"量多远"都走航线弧长（RouteRuler），这一点不变。
+        self.declare_parameter('follow_basis', 'leader_traj')
+        #: 长机广播进度(line_goto_diag)的新鲜度上限（秒）。超了就退回投影。
+        self.declare_parameter('leader_s_timeout_s', 1.0)
         self.declare_parameter('reference_rate_headroom', 1.5)
         # 参考点推进速率的**变化率**上限（m/s²）。只限速度不限加速度的话，
         # 参考点可以一拍之内从 1.0 跳到 1.5，僚机跟着猛加速，观感上速度变化
@@ -976,6 +1028,20 @@ class FormationFollowerNode(Node):
         self.declare_parameter('auto_switch_relay_mode', True)
         self.declare_parameter('relay_set_parameters_service', 'position_cmd_relay/set_parameters')
 
+        #: 两机**空间直线距离**的下限（米）。0 = 关闭这道保护。
+        #: 2026-10-08 用户定 4.0（编队间距 5.0，留 1 m 余量）。实际取值由
+        #: entrypoint 用 FORMATION_MIN_SEPARATION_M 透传，调参改 .env 即可。
+        #: 2026-10-07 18:31 **真机**两机相撞（最小直线间距 0.03 m）之后加的硬保护，
+        #: 2026-10-12 从真机 hw_overrides 那份移植过来（仿真原来完全没有这道保护）。
+        #: 为什么必须单独有这一条：跟随回路里所有的"间距"（s_limit_gap、
+        #: gap_now、diag 的 data[4]）都是**沿长机轨迹的弧长差**，不是两机
+        #: 直线距离。长机原地打圈/折返时弧长飞快累积（绕一圈 +6 m）而空间
+        #: 位置不动，僚机按弧长一路追，空间上就追到长机身上——撞的那一刻
+        #: 僚机自报 gap 还是 4.25 m，整条回路对此毫无察觉。
+        #: 这一条直接拿两机 UWB 绝对位置算直线距离，独立于弧长逻辑，
+        #: 兜住"弧长失真"这一整类问题。
+        self.declare_parameter('min_separation_m', 4.0)
+
         # 长机轨迹缓冲区+当前订阅状态。_current_leader_ns记录"现在
         # 实际订阅的是哪个命名空间"，跟leader_namespace参数值分开存
         # 一份，是因为参数变更的生效时机是在_on_set_parameters回调
@@ -1013,6 +1079,7 @@ class FormationFollowerNode(Node):
         self._own_xy: Optional[Tuple[float, float]] = None
         self._own_z: Optional[float] = None
         self._last_lag_m: Optional[float] = None
+        self._basis_was = None                      # 上一拍用的几何基准对象，换了要清缓存
         self._last_s_proj: Optional[float] = None   # 上一次的投影弧长，消歧义用
         self._s_rate: Optional[float] = None        # 参考点当前推进速率，限加速度用
         self._s_rate_ff: Optional[float] = None     # 参考点**达成**推进速率（低通），速度前馈用
@@ -1025,6 +1092,24 @@ class FormationFollowerNode(Node):
         self._route_key: Optional[tuple] = None     # 建尺时用的 leg_route_xy，变了就重建
         self._rs_lead: dict = {}                    # 长机、僚机、参考点各自的展开状态
         self._rs_own: dict = {}
+        # ---- 2026-10-14：长机进度**直接取它广播的 s**，不再反推 ----
+        # route 基准下让僚机投影去反推长机进度，在本场航线上不可靠：
+        # ①起点终点同是 A（僚机起步站位处 snap 到末端，实测 gap_route=67 m）；
+        # ②C->G 与 G->D **共线**（都在 x=17），滑窗偏到另一段就锁死，实测
+        #   G 点 gap_route=27.39 ≈ 两段起点弧长差 65.14-38。
+        # 长机 line_goto 自己积分出来的 s 单调、无歧义，50 Hz 在 line_goto_diag
+        # 的 data[0] 上发着，直接拿来用。
+        self._leader_lgdiag_sub = None              # 长机 line_goto_diag 订阅句柄
+        self._lead_s: Optional[float] = None        # 长机自报弧长（它自己的航线原点）
+        self._lead_s_rx: float = 0.0                # 收到时刻（monotonic）
+        self._lead_s_total: Optional[float] = None  # 长机航线总长 data[1]
+        #: 长机 s 原点与僚机 RouteRuler 原点的差。两边首点不同（长机用
+        #: line_goto 起算那一刻的实测位置，僚机用 own_pad()，实测差 2.17 m），
+        #: 还要加上 RouteRuler 的 back_extend，所以必须标定一次再用。
+        #: 入列那一刻长机还在航线起段，投影没有歧义，标定可靠。
+        self._lead_s_offset: Optional[float] = None
+        self._rs_lead_meas: dict = {}               # 长机**实测位置**的展开状态，
+                                                    # 跟 _rs_lead（轨迹清洗用）必须分开
         self._lead_route_s_max: Optional[float] = None   # 长机航线进度的历史最大值
         self._s_route_lead: Optional[float] = None       # 长机当前的航线里程（长机回调里算）
         self._leader_raw_xy: Optional[Tuple[float, float]] = None  # 长机最新实测位置（未经清洗）
@@ -1057,6 +1142,7 @@ class FormationFollowerNode(Node):
         self._agl: Optional[float] = None
         # 参考点沿长机轨迹的弧长进度（匀速推进），入列时从飞机当前投影起步
         self._s_cmd: Optional[float] = None
+        self._last_s_lead_meas: Optional[float] = None   # 长机实测位置的投影弧长
         self._s_cmd_t: Optional[float] = None
         # QoS 必须是 BEST_EFFORT：这条话题的发布端按"高频传感器数据"发
         # （mavros 侧是 SensorDataQoS），用默认的 RELIABLE 订阅会直接
@@ -1072,6 +1158,14 @@ class FormationFollowerNode(Node):
         self.relay_set_params_cli = self.create_client(
             SetParameters,
             str(self.get_parameter('relay_set_parameters_service').value),
+            callback_group=self._cb_group,
+        )
+        # 2026-10-05：交还 relay_mode 前要先读一次（见 _disable_follow 的说明）。
+        # 服务名由 set 的那个参数推导，省一个参数：两个服务永远在同一个节点下。
+        self.relay_get_params_cli = self.create_client(
+            GetParameters,
+            str(self.get_parameter('relay_set_parameters_service').value)
+            .replace('set_parameters', 'get_parameters'),
             callback_group=self._cb_group,
         )
         self._own_uwb_xy: Optional[Tuple[float, float]] = None
@@ -1205,6 +1299,11 @@ class FormationFollowerNode(Node):
         self._leader_path.clear()
         self._path_prepad_m = 0.0
         self._last_s_proj = None
+        if getattr(self, '_leader_lgdiag_sub', None) is not None:
+            self.destroy_subscription(self._leader_lgdiag_sub)
+            self._leader_lgdiag_sub = None
+        self._lead_s = None
+        self._lead_s_offset = None
         self._leader_latest_z = 0.0
         self._current_leader_ns = desired_ns
 
@@ -1216,6 +1315,11 @@ class FormationFollowerNode(Node):
         if desired_ns:
             topic = f'/{desired_ns}/' + str(self.get_parameter('uwb_topic').value)
             self._leader_sub = self.create_subscription(PoseStamped, topic, self._on_leader_uwb, 10)
+            # 长机 line_goto 的进度广播（见 _lead_s 的说明）。订不上不致命：
+            # _lead_s 一直是 None，route 基准会自动退回投影那条老路。
+            self._leader_lgdiag_sub = self.create_subscription(
+                Float64MultiArray, f'/{desired_ns}/line_goto_diag',
+                self._on_leader_line_goto_diag, 10)
             # 长机的规划轨迹（方法 A）。traj_utils 来自 ego_planner_ws，按理一定在，
             # 但订不上也不能把编队搞挂——退回原来的前馈就是了。
             try:
@@ -1318,6 +1422,36 @@ class FormationFollowerNode(Node):
                     self._lead_route_s_max = s_lead
         self._leader_path.append(p.x, p.y, p.z, self._stamp_to_sec(msg.header.stamp))
 
+    def _basis_project(self, basis, x: float, y: float, role: str) -> Optional[float]:
+        """在当前几何基准上把 (x, y) 投影成弧长坐标。
+
+        ⚠️ RouteRuler 必须走 **project_unwrapped**（带圈数展开），不能用
+        project()：本场航线起点和终点都是 A、中间 G 点还自交，不展开的话
+        飞机接近终点时投影会 snap 回 s≈0。2026-10-14 route 基准首跑就是这么
+        挂的——僚机横偏明明是全场最好的 0.048 m，间距却在 0.076~22.11 m 之间
+        跳，两机一度只差 7.6 cm。
+        长机轨迹缓冲区那条路不需要展开：轨迹单向增长，没有闭合歧义。
+        """
+        if isinstance(basis, RouteRuler):
+            st = self._rs_own if role == 'own' else self._rs_lead_meas
+            return basis.project_unwrapped(x, y, st)
+        last = self._last_s_proj if role == 'own' else self._last_s_lead_meas
+        return basis.project_arc_length(x, y, last_s=last)
+
+    def _basis_path(self):
+        """返回当前的**几何基准**对象（决定"飞哪条线"）。
+
+        follow_basis='route' 且航线可用时返回 RouteRuler，否则一律退回
+        长机实飞轨迹缓冲区——拿不到航线时宁可用旧行为，也不能无路可飞。
+        两者方法名一致（project_arc_length / point_at_arc_length /
+        total_length / last_xy），调用方不用分支。
+        """
+        if str(self.get_parameter('follow_basis').value) == 'route':
+            ruler = self._route_ruler_or_none()
+            if ruler is not None and ruler.ok():
+                return ruler
+        return self._leader_path
+
     def _route_ruler_or_none(self) -> Optional['RouteRuler']:
         """按当前 leg_route_xy 取（必要时重建）航线里程尺；没航线就返回 None。
 
@@ -1335,11 +1469,20 @@ class FormationFollowerNode(Node):
             self._route_ruler = RouteRuler(pts, back_extend_m=back)
             self._route_key = key
             self._rs_lead, self._rs_own = {}, {}
+            self._rs_lead_meas = {}
             self._lead_route_s_max = None
             self.get_logger().info(
                 f'航线里程尺已建立：{len(pts)} 个航点，总长 {self._route_ruler.total():.1f} m'
                 f'（向后延伸 {back:.1f} m）。进度与间距按航线量，飞行路径仍是长机实飞轨迹')
         return self._route_ruler if (self._route_ruler and self._route_ruler.ok()) else None
+
+    def _on_leader_line_goto_diag(self, msg) -> None:
+        """长机 line_goto 的进度：data[0]=弧长 s，data[1]=航线总长。"""
+        d = list(msg.data)
+        if len(d) >= 2:
+            self._lead_s = float(d[0])
+            self._lead_s_total = float(d[1])
+            self._lead_s_rx = time.monotonic()
 
     def _on_leader_traj(self, msg) -> None:
         self._leader_traj.update(msg, self._now_sec())
@@ -1370,6 +1513,9 @@ class FormationFollowerNode(Node):
     # -------------------- 主控制循环 --------------------
 
     def _on_control_tick(self) -> None:
+        # _force_disabled 是 _disable_follow 的本地兜底：参数设不上时也要停。
+        if getattr(self, '_force_disabled', False):
+            return
         if not bool(self.get_parameter('enabled').value):
             return  # 待命状态：空跑，不发布任何目标（清单A3验收标准第1条）
 
@@ -1415,12 +1561,36 @@ class FormationFollowerNode(Node):
             # 三句话就是全部逻辑，没有控制律：
             #   ① 参考点弧长每个 tick 前进 cruise_speed_mps * dt（匀速）；
             #   ② 不越过"落后长机 follow_distance_m"那条线（间距下限）；
-            #   ③ 不领先僚机实际投影位置超过 lookahead_m（飞机跟不上时等它）。
+            #   ③ 两机**空间直线距离**低于 min_separation_m 就冻住（2026-10-12
+            #      从真机移植的硬保护，见那个参数的声明处）。
+            # 原来的第 ③ 条是"不领先僚机实际投影位置超过 lookahead_m"，
+            # 2026-10-10 真机实测那条会自锁（参考点被钳在 s_proj+0.6，飞机慢
+            # 参考点就跟着慢），已去掉；lookahead_m 参数本身还留着没删。
             # 取点永远沿折线插值，所以走的就是长机走过的路径，不会抄近道。
             # 传上一次的投影弧长消歧义：航线闭合时僚机在起降点附近会 snap 到
             # 轨迹起点，lag 瞬间变成几十米（见 project_arc_length 的说明）。
-            s_proj = self._leader_path.project_arc_length(
-                own_uwb_x, own_uwb_y, last_s=self._last_s_proj)
+            basis = self._basis_path()
+            # 基准对象换了（航线迟到 -> 从 leader_traj 落到 route，或参数被改）
+            # 必须把三个弧长缓存清掉：它们是**上一把尺**上的读数，直接拿去给
+            # 新尺做投影消歧（滑动窗口 ±6 m）会 snap 到错误的段上。
+            if self._basis_was is not basis:
+                self._basis_was = basis
+                self._last_s_proj = None
+                self._last_s_lead_meas = None
+                self._rs_own, self._rs_lead_meas = {}, {}
+                self._s_cmd = None
+                self.get_logger().info(
+                    f'编队几何基准 -> {"航线折线" if basis is not self._leader_path else "长机实飞轨迹"}'
+                    f'（弧长缓存已复位）')
+            # last_s 锚到 s_cmd：s_cmd 由长机权威进度驱动、单调递增，
+            # 用它当滑窗中心比用"自己上一次的投影"稳——后者是自指的，
+            # 一旦因共线段跳过去就再也回不来。
+            # ⚠️ **只在 route 基准下做**。leader_traj 走的是长机实飞轨迹，
+            # 单调增长、没有闭合/共线歧义，原来的自指写法一直工作正常；
+            # 真机跑的就是 leader_traj，别拿一个只在 route 下验过的改动去动它。
+            if basis is not self._leader_path and self._s_cmd is not None:
+                self._last_s_proj = self._s_cmd
+            s_proj = self._basis_project(basis, own_uwb_x, own_uwb_y, 'own')
             if s_proj is not None:
                 self._last_s_proj = s_proj
             if s_proj is None:
@@ -1438,10 +1608,44 @@ class FormationFollowerNode(Node):
             cruise = float(self.get_parameter('cruise_speed_mps').value)
             # 有效跟随距离 = 标称值 - 偏置补偿量（见 bias_trim_gain 处说明）
             fd_eff = follow_distance_m - self._fd_trim
-            s_limit_gap = max(0.0, self._leader_path.total_length() - fd_eff)
-            s_limit_lead = s_proj + float(self.get_parameter('lookahead_m').value)
+            # ---- 2026-10-10 改（2026-10-12 从真机移植）：轨迹距离限制用长机
+            # **实测**位置，不用清洗后的轨迹末端。清洗会丢掉长机过冲/回钩的点，
+            # 末端在那几秒里停滞，参考点就被钳死 -> 僚机原地不动
+            # （跟下面的 sep_hold 用同一个数据源）。
+            s_lead_meas = None
+            # ---- route 基准：长机进度直接用它广播的 s，不反推 ----
+            lead_s_fresh = (self._lead_s is not None
+                            and now - self._lead_s_rx
+                            < float(self.get_parameter('leader_s_timeout_s').value))
+            if basis is not self._leader_path and lead_s_fresh:
+                if self._lead_s_offset is None and self._lead_s_total:
+                    # ---- 原点差：按**终点对齐**算，不投影 ----
+                    # 两条航线共享除首点外的全部航点、终点是同一个 A，差别只在
+                    # 首段（长机用 line_goto 起算那刻的实测位置，僚机用 own_pad()）。
+                    # 所以 offset = 僚机尺总长 - 长机自报总长，精确且只用两个标量。
+                    # ⚠️ 别再改回"投影长机当前位置"那种标定：航线起点和终点同是
+                    # A，长机停在起点时投影会 snap 到末端——2026-10-14 实测标出
+                    # +90.80 m（长机自报 0.00、投影 90.80），参考点当场飞到航线
+                    # 尽头，僚机猛追到 4.00 m 撞上直线距离保护、整趟不跟队。
+                    self._lead_s_offset = basis.total_length() - self._lead_s_total
+                    self.get_logger().info(
+                        f'长机进度改用其广播的 s；原点差 {self._lead_s_offset:+.2f} m '
+                        f'（按终点对齐：僚机尺 {basis.total_length():.2f} - '
+                        f'长机 {self._lead_s_total:.2f}）')
+                if self._lead_s_offset is not None:
+                    s_lead_meas = self._lead_s + self._lead_s_offset
+            if s_lead_meas is None and self._leader_raw_xy is not None:
+                s_lead_meas = self._basis_project(
+                    basis, self._leader_raw_xy[0], self._leader_raw_xy[1], 'lead')
+            if s_lead_meas is not None:
+                self._last_s_lead_meas = s_lead_meas
+            s_lead_eff = (s_lead_meas if s_lead_meas is not None
+                          else (self._leader_path.total_length()
+                                if basis is self._leader_path
+                                else float(self._last_s_lead_meas or 0.0)))
+            s_limit_gap = max(0.0, s_lead_eff - fd_eff)
             # 真实间距：沿长机（已清洗的）实飞轨迹，从僚机投影到长机当前位置
-            gap_now = self._leader_path.total_length() - s_proj
+            gap_now = s_lead_eff - s_proj
             # ---- 2026-09-28 改：参考点由"匀速推进"改成"锁在间距线上，速度只做限幅" ----
             # 原来 cruise 跟长机的 max_vel 一模一样（都是 1.0），于是 s_cmd 每拍
             # 前进的量跟 s_limit_gap 每拍增长的量**恰好相等**——一旦落后就永远
@@ -1482,7 +1686,35 @@ class FormationFollowerNode(Node):
             #   s_cmd  —— 再套上 lookahead，那只是"设定点别跑到飞机前面太远"的
             #             安全阀，不是物理约束。
             s_want = min(self._s_cmd + cruise * dt, s_limit_gap)
-            self._s_cmd = min(s_want, s_limit_lead)
+            # ---- 空间直线距离硬保护（真机 2026-10-08，仿真 2026-10-12 移植）----
+            # 跟上面的弧长约束是**两套独立判据**：弧长够了不代表空间上离得开。
+            # 顶到下限就把参考点**冻在原处**（不是往回拉——轨迹单向增长，
+            # 回退没有物理意义），长机走开、距离回到阈值以上就自动恢复跟随。
+            # 行为上等同于顶到 s_limit_gap 的"停下等"，复用同一条通路。
+            sep_line = None
+            sep_hold = False
+            sep_min = float(self.get_parameter('min_separation_m').value)
+            if sep_min > 0.0 and self._leader_raw_xy is not None and self._own_uwb_xy is not None:
+                # 两个量都在 UWB 绝对系（跨机共享的同一个锚点系），直接减。
+                # 用长机**实测**位置而不是轨迹缓冲末点：轨迹清洗会丢掉长机
+                # 打圈/回钩的点，缓冲末点在那几秒里是停滞的，正好是这道
+                # 保护最需要生效的时候。
+                lost_to = float(self.get_parameter('leader_lost_timeout_s').value)
+                fresh = bool(self._leader_last_rx) and (now - self._leader_last_rx) <= lost_to
+                if fresh:
+                    sep_line = math.hypot(self._leader_raw_xy[0] - self._own_uwb_xy[0],
+                                          self._leader_raw_xy[1] - self._own_uwb_xy[1])
+                    if sep_line < sep_min:
+                        sep_hold = True
+                        s_want = min(s_want, self._s_cmd)
+                        self.get_logger().warn(
+                            f'直线距离保护：两机仅 {sep_line:.2f} m < {sep_min:.2f} m，'
+                            f'参考点冻结等待（弧长自报间距 {gap_now:.2f} m）',
+                            throttle_duration_sec=1.0)
+            # 2026-10-10：原来这里是 min(s_want, s_limit_lead)，lookahead 那一重
+            # 会自锁（参考点被钳在 s_proj+0.6，飞机慢参考点就跟着慢），去掉。
+            # s_limit_lead 这个量随之作废，上面也不再计算。
+            self._s_cmd = s_want
             # 前馈取 s_want 的推进速率，**不是** s_cmd 的。
             # 2026-09-28 踩过的坑：一开始拿 s_cmd 的达成速率当前馈，起步时
             # 参考点被 lookahead 钳在静止飞机前方 0.6 m，达成速率≈0 -> 前馈≈0
@@ -1496,10 +1728,16 @@ class FormationFollowerNode(Node):
                 a_ff = min(1.0, dt / tau)
                 self._s_rate_ff = (rate_now if self._s_rate_ff is None
                                    else self._s_rate_ff + a_ff * (rate_now - self._s_rate_ff))
-            # 只前进不后退：长机轨迹是单向增长的，参考点回退没有物理意义
-            self._s_cmd = max(self._s_cmd, s_proj)
+            # 只前进不后退：长机轨迹是单向增长的，参考点回退没有物理意义。
+            # ⚠️ 2026-10-10：但 sep_hold（直线距离硬保护）期间**必须跳过**这一句。
+            # 否则上面刚把 s_cmd 冻住，这里立刻被 s_proj 覆盖——僚机靠惯性往前
+            # 飘一点 s_proj 就涨一点、参考点跟着涨，保护被整条短路。真机实测
+            # 10-10 13:44 那趟两机直线距离一路压到 2.31 m（阈值 4.0）而 s_cmd
+            # 照推进，且 s_cmd 与 s_proj 全程逐位相等，正是这条路径的指纹。
+            if not sep_hold:
+                self._s_cmd = max(self._s_cmd, s_proj)
 
-            target = self._leader_path.point_at_arc_length(self._s_cmd)
+            target = basis.point_at_arc_length(self._s_cmd)
             if target is None:
                 return
             cx = target[0] + offset[0]     # 换回自己的 odom 系再发给 pt4ctrl
@@ -1510,11 +1748,15 @@ class FormationFollowerNode(Node):
             self._last_lag_m = gap_now - fd_eff
             diag = Float64MultiArray()
             diag.data = [float(self._last_lag_m), float(self._s_cmd), float(s_proj),
-                         float(self._leader_path.total_length()),
+                         float(basis.total_length()),
                          float(gap_now),
                          float(self._fd_trim),
                          float(self._s_rate_ff if self._s_rate_ff is not None else 0.0),
-                         float(self._leader_traj_ff_used)]
+                         float(self._leader_traj_ff_used),
+                         # data[8]：两机**空间直线距离**（UWB 绝对系）。data[4] 是
+                         # 弧长间距，两者在长机打圈时会严重不一致——真机撞机那次
+                         # data[4]=4.25 而实际 0.03。NaN = 数据不新鲜/保护已关。
+                         float(sep_line if sep_line is not None else float('nan'))]
             self.diag_pub.publish(diag)
 
             # 步长限幅：设定点最多领先当前位置 max_lead_m。参考点已经落在
@@ -1567,12 +1809,14 @@ class FormationFollowerNode(Node):
             # 误差出速度（那样越接近越慢）。方向取轨迹在参考点处的切线，
             # 不是指向设定点的直线方向，所以不会把弯道切掉。
             # 这不是控制增益：大小恒为 cruise，不随误差变化。
-            tangent = self._leader_path.point_at_arc_length(self._s_cmd + 0.3)
+            tangent = basis.point_at_arc_length(self._s_cmd + 0.3)
             if tangent is not None and (tangent[0] != target[0] or tangent[1] != target[1]):
                 tdir = math.atan2(tangent[1] - target[1], tangent[0] - target[0])
             else:
                 tdir = self._yaw_ref if self._yaw_ref is not None else 0.0
-            moving = self._s_cmd < s_limit_gap - 1e-3    # 顶到间距下限就停下等
+            # 顶到间距下限、或被直线距离保护冻住，都算停下等——分段航向
+            # 那套逻辑靠 moving 判断该不该推进，保护期间必须按静止处理。
+            moving = (self._s_cmd < s_limit_gap - 1e-3) and not sep_hold
 
             # 分段航向：走到下一段就地停下转到该段航向，转到位再走（见参数声明处）
             if bool(self.get_parameter('yaw_follow_leg').value):
@@ -1751,8 +1995,10 @@ class FormationFollowerNode(Node):
             Parameter('follow_distance_m', Parameter.Type.DOUBLE, follow_distance_m),
             Parameter('enabled', Parameter.Type.BOOL, True),
         ])
+        self._force_disabled = False   # 新一轮入列，清掉上次的兜底标志
         self._yaw_ref = None
         self._s_cmd = None
+        self._last_s_lead_meas = None
         self._last_s_proj = None
         self._s_rate = None
         self._s_rate_ff = None
@@ -1760,6 +2006,7 @@ class FormationFollowerNode(Node):
         self._route_key = None          # 强制重建里程尺（跟随距离变了、航线可能也变了）
         self._route_ruler = None
         self._rs_lead, self._rs_own = {}, {}
+        self._rs_lead_meas = {}
         self._lead_route_s_max = None
         self._s_route_lead = None
         self._s_cmd_t = None
@@ -1786,7 +2033,7 @@ class FormationFollowerNode(Node):
             while True:
                 if goal_handle.is_cancel_requested:
                     self._disable_follow()
-                    goal_handle.canceled()
+                    self._safe_goal_state(goal_handle.canceled, '出列')
                     return self._formation_result(True, 'break', '已出列，停止发布目标')
 
                 now = time.monotonic()
@@ -1810,7 +2057,7 @@ class FormationFollowerNode(Node):
                     elif now - phase_start > float(
                             self.get_parameter('leader_start_timeout_s').value):
                         self._disable_follow()
-                        goal_handle.abort()
+                        self._safe_goal_state(goal_handle.abort, '编队中止')
                         return self._formation_result(
                             False, 'hold',
                             f'等长机起步超时（'
@@ -1833,7 +2080,7 @@ class FormationFollowerNode(Node):
                         within_since = None
                     if phase == 'join' and now - phase_start > join_timeout_s:
                         self._disable_follow()
-                        goal_handle.abort()
+                        self._safe_goal_state(goal_handle.abort, '编队中止')
                         gap_text = f'{gap:.2f}m' if gap is not None else '未知'
                         return self._formation_result(
                             False, 'join',
@@ -1844,7 +2091,7 @@ class FormationFollowerNode(Node):
                 elif phase == 'track':
                     if not leader_visible:
                         self._disable_follow()
-                        goal_handle.abort()
+                        self._safe_goal_state(goal_handle.abort, '编队中止')
                         return self._formation_result(
                             False, 'track',
                             f'长机{leader_ns}的里程计超过'
@@ -1890,6 +2137,60 @@ class FormationFollowerNode(Node):
         self.get_logger().info(f'relay_mode -> {mode}')
         return True
 
+    def _read_relay_mode(self) -> Optional[str]:
+        """读 position_cmd_relay 当前的 relay_mode。读不到返回 None。
+
+        不能用 `spin_until_future_complete()`，理由同 `_set_relay_mode()`
+        （本方法也在 executor 线程上被调），所以同样轮询 future 的完成标志。
+        """
+        if not self.relay_get_params_cli.service_is_ready():
+            return None
+        req = GetParameters.Request()
+        req.names = ['relay_mode']
+        future = self.relay_get_params_cli.call_async(req)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not future.done():
+            time.sleep(0.02)
+        if not future.done() or future.result() is None:
+            return None
+        values = future.result().values
+        if not values:
+            return None
+        return str(values[0].string_value)
+
+    def _safe_goal_state(self, fn, what: str) -> None:
+        """上报 action 终态（canceled / abort / succeed），**失败只警告不抛**。
+
+        2026-10-16 仿真实测崩溃现场（真机 10-14 第 3 轮灭火后"僚机停在空中"
+        大概率同一个）：
+
+            _run_formation -> goal_handle.canceled()
+              -> rclpy/action/server.py _update_state -> publish_status()
+              -> RCLError: Failed get goal status array: feedback publisher is
+                 invalid, at ./src/rcl_action/action_server.c:919
+            [ros2run]: Process exited with failure 1
+            !! 节点 formation_follower_node 已退出（存活约 160 秒）
+
+        机理跟 10-10 / 10-14 修过的那两处**完全一样**：出列这段跑在 action 的
+        execute callback 里，而节点此时已进入收尾（同一时刻 set_parameters 和
+        读 relay_mode 都在报 "cannot use Destroyable because destruction was
+        requested"），内部一访问已失效的 publisher 就抛 RCLError。
+        那两次分别把 set_parameters 和 _set_relay_mode 包进了 try/except，
+        **唯独漏了这几个 goal_handle 状态上报**——于是异常冒到外层
+        `except Exception: ... raise`，再冒给 rclpy，整个节点退出。
+
+        为什么"只警告"是安全的：走到这里时 _disable_follow() 已经执行完，
+        控制循环不会再发目标点，飞机由 pt4ctrl 的 AUTO_HOVER 守着；上报不出去
+        只是让 SDK 那边多等一次 action 超时，比**整个节点死掉**（后续所有
+        start_formation_follow 都没人应答）轻得多。
+        """
+        try:
+            fn()
+        except Exception as exc:                      # noqa: BLE001
+            self.get_logger().warn(
+                f'{what}：action 终态没能上报（{exc}）——本地已停止发布目标、'
+                f'飞机由 AUTO_HOVER 守住，节点继续运行')
+
     def _disable_follow(self) -> None:
         """出列：停止发布目标点。只关 enabled，不动 leader_namespace/
         follow_distance_m——留着方便下次直接再启用，也方便事后查"上次跟的谁"。
@@ -1897,10 +2198,78 @@ class FormationFollowerNode(Node):
         注意这里**不**额外发降落或悬停指令：停止发布目标后，飞机停在最后
         一个目标点上由 pt4ctrl 的 AUTO_HOVER 维持，这本身就是安全状态。
         """
-        self.set_parameters([Parameter('enabled', Parameter.Type.BOOL, False)])
+        # ⚠️ 2026-10-10：本地兜底标志**必须先置**，再去碰参数。
+        # rclpy 的 set_parameters 在节点 shutdown 过程中会一路深入
+        # get_namespace() 去访问已销毁的 node handle 而抛异常（真机实测 10-10
+        # 15:4x 栈：_disable_follow -> set_parameters -> _set_parameters_atomically
+        # -> get_namespace）。崩掉的是 action 的 execute callback，之后 action
+        # server 不再接受新 goal，下一轮 start_formation_follow 等满 10 秒超时、
+        # 把选手程序一起带崩——那趟第 3 轮灭火后僚机就是这样停在空中的。
+        # 参数设不上时控制循环必须照样停下来，绝不能继续发目标点。
+        self._force_disabled = True
+        try:
+            self.set_parameters([Parameter('enabled', Parameter.Type.BOOL, False)])
+        except Exception as exc:
+            self.get_logger().warn(
+                '出列时 enabled 参数没设上（%s），已用本地标志停止发布目标' % exc)
         self._yaw_ref = None        # 下次入列重新锁朝向
-        # 交还控制权，让 ego_planner 重新接管普通 goto
-        self._set_relay_mode('normal')
+        # 交还控制权，让 ego_planner 重新接管普通 goto。
+        #
+        # ⚠️ 2026-10-05 改成"先读后写"：原来是无条件写 'normal'，会把**别人**的
+        # 接管覆盖掉。实测事故（10-05 11:36 formation_lite）：SDK 的
+        # stop_formation_follow() 只等 action cancel 的确认、不等本方法收尾，
+        # 随后立刻 return_home() -> goto_direct() 在约 100ms 内把 relay 切到
+        # 'precision_land'；而本方法里 _set_relay_mode() 是轮询 future 最多
+        # 3 秒的慢调用，那条迟到的 'normal' 正好把 precision_servo 的接管顶掉。
+        # precision_servo 只在首次接管时切一次、之后整个 servo_mode 会话内永不
+        # 重申（precision_servo_node 的 _relay_mode_active），所以它完全察觉不到，
+        # 继续往 precision_land_cmd 发指令而中继全丢——僚机回家那段根本没被伺服，
+        # 靠 AUTO_HOVER 守着旧设定点漂了 37.6 秒才漂进 0.3m 球里凑够 0.7s 判到点
+        # （长机同样 1.0m/s 直飞只用 1.0 秒收住，对照组）。
+        # 现在只有"relay_mode 还是我设的 'formation'"时才交还；读不到就保守地
+        # **不动**——让后来者保持接管，比把它顶掉安全。
+        # ⚠️ 2026-10-14：这两个调用也必须包起来。10-10 那次只把上面的
+        # set_parameters 包进了 try/except，而这两个是对 position_cmd_relay 的
+        # **服务调用**（_set_relay_mode 注释自己写明"轮询 future 最多 3 秒的慢
+        # 调用"），内部同样访问 node handle——节点收尾过程中就会撞上 10-10 诊断
+        # 出的那个"get_namespace() 访问已销毁 handle"问题。
+        # 而且这里正是最容易踩中的时序窗口：_disable_follow 跑在 action 的
+        # execute callback 里，而 SDK 的 stop_formation_follow() 只等 action
+        # cancel 的确认、**不等本方法收尾**，随后立刻 return_home() -> goto_direct()
+        # 去抢 relay（见上面 10-05 那段）。于是"本节点正在收尾"和"别人正在抢
+        # relay"两件事重叠。
+        # 这两步本质是**尽力而为的清理**，失败不该影响出列本身——最前面的
+        # self._force_disabled = True 已经保证控制循环无论如何都会停。
+        # 2026-10-14 真机 mission_slim 实测：节点在第 1 轮编队干净收尾
+        # (stage=break) 之后静默整体退出（ps 与 ros2 node list 双证），第 2 轮
+        # follow_formation 的 leg_route **set_parameters** 等满超时——失败点在发
+        # goal 之前，只能用"节点没了"解释。所以 10-10 记的"只是 action server
+        # 不再接受新 goal"是不完整的：rclpy 里回调抛出的异常会穿过 spin() 落到
+        # main() 的 finally，destroy_node()+shutdown() 把进程干净拆掉，以前只是
+        # 没人打栈所以看不见（同日已给五个机载节点补 except BaseException）。
+        try:
+            current = self._read_relay_mode()
+        except Exception as exc:
+            self.get_logger().warn(
+                '出列时读不到 relay_mode（%s），保守起见不交还' % exc)
+            current = None
+        if current == 'formation':
+            try:
+                self._set_relay_mode('normal')
+            except Exception as exc:
+                self.get_logger().warn(
+                    '出列时 relay_mode 没交还（%s）——控制循环已由 '
+                    '_force_disabled 停住，不影响出列' % exc)
+        elif current is None:
+            self.get_logger().warn(
+                '读不到 position_cmd_relay 的 relay_mode，出列时不交还——'
+                '保守起见不覆盖可能已经接管的其它节点（精降/精飞/立柱瞄准）'
+            )
+        else:
+            self.get_logger().info(
+                f'出列时 relay_mode 已是 {current!r}（不是本节点设的 formation），'
+                f'说明已有别的节点接管，不交还'
+            )
 
     def _publish_hold(self, own_z_hold: bool = True) -> None:
         """原地保持：把当前位置当设定点发出去。
@@ -1966,6 +2335,23 @@ def main(args=None):
         executor.spin()
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        # 2026-10-14 加。原来只接 KeyboardInterrupt，其余任何异常都会穿过
+        # spin() 落到 finally，把节点干净拆掉、进程**静默退出**——异常对象
+        # 从头到尾没被打印过。真机 mission_slim 实测后果：第 1 轮编队干净
+        # 收尾(stage=break)之后节点消失，日志里既没有 Traceback 也没有
+        # "process has died"（entrypoint 是 `ros2 run ... &` 起的，没人报），
+        # 第 2 轮 follow_formation 的 leg_route 参数设置等满 10 秒抛异常，
+        # 两机双双悬停。根因只能靠事后 ps/ros2 node list 推断。
+        # ⚠️ 用 BaseException 而不是 Exception：executor 线程里的
+        # SystemExit/GeneratorExit 同样会让进程静默消失，这类才最难查。
+        # 见记忆 feedback_verify_onboard_node_edits："节点死=飞机正常悬停"。
+        import traceback
+        node.get_logger().fatal(
+            'formation_follower_node 因未捕获异常退出——下面是完整栈：\n'
+            + traceback.format_exc())
+        traceback.print_exc()      # 双写一份到 stderr，确保一定进容器日志
+        raise
     finally:
         node.destroy_node()
         rclpy.shutdown()
