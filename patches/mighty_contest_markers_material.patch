@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..459a7ee
 --- /dev/null
 +++ b/worlds/media/materials/scripts/contest_markers.material
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,107 @@
 +// 2026大赛任务场景专用材质：物资点/高层着火点/地面火情AprilTag贴图+
 +// 起降点H标识。参照上游mighty自带的media/materials/scripts/gazebo.
 +// material同款写法（technique/pass/texture_unit三层结构），纹理文件
@@ -17,6 +17,10 @@ index 0000000..459a7ee
 +// 2026-09-09场景重新设计：ID1(高层着火点，贴在2#立柱)和ID2(地面火情)
 +// 不再共址——两个独立坐标的独立目标，不是同一物理点的两种接近方式，
 +// 见gen_contest_apriltags.py文件头说明。
++//
++// 2026-10-23赛题改动：高层火情处置也要先去物资点抓一件灭火物资，用ID3
++// 表示(apriltag_id3.png)。物资点上现在摆两张tag——ID0在西(-X)给地面
++// 火情用、ID3在东(+X)给高层火情用，各偏物资点中心30厘米。
 +
 +material ContestMarkers/AprilTagSupply
 +{
@@ -30,6 +34,24 @@ index 0000000..459a7ee
 +      texture_unit
 +      {
 +        texture apriltag_id0.png
++        filtering none
++      }
++    }
++  }
++}
++
++material ContestMarkers/AprilTagSupplyHigh
++{
++  technique
++  {
++    pass
++    {
++      ambient 1.0 1.0 1.0 1.0
++      diffuse 1.0 1.0 1.0 1.0
++      specular 0.1 0.1 0.1 1.0 1.0
++      texture_unit
++      {
++        texture apriltag_id3.png
 +        filtering none
 +      }
 +    }

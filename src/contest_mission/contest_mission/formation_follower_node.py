@@ -1100,6 +1100,11 @@ class FormationFollowerNode(Node):
         # 长机 line_goto 自己积分出来的 s 单调、无歧义，50 Hz 在 line_goto_diag
         # 的 data[0] 上发着，直接拿来用。
         self._leader_lgdiag_sub = None              # 长机 line_goto_diag 订阅句柄
+        #: 订阅静音开关。出列时**不销毁**订阅、只把它静音，见
+        #: _switch_leader_subscription() 里 2026-10-23 的说明。
+        self._subs_muted = False
+        #: 当前这组长机订阅是对着哪个 namespace 建的（用于判断能否复用）。
+        self._leader_sub_ns = None
         self._lead_s: Optional[float] = None        # 长机自报弧长（它自己的航线原点）
         self._lead_s_rx: float = 0.0                # 收到时刻（monotonic）
         self._lead_s_total: Optional[float] = None  # 长机航线总长 data[1]
@@ -1289,28 +1294,52 @@ class FormationFollowerNode(Node):
         if desired_ns == self._current_leader_ns:
             return
 
-        if self._leader_sub is not None:
-            self.destroy_subscription(self._leader_sub)
-            self._leader_sub = None
-
         # 切换长机（或从"有长机"切到"没有长机"）时清空轨迹缓冲区——
         # 旧长机的历史轨迹点对新长机的跟随逻辑毫无意义，留着只会让
         # TandemGeometry第一次调用时用旧数据算出一个错误的目标点。
         self._leader_path.clear()
         self._path_prepad_m = 0.0
         self._last_s_proj = None
-        if getattr(self, '_leader_lgdiag_sub', None) is not None:
-            self.destroy_subscription(self._leader_lgdiag_sub)
-            self._leader_lgdiag_sub = None
         self._lead_s = None
         self._lead_s_offset = None
         self._leader_latest_z = 0.0
+        self._leader_traj = LeaderPlannedTraj()
         self._current_leader_ns = desired_ns
 
-        if self._leader_traj_sub is not None:
-            self.destroy_subscription(self._leader_traj_sub)
-            self._leader_traj_sub = None
-        self._leader_traj = LeaderPlannedTraj()
+        # ⚠️ 2026-10-23：出列（desired_ns 为空）时**不再销毁订阅**，只静音。
+        # 根因（这次终于抓到完整栈，记忆里那条"为什么会进销毁状态仍未查清"
+        # 可以结了）：destroy_subscription() 是在 MultiThreadedExecutor 正跑着
+        # 的时候调的，executor 的等待列表里可能还挂着这个订阅的待处理事件，
+        # 它去取数据时 handle 已经失效：
+        #     rclpy._rclpy_pybind11.InvalidHandle:
+        #         cannot use Destroyable because destruction was requested
+        #     executor.spin() -> _take_subscription -> with sub.handle:
+        # 异常直接穿透 spin() 把整个节点打死。现象是"第 1 轮编队干净收尾
+        # (stage=break) 之后节点静默消失，第 2 轮 follow_formation 设 leg_route
+        # 参数等满 20 秒失败，两机双双悬停"。
+        # 这个坑 2026-10-10 / 10-14 / 10-16 修过三次，每次都是在"抛异常的那一处"
+        # 就地包 try——堵住一个出口，下回从另一个出口漏。这次掐源头：
+        # **不销毁就不会失效**，回调开头看 _subs_muted 直接 return 即可。
+        if not desired_ns:
+            self._subs_muted = True
+            self.get_logger().info('已停止跟随（订阅静音保留，不销毁——避免 '
+                                   'InvalidHandle 打死节点，见代码注释）')
+            return
+
+        self._subs_muted = False
+        if self._leader_sub is not None and self._leader_sub_ns == desired_ns:
+            # 同一个长机，订阅本来就还在：解除静音就行，不碰 handle。
+            # 赛制里长机自始至终是 NX01，所以出列->再入列走的都是这条路。
+            self.get_logger().info(f'复用已有的长机订阅（{desired_ns}），解除静音')
+            return
+
+        # 真的换了一个长机才需要重建。这条路径下 destroy 仍有上面那个竞态，
+        # 但赛制里不会中途换长机；真要支持，得先 executor.remove_node() 再动。
+        for _attr in ('_leader_sub', '_leader_lgdiag_sub', '_leader_traj_sub'):
+            _sub = getattr(self, _attr, None)
+            if _sub is not None:
+                self.destroy_subscription(_sub)
+                setattr(self, _attr, None)
 
         if desired_ns:
             topic = f'/{desired_ns}/' + str(self.get_parameter('uwb_topic').value)
@@ -1331,6 +1360,7 @@ class FormationFollowerNode(Node):
                 self.get_logger().warn(
                     f'订不上 /{desired_ns}/planning/bspline（{exc}），'
                     f'速度前馈退回"由长机已飞轨迹反推"的旧算法')
+            self._leader_sub_ns = desired_ns
             self.get_logger().info(f'开始订阅长机UWB绝对位置：{topic}（跨机共享系）')
         else:
             self.get_logger().info('已停止跟随（不再订阅任何长机里程计）')
@@ -1365,6 +1395,10 @@ class FormationFollowerNode(Node):
         误差会直接叠进编队位置，实测同一套代码两次运行差 1.19 米。UWB 绝对
         系是两机共用的同一个锚点系，没有这个问题。
         """
+        # 出列后订阅不销毁、只静音（见 _switch_leader_subscription 的说明），
+        # 所以这里要自己挡住：静音期间长机的消息照常到，但一概不处理。
+        if self._subs_muted:
+            return
         self._leader_last_rx = time.monotonic()
         p = msg.pose.position
         # ---- 2026-09-28：第一个点之前先补一段"向后延伸" ----
@@ -1478,6 +1512,10 @@ class FormationFollowerNode(Node):
 
     def _on_leader_line_goto_diag(self, msg) -> None:
         """长机 line_goto 的进度：data[0]=弧长 s，data[1]=航线总长。"""
+        # 出列后订阅不销毁、只静音（见 _switch_leader_subscription 的说明），
+        # 所以这里要自己挡住：静音期间长机的消息照常到，但一概不处理。
+        if self._subs_muted:
+            return
         d = list(msg.data)
         if len(d) >= 2:
             self._lead_s = float(d[0])
@@ -1485,6 +1523,10 @@ class FormationFollowerNode(Node):
             self._lead_s_rx = time.monotonic()
 
     def _on_leader_traj(self, msg) -> None:
+        # 出列后订阅不销毁、只静音（见 _switch_leader_subscription 的说明），
+        # 所以这里要自己挡住：静音期间长机的消息照常到，但一概不处理。
+        if self._subs_muted:
+            return
         self._leader_traj.update(msg, self._now_sec())
 
     def _now_sec(self) -> float:

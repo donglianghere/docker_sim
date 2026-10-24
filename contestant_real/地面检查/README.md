@@ -36,7 +36,7 @@ Set、下限 800），还会把 2 号当舵机走行程——而 2 号现在是�
 跟 09-21 那版只是口号相同，旧资料别套用。接线事实一律见 SDK 的 `SERVO_CONFIG`。
 
 ```bash
-cd ~/ai_uav/docker_sim/contestant_real/地面检查
+cd ~/ai_uav/docker_sim/test/地面检查
 ./c3_双机链路.sh          # 先做这个，它不需要飞行栈也能查到前两层
 ./c1_原点标定.sh          # 两机各锁 5 次
 ./c4_执行器.sh --params   # 先只核飞控参数，确认无误再动执行器

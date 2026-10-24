@@ -13,7 +13,6 @@
   // 路径指到仓库外面去了，于是 `sdk.` 完全没有补全、而 `venue` 却正常——
   // 后者是顶层 extraPaths 兜住的，很容易误判成"配置生效了"。
   "executionEnvironments": [
-    {"root": "单机测试", "extraPaths": ["../src/contest_sdk", "."]},
     {"root": ".", "extraPaths": ["../src/contest_sdk", "."]}
   ],
   "include": ["."],

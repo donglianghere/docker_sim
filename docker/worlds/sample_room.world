@@ -208,8 +208,8 @@
           </material>
         </visual>
         <visual name='unit_divider'>
-          <pose>0.500 0 0 0 0 0</pose>
-          <geometry><box><size>0.06 1.060 6.0</size></box></geometry>
+          <pose>0.000 -0.500 0 0 0 0</pose>
+          <geometry><box><size>1.060 0.060 6.0</size></box></geometry>
           <material>
             <ambient>0.50 0.50 0.50 1</ambient>
             <diffuse>0.50 0.50 0.50 1</diffuse>
@@ -260,7 +260,7 @@
 
     <model name='pillar_1_e'>
       <static>1</static>
-      <pose>7.0 12.5 3.0 0 0 0</pose>
+      <pose>6.0 11.5 3.0 0 0 0</pose>
       <link name='link'>
         <collision name='collision'>
           <geometry><box><size>1.0 1.0 6.0</size></box></geometry>
@@ -330,8 +330,8 @@
           </material>
         </visual>
         <visual name='unit_divider'>
-          <pose>0.500 0 0 0 0 0</pose>
-          <geometry><box><size>0.06 1.060 6.0</size></box></geometry>
+          <pose>0.500 0.000 0 0 0 0</pose>
+          <geometry><box><size>0.060 1.060 6.0</size></box></geometry>
           <material>
             <ambient>0.50 0.50 0.50 1</ambient>
             <diffuse>0.50 0.50 0.50 1</diffuse>
@@ -452,8 +452,8 @@
           </material>
         </visual>
         <visual name='unit_divider'>
-          <pose>0.500 0 0 0 0 0</pose>
-          <geometry><box><size>0.06 1.060 6.0</size></box></geometry>
+          <pose>0.500 0.000 0 0 0 0</pose>
+          <geometry><box><size>0.060 1.060 6.0</size></box></geometry>
           <material>
             <ambient>0.50 0.50 0.50 1</ambient>
             <diffuse>0.50 0.50 0.50 1</diffuse>
@@ -576,12 +576,23 @@
         </visual>
         <visual name='visual_apriltag'>
           <cast_shadows>0</cast_shadows>
-          <pose>0 0 0.025 0 0 0</pose>
-          <geometry><box><size>0.5 0.5 0.01</size></box></geometry>
+          <pose>-0.3 0.0 0.025 0 0 0</pose>
+          <geometry><box><size>0.4 0.4 0.01</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/contest_markers.material</uri>
               <name>ContestMarkers/AprilTagSupply</name>
+            </script>
+          </material>
+        </visual>
+        <visual name='visual_apriltag_2'>
+          <cast_shadows>0</cast_shadows>
+          <pose>0.3 0.0 0.025 0 0 0</pose>
+          <geometry><box><size>0.4 0.4 0.01</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/contest_markers.material</uri>
+              <name>ContestMarkers/AprilTagSupplyHigh</name>
             </script>
           </material>
         </visual>
@@ -605,8 +616,8 @@
         </visual>
         <visual name='visual_apriltag'>
           <cast_shadows>0</cast_shadows>
-          <pose>0 0 0.025 0 0 0</pose>
-          <geometry><box><size>0.5 0.5 0.01</size></box></geometry>
+          <pose>0.0 0.0 0.025 0 0 0</pose>
+          <geometry><box><size>0.4 0.4 0.01</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/contest_markers.material</uri>
@@ -623,7 +634,7 @@
       <link name='link'>
         <visual name='visual'>
           <cast_shadows>0</cast_shadows>
-          <geometry><box><size>0.5 0.01 0.5</size></box></geometry>
+          <geometry><box><size>0.4 0.01 0.4</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/contest_markers.material</uri>
@@ -636,7 +647,7 @@
 
     <model name='terrain_module'>
       <static>1</static>
-      <pose>17.0 7.5 0.0 0 0 0</pose>
+      <pose>17.0 9.5 0.0 0 0 0</pose>
       <link name='link'>
         <collision name='top_col'>
           <pose>0 0 0.3 0 0 0</pose>

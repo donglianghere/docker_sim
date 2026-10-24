@@ -204,7 +204,7 @@ ROLE_LAUNCHER = 'launcher'   # 发射机构：pwm_action = 发射位、pwm_idle 
 # 但那是"一口一个 Set、PWM 800~2000、800=抓紧"，跟现在这版只是口号碰巧相同，
 # 旧资料别套用。
 # 这些都是飞控侧设置，SDK这边只负责按表把PWM换算成归一化值发出去。
-# 核对办法：contestant_real/地面检查/c4_执行器.sh --params（Set 映射从飞控读）。
+# 核对办法：test/地面检查/c4_执行器.sh --params（Set 映射从飞控读）。
 #
 # 🔴 **表里的行程必须跟那架飞控的 `PWM_MAIN_MINn/MAXn` 逐位相同**：不一致时
 # `check_actuators()` 判"换算会偏"并**拦掉全部动作**（`c4 --shoot`/`--grip` 一下
@@ -928,6 +928,14 @@ class DroneSDK:
 
         # ---- set_mission_state/get_mission_state ----
         self._mission_state_pub = self._node.create_publisher(String, 'mission_state', 10)
+        #: 发射事件广播（2026-10-24 加）：每发一发打一条带世界坐标的 JSON，
+        #: 监视器订阅后在轨迹图上标出发射位置、并在数据表里累计发数。
+        #: 原来"打了几发"只有日志文本和声光，报告里一点痕迹都没有。
+        self._shot_pub = self._node.create_publisher(String, 'shot_event', 10)
+        #: 任务阶段广播（2026-10-24 加）：选手程序每进入一个阶段打一条，
+        #: 监视器按相邻两条的时间差算各阶段用时，填进飞行报告的数据表。
+        #: 原来报告里只有一个"任务用时"总数，分不出三圈各花了多久。
+        self._phase_pub = self._node.create_publisher(String, 'phase_event', 10)
         self._node.create_subscription(String, 'mission_state', self._on_mission_state, 10)
 
         # ---- set_yaw_mode_velocity()/set_yaw_mode_constant()/set_yaw_mode_point() ----
@@ -1273,7 +1281,8 @@ class DroneSDK:
     # ------------------------------------------------------------------
 
     def wait_for_detection(
-        self, class_id: str, timeout: float, camera: Optional[str] = None,
+        self, class_id: Union[str, Sequence[str]], timeout: float,
+        camera: Optional[str] = None,
     ) -> Detection:
         """阻塞等待`vision/detections`里出现`class_id`匹配的检测结果。
 
@@ -1281,6 +1290,13 @@ class DroneSDK:
             class_id: 要等待的类别/标签字符串（比如`'apriltag:2'`），跟
                 视觉检测节点实际发布的`results[0].hypothesis.class_id`
                 完全一致才算匹配（大小写敏感）。
+                **2026-10-23 起也可以给一个字符串序列**，其中任一类命中就算
+                匹配，返回的 `Detection.class_id` 是实际命中的那一个。为什么
+                需要：真机 YOLO 在下视俯视这种弱视角下，会把同一个目标的置信度
+                在相近的两类之间来回分（实测火盆的框同时出现在 BrazierBright
+                和 FireplaceBright 上），每一类单独都过不了阈值，合起来才够。
+                靠相机路区分目标类型比靠模型的类间判别可靠，见 venue 里
+                `GROUND_FIRE_ANY` 的说明。
             timeout: 超时秒数。
             camera: 只认哪一路相机的检测（`'down'`/`'front'`），默认`None`
                 不限（跟原来行为一致）。2026-09-22新增：地面火情应该只认
@@ -1294,6 +1310,9 @@ class DroneSDK:
             DetectionTimeoutError: 超过`timeout`秒仍未出现匹配的检测结果。
         """
         holder: Dict[str, Detection] = {}
+        # 统一成元组：单个字符串和序列走同一条匹配路径。
+        _wanted = (class_id,) if isinstance(class_id, str) else tuple(class_id)
+        _label = class_id if isinstance(class_id, str) else '/'.join(_wanted)
 
         def _check() -> bool:
             if camera is None:
@@ -1313,9 +1332,9 @@ class DroneSDK:
 
         def _match(msg: Any) -> bool:
             for det in msg.detections:
-                if det.results and det.results[0].hypothesis.class_id == class_id:
+                if det.results and det.results[0].hypothesis.class_id in _wanted:
                     holder['det'] = Detection(
-                        class_id=class_id,
+                        class_id=det.results[0].hypothesis.class_id,
                         bbox_x=det.bbox.center.position.x,
                         bbox_y=det.bbox.center.position.y,
                         bbox_width=det.bbox.size_x,
@@ -1329,10 +1348,10 @@ class DroneSDK:
         ok = self._poll_until(
             _check,
             timeout,
-            lambda: self._progress(f"等待检测目标'{class_id}'出现…"),
+            lambda: self._progress(f"等待检测目标'{_label}'出现…"),
         )
         if not ok:
-            raise DetectionTimeoutError(class_id=class_id, timeout_s=timeout, namespace=self.namespace)
+            raise DetectionTimeoutError(class_id=_label, timeout_s=timeout, namespace=self.namespace)
         return holder['det']
 
     #: `set_camera_mode()` 里 SDK 的相机名 -> control_server 的 cam 编号。
@@ -1348,7 +1367,9 @@ class DroneSDK:
     CAMERA_MODE_RETRY_GAP_S = 2.0
 
     def set_camera_mode(self, camera: str, mode: str = 'yolo',
-                        wait: bool = True, timeout: float = 20.0) -> None:
+                        wait: bool = True, timeout: float = 20.0,
+                        engine_path: str = '', skip_infer: bool = False,
+                        conf_thres: float = 0.0) -> None:
         """切换**自己这架飞机**某一路相机的检测模式。
 
         用途：两路相机不同时用时，只开需要的那一路省机载 CPU。实测一个
@@ -1362,11 +1383,15 @@ class DroneSDK:
         判断（真机由 `run_real.sh`/`run_test.sh` 按机号注入），不存在就只打
         一行日志直接返回。这样仿真和真机能跑**同一份**选手代码。
 
-        ⚠️ **两路互斥**（2026-10-03 起）：`mode` 不是 `'stop'` 时，会**先把另一路
-        停掉**再开这一路。约束是"每架飞机同时最多只有一路检测在跑"，编队段可以
-         0 路（两路都显式 `'stop'`）。所以调用方只要声明"我用哪一路"就够了，不
-        用自己记得去停另一路。停另一路失败只打一行警告、不抛——后果是 CPU 偏高
-        而不是功能错误。
+        ⚠️ **两路互斥**（2026-10-03 起）：`mode` 不是 `'stop'` 时，另一路会被停掉。
+        约束是"每架飞机同时最多只有一路检测在跑"，编队段可以 0 路（两路都显式
+        `'stop'`）。所以调用方只要声明"我用哪一路"就够了，不用自己记得去停另一路。
+        停另一路失败只打一行警告、不抛——后果是 CPU 偏高而不是功能错误。
+
+        **顺序是"先起新的、确认出数据、再停旧的"**（2026-10-24 倒过来的，原来
+        相反）。因为两路 Argus 会话**同时全空超过几秒就会把会话搞坏、只能断电
+        重启**，而原顺序在两次请求之间必然出现这个全空窗口。新的那路起不来时
+        **不停旧的**，宁可两路都开着也不能全空。
 
         ⚠️ 要开的那一路失败**会抛异常**，不像 `announce()` 那样吞掉。因为切失败
         的后果是后面的 `wait_for_detection()` 静默等到超时——那种失效很难反查，
@@ -1375,8 +1400,25 @@ class DroneSDK:
         Args:
             camera: `'front'`（前视，= control_server 的 cam0）或
                 `'down'`（下视，= cam1）。
+            engine_path: 这一路用哪个 TensorRT engine（机上路径，如
+                `/models/best_640.engine`）。留空就用机载节点自己的默认值。
+                换模型时只要传这一个值，不用改机载代码。
             mode: `'yolo'` 检测 / `'apriltag'` 只认标签 / `'raw'` 纯视频直通 /
                 `'stop'` 停掉这一路。同一路相机上这几种模式互斥。
+                ⚠️ **真机上要 AprilTag 也得用 `'yolo'`**：机载 `yolo_detector_node`
+                用 cv2.aruco 跟推理并行同帧跑 AprilTag，两者都发到
+                `vision/detections`；而 `'apriltag'` 起的是 apriltag_ros 另一套
+                （话题 `apriltag/<label>/detections`、消息类型也不同），SDK 不订阅
+                那条，切过去整条检测链路就断了（2026-10-23 实机查实）。
+            skip_infer: True = 只跑 AprilTag，不加载 engine、不做 YOLO 推理。
+                tag 赛制（`venue.USE_YOLO=False`）下就该开着——那时推理出来的
+                类别名没有任何消费者。
+                ⚠️ 2026-10-23 真机实测：**它省的不是 CPU**。同一路前视
+                325%（全推理）vs 323%（skip_infer），差异在噪声内——YOLO 推理
+                跑在 GPU 上。省的是 engine 加载（22 MB）、显存和启动时间。
+                同一次测量里把 AprilTag 也关掉只剩 54%，所以 CPU 的大头是
+                AprilTag 检测本身（约 270%，scale=1.0 + every_n=1 + 7 档
+                自适应阈值窗口），要降 CPU 得从那三个参数下手。
             wait: `mode='yolo'` 时是否等到这一路**真的出检测数据**才返回。
                 默认 True——只发请求不等的话，紧接着的 `wait_for_detection()`
                 很可能在节点还没起好时就开始等。
@@ -1405,9 +1447,10 @@ class DroneSDK:
         port = os.environ.get('CONTEST_CONTROL_PORT', '8890').strip() or '8890'
         url = f'http://{host}:{port}/vision/mode'
 
-        # 互斥：开任意一路之前，先把另一路停掉。约束是"每架飞机同时最多只有
-        # 一路检测在跑"（编队段可以 0 路）——实测一个 yolo_detector_node 占机载
-        # 约 12% 整机 CPU，两路一起跑整机到 90%，规划器就没余量了。
+        # 互斥：同时只留一路检测在跑（编队段可以 0 路）——实测一个
+        # yolo_detector_node 占机载约 12% 整机 CPU，两路一起跑整机到 90%，
+        # 规划器就没余量了。**但切换时宁可短暂重叠，也不能让两路同时全空**，
+        # 顺序见下面 2026-10-24 那段。
         #
         # 2026-10-03 挪到这里。之前这个互斥只做在 mission_lite 的 _use_camera()
         # 里，5 个单任务程序只"加开自己那路"、不停另一路，于是地面站起 vision
@@ -1418,17 +1461,37 @@ class DroneSDK:
         #
         # 停不掉只警告、不抛异常：后果是 CPU 偏高，不是功能错误，不值得把整个
         # 任务中断在这里。要开的那一路（下面那次请求）失败才抛。
-        if mode != 'stop':
-            other = self._CAMERA_OTHER[camera]
-            try:
-                self._post_vision_mode(url, other, self._CAMERA_TO_CAM[other], 'stop')
-            except CameraModeError as exc:
-                self._progress(f'[警告] 停 {other} 相机失败（{exc!r}），两路可能'
-                               f'同时在跑、机载 CPU 会偏高')
+        # ⚠️ 2026-10-24 把顺序**倒过来**：先起要用的那一路，确认它出数据了，
+        # 再停另一路。原来是"先停另一路、再起这一路"，两次请求之间**两路
+        # Argus 会话同时全空**——而 10-18 定的根因正是"两路同时全空超过几秒
+        # 就把会话搞坏，坏了只能断电重启"。
+        # 10-18 那次的修法（use_camera('none') 留前视跑 raw 守会话）只堵住了
+        # "不用相机"那条路径，**切换相机**这条路径的全空窗口一直还在。
+        # 2026-10-24 真机 highrise 实测 NX01 的 cam0 中招：起手两行就是
+        #   down(cam1) -> stop  /  front(cam0) -> yolo
+        # 之后前视 `no frame` 162 次、整轮再没出过图像。
+        # 倒过来之后全程至少有一路会话活着，代价是两路短暂重叠（CPU 偏高
+        # 几秒，实测两路 yolo 约 25 个点），比把会话搞坏划算得多。
+        self._post_vision_mode(url, camera, cam, mode, engine_path, skip_infer,
+                               conf_thres)
 
-        self._post_vision_mode(url, camera, cam, mode)
+        _other_to_stop = None
+        if mode != 'stop':
+            _other_to_stop = self._CAMERA_OTHER[camera]
+
+        def _stop_other():
+            if _other_to_stop is None:
+                return
+            try:
+                self._post_vision_mode(url, _other_to_stop,
+                                       self._CAMERA_TO_CAM[_other_to_stop], 'stop')
+            except CameraModeError as exc:
+                self._progress(f'[警告] 停 {_other_to_stop} 相机失败（{exc!r}），'
+                               f'两路可能同时在跑、机载 CPU 会偏高')
 
         if not wait or mode != 'yolo':
+            # 不等数据的路径：没法确认新的那路起来没，只能立刻停旧的。
+            _stop_other()
             return
         # 等这一路真的出数据。frame_id 形如 NX01_camera_down_optical_frame，
         # 跟 wait_for_detection() 用的是同一个过滤写法。清掉旧缓存，不然会被
@@ -1440,20 +1503,37 @@ class DroneSDK:
             timeout,
             lambda: self._progress(f'等 {camera} 相机出检测数据…'))
         if not ok:
+            # 新的那路没起来：**别停另一路**，否则两路全空、会话直接报废。
+            # 宁可两路都开着（CPU 高）也不能让 Argus 全空。
             raise CameraModeError(
                 f'{camera}({cam}) -> {mode} 请求已被接受，但 {timeout:.0f} 秒内'
-                f'没等到该路的检测数据（节点起了就崩？）',
+                f'没等到该路的检测数据（节点起了就崩？）；'
+                f'另一路保持原样不停，避免两路 Argus 会话同时全空',
                 namespace=self.namespace)
         self._progress(f'{camera} 相机已就绪')
+        _stop_other()        # 新的这路确认出数据了，这才停旧的
 
-    def _post_vision_mode(self, url: str, camera: str, cam: str, mode: str) -> None:
+    def _post_vision_mode(self, url: str, camera: str, cam: str, mode: str,
+                          engine_path: str = '', skip_infer: bool = False,
+                          conf_thres: float = 0.0) -> None:
         """给 control_server 发一次 POST /vision/mode，失败抛 CameraModeError。
 
         2026-10-03 从 set_camera_mode() 里抽出来——互斥逻辑要对"另一路"也发
         一次同样的请求，两处共用这段重试。
         """
         self._progress(f'切换相机模式：{camera}({cam}) -> {mode}')
-        body = json.dumps({'cam': cam, 'mode': mode}).encode('utf-8')
+        _req = {'cam': cam, 'mode': mode}
+        if engine_path:                 # 机上 control_server 不给就用节点默认 engine
+            _req['engine_path'] = engine_path
+        if skip_infer:                  # 只跑 tag：不加载 engine、不推理
+            _req['skip_infer'] = True
+        if conf_thres and conf_thres > 0:
+            # 不给就用机载节点 declare_parameter 的默认值（0.25）。这一项按
+            # **相机路**分开给：2026-10-23 实测同一个火盆，前视侧视检出 853 次、
+            # 下视俯视只有 24 次，而下视命中的 conf 全挤在 0.26~0.46——刚压在
+            # 0.25 上，绝大多数帧被滤掉。选手在 venue.py 里调这个值。
+            _req['conf_thres'] = float(conf_thres)
+        body = json.dumps(_req).encode('utf-8')
         # 重试 3 次：这条请求走 WiFi 打到飞机的 control_server，而这条链路
         # 会间歇性断（rtw89 驱动 TX 卡死 -> 丢 beacon -> 断开约 49 秒自愈，
         # 2026-10-03 一次会话里撞到两次）。只发一次的话，撞上抖动就抛异常。
@@ -1921,6 +2001,66 @@ class DroneSDK:
         ':': ('00000', '00100', '00100', '00000', '00100', '00100', '00000'),
         '.': ('00000', '00000', '00000', '00000', '00000', '01100', '01100'),
         ' ': ('00000', '00000', '00000', '00000', '00000', '00000', '00000'),
+        # 2026-10-24 补齐英文字母与几个符号：交付照片要在检测框旁写类别名
+        # （BrazierBright / apriltag:2 这种）和置信度，原来只有数字和 .-: ，
+        # 类别名一个字符都画不出来。容器里没有 cv2，这套 5x7 点阵是唯一的
+        # 画字手段，所以直接把字母补全，一次补完以后随便写英文。
+        'A': ('01110', '10001', '10001', '11111', '10001', '10001', '10001'),
+        'B': ('11110', '10001', '10001', '11110', '10001', '10001', '11110'),
+        'C': ('01110', '10001', '10000', '10000', '10000', '10001', '01110'),
+        'D': ('11110', '10001', '10001', '10001', '10001', '10001', '11110'),
+        'E': ('11111', '10000', '10000', '11110', '10000', '10000', '11111'),
+        'F': ('11111', '10000', '10000', '11110', '10000', '10000', '10000'),
+        'G': ('01110', '10001', '10000', '10111', '10001', '10001', '01111'),
+        'H': ('10001', '10001', '10001', '11111', '10001', '10001', '10001'),
+        'I': ('01110', '00100', '00100', '00100', '00100', '00100', '01110'),
+        'J': ('00111', '00010', '00010', '00010', '00010', '10010', '01100'),
+        'K': ('10001', '10010', '10100', '11000', '10100', '10010', '10001'),
+        'L': ('10000', '10000', '10000', '10000', '10000', '10000', '11111'),
+        'M': ('10001', '11011', '10101', '10101', '10001', '10001', '10001'),
+        'N': ('10001', '11001', '10101', '10011', '10001', '10001', '10001'),
+        'O': ('01110', '10001', '10001', '10001', '10001', '10001', '01110'),
+        'P': ('11110', '10001', '10001', '11110', '10000', '10000', '10000'),
+        'Q': ('01110', '10001', '10001', '10001', '10101', '10010', '01101'),
+        'R': ('11110', '10001', '10001', '11110', '10100', '10010', '10001'),
+        'S': ('01111', '10000', '10000', '01110', '00001', '00001', '11110'),
+        'T': ('11111', '00100', '00100', '00100', '00100', '00100', '00100'),
+        'U': ('10001', '10001', '10001', '10001', '10001', '10001', '01110'),
+        'V': ('10001', '10001', '10001', '10001', '10001', '01010', '00100'),
+        'W': ('10001', '10001', '10001', '10101', '10101', '11011', '10001'),
+        'X': ('10001', '10001', '01010', '00100', '01010', '10001', '10001'),
+        'Y': ('10001', '10001', '01010', '00100', '00100', '00100', '00100'),
+        'Z': ('11111', '00001', '00010', '00100', '01000', '10000', '11111'),
+        'a': ('00000', '00000', '01110', '00001', '01111', '10001', '01111'),
+        'b': ('10000', '10000', '11110', '10001', '10001', '10001', '11110'),
+        'c': ('00000', '00000', '01111', '10000', '10000', '10000', '01111'),
+        'd': ('00001', '00001', '01111', '10001', '10001', '10001', '01111'),
+        'e': ('00000', '00000', '01110', '10001', '11111', '10000', '01110'),
+        'f': ('00110', '01001', '01000', '11100', '01000', '01000', '01000'),
+        'g': ('00000', '01111', '10001', '10001', '01111', '00001', '01110'),
+        'h': ('10000', '10000', '11110', '10001', '10001', '10001', '10001'),
+        'i': ('00100', '00000', '01100', '00100', '00100', '00100', '01110'),
+        'j': ('00010', '00000', '00110', '00010', '00010', '10010', '01100'),
+        'k': ('10000', '10000', '10010', '10100', '11000', '10100', '10010'),
+        'l': ('01100', '00100', '00100', '00100', '00100', '00100', '01110'),
+        'm': ('00000', '00000', '11010', '10101', '10101', '10101', '10101'),
+        'n': ('00000', '00000', '11110', '10001', '10001', '10001', '10001'),
+        'o': ('00000', '00000', '01110', '10001', '10001', '10001', '01110'),
+        'p': ('00000', '11110', '10001', '10001', '11110', '10000', '10000'),
+        'q': ('00000', '01111', '10001', '10001', '01111', '00001', '00001'),
+        'r': ('00000', '00000', '10110', '11001', '10000', '10000', '10000'),
+        's': ('00000', '00000', '01111', '10000', '01110', '00001', '11110'),
+        't': ('01000', '01000', '11100', '01000', '01000', '01001', '00110'),
+        'u': ('00000', '00000', '10001', '10001', '10001', '10011', '01101'),
+        'v': ('00000', '00000', '10001', '10001', '10001', '01010', '00100'),
+        'w': ('00000', '00000', '10001', '10001', '10101', '10101', '01010'),
+        'x': ('00000', '00000', '10001', '01010', '00100', '01010', '10001'),
+        'y': ('00000', '10001', '10001', '10001', '01111', '00001', '01110'),
+        'z': ('00000', '00000', '11111', '00010', '00100', '01000', '11111'),
+        '/': ('00001', '00010', '00010', '00100', '01000', '01000', '10000'),
+        '%': ('11001', '11011', '00010', '00100', '01000', '11011', '10011'),
+        '_': ('00000', '00000', '00000', '00000', '00000', '00000', '11111'),
+        '#': ('01010', '01010', '11111', '01010', '11111', '01010', '01010'),
     }
 
     @classmethod
@@ -1959,6 +2099,113 @@ class DroneSDK:
                     py = y0 + ry * scale
                     arr[py:py + scale, px:px + scale] = 255
 
+    @classmethod
+    def _draw_text_at(cls, arr: Any, text: str, x0: int, y0: int,
+                      scale: int = 2, rgb=(255, 255, 255)) -> None:
+        """把 text 画在 (x0, y0)（左上角）。黑描边 + 指定颜色，原地改 arr。
+
+        跟 _stamp_image() 同一套 5x7 点阵，区别只是位置可指定、颜色可指定——
+        检测框的标签要贴在框边上，不能像时间戳那样固定在右下角。
+        """
+        gw, gh, gap = 5, 7, 1
+        cw = (gw + gap) * scale
+        h, w, _ = arr.shape
+        for i, ch in enumerate(text):
+            rows = cls._GLYPHS_5X7.get(ch)
+            if rows is None:
+                continue
+            for ry, row in enumerate(rows):
+                for rx, bit in enumerate(row):
+                    if bit != '1':
+                        continue
+                    px, py = x0 + i * cw + rx * scale, y0 + ry * scale
+                    if px < 0 or py < 0 or px >= w or py >= h:
+                        continue
+                    arr[max(0, py - 1):py + scale + 1,
+                        max(0, px - 1):px + scale + 1] = 0
+        for i, ch in enumerate(text):
+            rows = cls._GLYPHS_5X7.get(ch)
+            if rows is None:
+                continue
+            for ry, row in enumerate(rows):
+                for rx, bit in enumerate(row):
+                    if bit != '1':
+                        continue
+                    px, py = x0 + i * cw + rx * scale, y0 + ry * scale
+                    if px < 0 or py < 0 or px >= w or py >= h:
+                        continue
+                    arr[py:py + scale, px:px + scale] = rgb
+
+    @staticmethod
+    def _draw_rect(arr: Any, x1: int, y1: int, x2: int, y2: int,
+                   rgb=(0, 255, 0), thick: int = 3) -> None:
+        """画一个空心矩形框（只描边，不填充），原地改 arr。"""
+        h, w, _ = arr.shape
+        x1, x2 = max(0, min(x1, x2)), min(w - 1, max(x1, x2))
+        y1, y2 = max(0, min(y1, y2)), min(h - 1, max(y1, y2))
+        if x2 <= x1 or y2 <= y1:
+            return
+        arr[y1:y1 + thick, x1:x2 + 1] = rgb          # 上
+        arr[max(y1, y2 - thick + 1):y2 + 1, x1:x2 + 1] = rgb   # 下
+        arr[y1:y2 + 1, x1:x1 + thick] = rgb          # 左
+        arr[y1:y2 + 1, max(x1, x2 - thick + 1):x2 + 1] = rgb   # 右
+
+    #: 交付照片上检测框的颜色（RGB）。不同类别换色，一眼能分出来。
+    _BOX_COLORS = ((0, 255, 0), (255, 64, 64), (64, 160, 255), (255, 208, 0))
+
+    def _detections_for_photo(self, camera: str) -> list:
+        """取这一路相机最新一帧的检测结果，转成 _annotate_detections() 要的字典。
+
+        frame_id 形如 NX01_camera_front_optical_frame，用 `_camera_{camera}_`
+        过滤——跟 wait_for_detection() 同一个写法。两路相机发同一个话题，
+        不按 frame_id 分就会把下视的框画到前视照片上。
+        """
+        tag = f'_camera_{camera}_'
+        out = []
+        for fid, msg in list(getattr(self, '_latest_detections_by_frame', {}).items()):
+            if tag not in fid:
+                continue
+            for det in getattr(msg, 'detections', []):
+                if not det.results:
+                    continue
+                hyp = det.results[0].hypothesis
+                out.append({'cx': det.bbox.center.position.x,
+                            'cy': det.bbox.center.position.y,
+                            'w': det.bbox.size_x, 'h': det.bbox.size_y,
+                            'label': hyp.class_id, 'score': hyp.score})
+        return out
+
+    @classmethod
+    def _annotate_detections(cls, arr: Any, dets: list) -> int:
+        """把检测结果画到图上：框 + 类别名 + 置信度。返回画了几个。
+
+        2026-10-24 用户要求：交付照片要带框、类别和置信度，不要原图。
+        标签画在框的正上方；框贴顶时自动翻到框内，免得文字跑出画面。
+        """
+        n = 0
+        for i, d in enumerate(dets):
+            try:
+                cx, cy = float(d['cx']), float(d['cy'])
+                bw, bh = float(d['w']), float(d['h'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if bw <= 0 or bh <= 0:
+                continue
+            x1, y1 = int(cx - bw / 2), int(cy - bh / 2)
+            x2, y2 = int(cx + bw / 2), int(cy + bh / 2)
+            color = cls._BOX_COLORS[i % len(cls._BOX_COLORS)]
+            cls._draw_rect(arr, x1, y1, x2, y2, rgb=color, thick=3)
+            label = str(d.get('label', ''))
+            score = d.get('score')
+            if score is not None:
+                label = f'{label} {float(score):.2f}'
+            ty = y1 - 7 * 2 - 4
+            if ty < 0:                    # 框贴着画面顶，标签翻到框内
+                ty = y1 + 4
+            cls._draw_text_at(arr, label, max(0, x1), ty, scale=2, rgb=color)
+            n += 1
+        return n
+
     @staticmethod
     def _encode_png(arr: Any) -> bytes:
         """把 HxWx3 的 uint8 RGB 数组编成 PNG 字节流。
@@ -1986,7 +2233,7 @@ class DroneSDK:
 
     def capture_photo(self, path: str, camera: str = 'front',
                       timeout: float = 8.0, fresh: bool = True,
-                      timestamp: bool = True) -> str:
+                      timestamp: bool = True, annotate: bool = True) -> str:
         """抓当前相机的一帧存成 PNG，返回实际写入的路径。
 
         Args:
@@ -2052,6 +2299,18 @@ class DroneSDK:
         # 只读标志也就跟着留下来——烧时间戳那一步写进去会抛
         # "assignment destination is read-only"，2026-09-30 实测三张照片全废。
         img = _np.array(img, dtype=_np.uint8, order='C', copy=True)
+        # 2026-10-24 用户要求：交付照片要带检测框、类别名和置信度，不要原图。
+        # 画的是**拍照那一刻这一路相机最新的检测结果**；没检测到就是张干净的图
+        # （巡检"没有目标"那几张本来就该是空的）。画不出来也不让拍照失败——
+        # 照片是交付物不是流程前提，这条口径跟 snapshot() 一致。
+        if annotate:
+            try:
+                _dets = self._detections_for_photo(camera)
+                if _dets:
+                    _k = self._annotate_detections(img, _dets)
+                    self._progress(f'照片已标注 {_k} 个检测目标（框+类别+置信度）')
+            except Exception as exc:
+                self._progress(f'照片标注失败（{exc}），存原图')
         if timestamp:
             self._stamp_image(img, time.strftime('%Y-%m-%d %H:%M:%S'))
 
@@ -5139,16 +5398,27 @@ class DroneSDK:
     #: 变短按说更快走到底，1.0 仍然够用，但没有重验过。
     GRIP_TRAVEL_S = 1.0
     #: land_on() 的分步下降参数
-    LAND_ON_TIMEOUT_S = 30.0      # 边瞄边降这一段的总时限，到点就交给普通降落
+    #: 30 -> 40（2026-10-24）：LAND_ON_STEP_M 减半让下降变慢（约 5 s -> 10 s），
+    #: 加上机载新增的"丢目标抬回去重搜"（track_lost_grace_s 8 s），30 s 预算会
+    #: 顶满走超时兜底。
+    LAND_ON_TIMEOUT_S = 40.0      # 边瞄边降这一段的总时限，到点就交给普通降落
+    #: 进 track_land 之前先在**当前高度**把水平对准的时间预算（2026-10-24 新增）。
+    #: 超时不算失败：track_over_target 超时也会按当时坐标上报，照常往下走。
+    LAND_ON_PREALIGN_TIMEOUT_S = 15.0
     #: 每步降多少：目标高度 = max(交接高度, 当前agl - 这个值)。**它就是下降快慢
     #: 的旋钮**——track_land 不直接给速度，给的是"比当前低这么多"的位置设定点，
     #: 位置误差越大 pt4ctrl 压得越快。调小＝降得慢、每段修水平的时间更长。
     #: 0.8 -> 0.3（2026-10-16 用户要求"精降速度可以再慢点"）。从识别高度 1.2 m
     #: 到交接高度 0.7 m 只有 0.5 m 行程，0.8 会让**第一拍就把目标设到 0.7**（一步
     #: 到底），0.3 则走 1.2 -> 0.9 -> 0.7 两段，水平修正时间翻倍。
-    #: ⚠️ 再往下调要看 LAND_ON_TIMEOUT_S(30 s) 够不够：行程 0.5 m、每段都要等位置
+    #: ⚠️ 再往下调要看 LAND_ON_TIMEOUT_S 够不够：行程 0.5 m、每段都要等位置
     #: 误差收敛，步长太小会把时间耗在分段上，最后走超时兜底反而更差。
-    LAND_ON_STEP_M = 0.3
+    #: 0.3 -> 0.15（2026-10-24 事故后）：实测 2.0 -> 0.69 m 只用了 5 s ＝ 垂直
+    #: 0.26 m/s，而水平限速只有 LAND_ON_MAX_SPEED_MPS=0.075——**垂直比水平快
+    #: 3.5 倍**。降得越低视野越窄（0.69 m 处半视野仅 0.60 m），纠偏余量递减而
+    #: 偏差没变，tag 直接被挤出画面、aruco 四角不全解不出来 -> 丢目标。减半让
+    #: 垂直降到约 0.1 m/s，水平才追得上。LAND_ON_TIMEOUT_S 已同步 30 -> 40。
+    LAND_ON_STEP_M = 0.15
     #: 降到离地这么高就停止视觉跟踪、交给 pt4ctrl 的 AUTO_LAND 盲降到底。
     #: 0.7 -> 0.4 -> 0.2 -> 0.4 -> 0.6 -> **0.7**（2026-10-16 用户定在 0.7：
     #: "应该在 0.6 米的位置对准而后切 autoland"）。盲降段越短，
@@ -5394,6 +5664,12 @@ class DroneSDK:
         # `agl = z - track_z ≈ 0.04 m`，第一拍判定"已到交接高度"直接交给 AUTO_LAND，
         # **视觉精降一步都没做**（机载日志里刷的全是"已降到离地 0.04 m"）。
         # 这里先等一帧新的检测，保证机载缓存是刚更新过的，再进模式。
+        # ⚠️ 2026-10-24 补：`wait_for_detection()` **自己不清缓存**，所以上面这段
+        # "等一帧新的"只有先 clear 了才成立。物资点上两件东西同视野，ID0 和 ID3
+        # 的检测都躺在缓存里，不清的话第二轮 fetch 会当场拿旧帧返回（第 3 轮取
+        # tag3 时日志里连"等待检测目标…"都没打印，就是当场返回的）。同款坑今天
+        # 已经在 `look_for()` 里补过一次。
+        self.clear_detections(camera='down')
         try:
             self.wait_for_detection(class_id, timeout=5.0, camera='down')
         except Exception:
@@ -5416,6 +5692,30 @@ class DroneSDK:
                                f'不走视觉精降，按当前位置直接降落')
                 self.land_or_confirm()
                 return
+        # 2026-10-24 新增：看见了，但**先别急着降**，在当前高度把水平对准再说。
+        #
+        # 为什么要这一步：track_land 是"边降边修"，而垂直比水平快 3.5 倍（实测
+        # 0.26 vs 0.075 m/s）。视野半宽 = 0.87 × 高度，2 m 处有 ±1.7 m，降到
+        # 0.69 m 只剩 ±0.60 m——**纠偏余量随高度递减，偏差却不会自己变小**。
+        # 2026-10-24 真机：到物资点时偏 0.5 m（goto 的 SUPPLY_ACCEPT_M 是 0.8 m，
+        # 比 ID0/ID3 的中心间距 0.6 m 还大，停在另一张 tag 上空都算合法到点），
+        # 一路降到 0.69 m 还剩 0.51 m 没修完，tag 被挤出画面 -> 丢目标 -> 盲降。
+        #
+        # 为什么不是收紧 goto 的 accept_m：SUPPLY_ACCEPT_M 要是小于 goto 自身的
+        # 到达判据 0.3 m，规划器把终点停在 0.3~0.8 m 外时 goto() 会一路等到 60 秒
+        # 超时抛异常，整个任务卡死（见 `fetch_from()` 里那条注释）。把偏差交给
+        # 视觉闭环在高处消化，比跟 goto 的落点精度较劲稳得多。
+        #
+        # 用 track_over_target 而不是 center_on_target：前者是机载坐标跟踪，目标
+        # 暂时出画面也能照着最后坐标飞；后者是图像伺服，跟丢就只能干等到超时。
+        # 超时不算失败——机载 track_target 超时会按当时解算坐标上报，照常往下走。
+        try:
+            self.track_over_target(class_id, camera='down',
+                                   timeout_s=self.LAND_ON_PREALIGN_TIMEOUT_S)
+            self._progress(f'{what}标识已对准，开始边瞄边降')
+        except Exception as exc:
+            self._progress(f'降之前的水平对准没做成（{exc}）——照常进边瞄边降，'
+                           f'但起始偏差可能偏大')
         self._servo_status = None
         # 这两个是**每次调用都下发**给机载节点的，所以选手给了就按选手的来，
         # 不用改 SDK 常量、更不用重建飞行栈镜像（机载每个控制周期都重新读参数）。
@@ -5766,7 +6066,21 @@ class DroneSDK:
     #: 却没认出，悬停在同一位置却能 20 秒认出 53 次——差别只有"动没动"。
     SEARCH_SPEED_MPS = 0.4
 
-    def search_along(self, leg_end: Tuple[float, float], class_id: str,
+    #: `search_along()` 判定"真的发现了"的判据：在 WINDOW 秒的滑动窗口里，
+    #: 攒够 HITS 次**不同帧**的命中，且这些命中的框中心散布不超过 SPREAD_PX。
+    #: 为什么不能单帧就信：单帧命中就 cancel_goto() 的话，一帧噪声就会让飞机
+    #: 停在错误位置，而后面 track_over_target() 的超时是**按成功处理**的——
+    #: 错误坐标会被当成火情位置通报给队友去投弹。低置信度模型（真机下视俯视
+    #: YOLO，conf 只有 0.26~0.46）尤其需要这道闸。
+    #: SPREAD_PX 要容得下搜索段飞行自身带来的位移：0.4 m/s、2 m 高度下视
+    #: 约 368 px/m，2 秒窗口即约 294 px，所以默认留到 500。
+    #: 选手可以按自己的模型覆盖，比如 `sdk.SEARCH_CONFIRM_HITS = 3`。
+    SEARCH_CONFIRM_HITS = 2
+    SEARCH_CONFIRM_WINDOW_S = 2.0
+    SEARCH_CONFIRM_SPREAD_PX = 500.0
+
+    def search_along(self, leg_end: Tuple[float, float],
+                     class_id: Union[str, Sequence[str]],
                      camera: str = 'down', agl_m: float = 2.0,
                      timeout_s: float = 420.0, what: str = '目标',
                      speed_mps: Optional[float] = None,
@@ -5784,7 +6098,10 @@ class DroneSDK:
 
         Args:
             leg_end: 这一段飞到哪儿（世界坐标 (x, y)）。从**当前位置**出发。
-            class_id: 边飞边找什么，比如 'apriltag:2'。
+            class_id: 边飞边找什么，比如 'apriltag:2'；也可以给一串类别，
+                任一命中即算发现（见 `wait_for_detection()`，以及 venue 里
+                `GROUND_FIRE_ANY` 为什么要把两类合起来认）。
+                发现之后的对准用**实际命中的那一类**，不会把整串传给机载。
             camera: 用哪个相机找，'down'（找地面目标）或 'front'。
             agl_m: 这一段锁的离地高度（米）。
             timeout_s: 整段最多花多久（秒）。超时按"没找到"返回 None。
@@ -5859,15 +6176,44 @@ class DroneSDK:
         try:
             threading.Thread(target=_fly, daemon=True).start()
             seen = False
+            hit_class = class_id if isinstance(class_id, str) else None
+            hits: List[Tuple[float, float, float, float]] = []   # (t, x, y, stamp)
             t0 = time.time()
             while time.time() - t0 < timeout_s:
                 try:
-                    self.wait_for_detection(class_id, timeout=0.5, camera=camera)
+                    d = self.wait_for_detection(class_id, timeout=0.5, camera=camera)
                 except Exception:
                     if done.is_set():
                         break
                     continue
-                self._progress(f'发现{what}，停车对准')
+                now = time.time()
+                # 同一帧会被连续命中多次——wait_for_detection() 读的是"每路最新
+                # 一帧"的缓存，缓存没换就立刻返回。不按帧时间戳去重的话，多帧
+                # 确认会被同一帧刷满，这道闸等于没有。
+                stamp = float(d.stamp_sec or 0.0)
+                if (any(abs(stamp - h[3]) < 1e-9 for h in hits) if stamp > 0
+                        else (bool(hits) and now - hits[-1][0] < 0.05)):
+                    time.sleep(0.05)
+                    continue
+                hits = [h for h in hits if now - h[0] <= self.SEARCH_CONFIRM_WINDOW_S]
+                hits.append((now, d.bbox_x, d.bbox_y, stamp))
+                if len(hits) < self.SEARCH_CONFIRM_HITS:
+                    self._progress(f'疑似{what}（{d.class_id} conf={d.score:.2f}），'
+                                   f'已攒 {len(hits)}/{self.SEARCH_CONFIRM_HITS} 帧，'
+                                   f'继续飞继续看')
+                    continue
+                xs = [h[1] for h in hits]
+                ys = [h[2] for h in hits]
+                spread = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+                if spread > self.SEARCH_CONFIRM_SPREAD_PX:
+                    # 位置对不上：真目标在连续帧里只会随飞行平移，噪声会乱跳。
+                    self._progress(f'{what}命中位置太散（{spread:.0f} px > '
+                                   f'{self.SEARCH_CONFIRM_SPREAD_PX:.0f}），按噪声丢掉')
+                    hits = hits[-1:]
+                    continue
+                hit_class = d.class_id
+                self._progress(f'发现{what}（{hit_class} conf={d.score:.2f}，'
+                               f'{len(hits)} 帧命中、散布 {spread:.0f} px），停车对准')
                 self.cancel_goto()
                 time.sleep(1.0)                 # 等刹停，别带着速度去对准
                 seen = True
@@ -5878,7 +6224,7 @@ class DroneSDK:
                 # 2026-10-06：改走机载 track_target（按解算坐标迭代逼近，像素
                 # 误差只当收敛判据），不再用 center_on_target 的图像伺服——
                 # 后者目标一出画面就彻底没输入，实测在这儿卡死 40 秒。
-                t = self.track_over_target(class_id, camera=camera,
+                t = self.track_over_target(hit_class, camera=camera,
                                            tol_px=center_tol_px,
                                            timeout_s=center_timeout_s,
                                            agl_m=ez)
@@ -5975,6 +6321,17 @@ class DroneSDK:
         """
         n = self.LOOK_TRIES if tries is None else tries
         t = self.LOOK_TIMEOUT_S if timeout_s is None else timeout_s
+        # ⚠️ 2026-10-24：**开搜之前必须清检测缓存**。
+        # wait_for_detection() 查的是"每路相机最新一帧"的缓存，飞过来的路上
+        # 只要扫到过一次目标，那条就一直留在缓存里——到站转好朝向后第一次
+        # 轮询会**立刻命中那条旧的**，程序以为"在这一站看到了"，其实那是
+        # 几十米外、另一个朝向下拍的。后果是 aim_at 对着错方向瞄、step_forward
+        # 走到错的发射点、通报给队友的坐标也是错的。
+        # 真机 2026-10-24 highrise 实测：相机早已断帧（no frame 162 次）却照样
+        # "识别"到高层火情，命中的就是断帧之前留下的缓存。
+        # clear_detections() 本来就是为这个场景加的（它的 docstring 记了
+        # "机头转动过程中检出目标"那次），look_for 漏用了。
+        self.clear_detections(camera=camera)
         for i in range(1, n + 1):
             try:
                 det = self.wait_for_detection(class_id, timeout=t, camera=camera)
@@ -5983,7 +6340,33 @@ class DroneSDK:
             except Exception:
                 if i < n:
                     time.sleep(self.LOOK_SETTLE_S)
+                    self.clear_detections(camera=camera)   # 每次重试同样只认新帧
+        # 没找到：顺带查一下这一路还出不出图像。相机断帧时 detections 照常
+        # 15 Hz 发空数组、话题和接口全都正常，光看"没找到"分不出是真没目标
+        # 还是相机挂了——而这两种情况的处置完全不同（后者只能断电重启）。
+        if not self._camera_frames_ok(camera):
+            self._progress(f'⚠️ {camera} 相机**没有新图像**（detections 仍在发但全是空的）'
+                           f'——多半是 Argus 会话断了，机上 `grep -c "no frame"` 确认；'
+                           f'这种情况"没找到{what}"不能当成"那里没有目标"')
         return None
+
+    def _camera_frames_ok(self, camera: str, timeout_s: float = 3.0) -> bool:
+        """这一路相机还在出新图像吗。清掉缓存那帧，等一帧**新的**。
+
+        image_raw 只在有订阅者时按 ~2 Hz 发，所以 3 秒足够等到一帧；
+        等不到就说明相机没出帧（不是"话题不存在"——那条链断帧时照样健在）。
+        """
+        try:
+            self._ensure_image_sub(camera)
+            self._latest_image.pop(camera, None)
+            t0 = time.time()
+            while time.time() - t0 < timeout_s:
+                if self._latest_image.get(camera) is not None:
+                    return True
+                time.sleep(0.05)
+            return False
+        except Exception:
+            return True          # 查不了就别乱报警
 
     def patrol(self, stations: Sequence[Tuple[Any, ...]], class_id: Optional[str] = None,
                agl_m: float = 2.0, on_found: Optional[Any] = None,
@@ -6191,6 +6574,7 @@ class DroneSDK:
                         self.set_servos({n: sp.idle_pwm for n, sp in specs.items()})
                         time.sleep(self.LAUNCH_TRAVEL_S)
                         self._progress(f'{tag}完成')
+                        self._publish_shot_event(label, i, shots)
                     except Exception as exc:
                         self._progress(
                             f'⚠️ {tag}：已推到发射位、但**复位失败**（{exc}）——'
@@ -6199,6 +6583,50 @@ class DroneSDK:
                             f' 手动复位')
             if i < shots and interval_s > 0:
                 time.sleep(interval_s)
+
+    def mark_phase(self, name: str) -> None:
+        """标记"现在进入哪个任务阶段"，给飞行报告分段计时用。
+
+        监视器收到后按**相邻两条的时间差**算上一阶段的用时，所以：
+          · 每进入一个新阶段打一条；
+          · 全部跑完再打一条收尾的（比如 '完成'），否则最后一段算不出结束时间。
+
+        只影响报告好不好看，发不出去不影响飞行。
+
+        Args:
+            name: 阶段名，会原样显示在报告的数据表里，尽量短
+                （'第1圈编队飞行'、'第2圈协同灭火' 这种）。
+        """
+        try:
+            from std_msgs.msg import String as _String
+            msg = _String()
+            msg.data = json.dumps({'ns': self.namespace, 'phase': str(name),
+                                   't': time.time()}, ensure_ascii=False)
+            self._phase_pub.publish(msg)
+            self._progress(f'=== 阶段：{name} ===')
+        except Exception as exc:
+            self._progress(f'阶段广播失败（{exc}），不影响飞行')
+
+    def _publish_shot_event(self, label: str, index: int, total: int) -> None:
+        """广播一发"已经打出去了"，带当前世界坐标，给监视器画到报告上。
+
+        发不出去不影响飞行：这只是交付凭证，不是流程环节。
+        """
+        try:
+            x, y, _ = self.get_local_position()
+            wx, wy = self.local_to_world(x, y, 0.0)[:2]
+        except Exception:
+            wx = wy = float('nan')
+        try:
+            from std_msgs.msg import String as _String   # 跟本文件其余处一致：就地导入
+            msg = _String()
+            msg.data = json.dumps({'ns': self.namespace, 'label': label,
+                                   'i': int(index), 'n': int(total),
+                                   'x': float(wx), 'y': float(wy),
+                                   't': time.time()}, ensure_ascii=False)
+            self._shot_pub.publish(msg)
+        except Exception as exc:
+            self._progress(f'发射事件广播失败（{exc}），不影响飞行')
 
     # ---- 把占着的点让给队友 ----
     #: 离让出的点多远算"让开了"。这个门限只是**提前放行**用的——真正保证放行的

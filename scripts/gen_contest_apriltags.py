@@ -17,6 +17,13 @@ materials/scripts/contest_markers.material引用。
 物理点，不是同一个点的两种接近方式。1#/3#两根立柱保持无tag，纯几何
 候选目标。
 
+⚠️ 2026-10-23 赛题改动：高层火情处置也要先去物资点抓一件灭火物资，用
+**ID 3** 这张 tag 代表它，跟地面火情用的 ID 0 区分开。两张 tag 都摆在
+物资点上，沿**东西**方向各偏 30 厘米（ID0 在西/-X，ID3 在东/+X），所以
+任务机到了物资点以后是靠 class_id（apriltag:0 还是 apriltag:3）挑自己
+这一轮该抓的那件，不是靠位置猜。坐标见 venue.py 的 SUPPLY_XY_GROUND /
+SUPPLY_XY_HIGH，仿真摆放见 sample_room_layout.yaml 的 supply_point。
+
 用法：python3 scripts/gen_contest_apriltags.py [输出目录，默认patches/]
 """
 import sys
@@ -26,10 +33,12 @@ import cv2
 import numpy as np
 
 MARKERS = {
-    0: "mighty_contest_apriltag_id0.png",  # 物资点（下视相机识别，编码物资类型）
+    0: "mighty_contest_apriltag_id0.png",  # 物资点·地面火情用物资（下视相机识别）
     1: "mighty_contest_apriltag_id1.png",  # 高层着火点标识（前视相机识别，贴在2#立柱上）
     2: "mighty_contest_apriltag_id2.png",  # 地面火情标识（下视相机识别，独立固定坐标(0,0,0)，
                                             # 2026-09-09起不再跟ID1共址，见上面说明）
+    3: "mighty_contest_apriltag_id3.png",  # 物资点·高层火情用物资（下视相机识别）
+                                            # 2026-10-23 赛题改动新增，见下面说明
 }
 SIZE = 512
 BORDER_RATIO = 0.15  # 白边比例，给相机检测留对比边距（AprilTag标准做法）
@@ -51,8 +60,12 @@ def main():
         cv2.imwrite(str(out_path), canvas)
 
         corners, ids, _ = detector.detectMarkers(canvas)
-        ok = ids is not None and len(ids) == 1 and ids[0][0] == tag_id
-        print(f"[{'OK' if ok else 'FAIL'}] {out_path}  decoded_ids={ids}")
+        # ids 的形状随 OpenCV 版本变：4.x 给 (N,1)、5.0 给 (N,)。ravel 一下
+        # 两种都吃得下——2026-10-23 本机升到 cv2 5.0.0 后 ids[0][0] 直接
+        # IndexError，生成本身是好的，炸的是这行校验。
+        ids_flat = [] if ids is None else [int(v) for v in np.asarray(ids).ravel()]
+        ok = len(ids_flat) == 1 and ids_flat[0] == tag_id
+        print(f"[{'OK' if ok else 'FAIL'}] {out_path}  decoded_ids={ids_flat}")
         if not ok:
             raise SystemExit(f"生成的{filename}解码校验失败，检查cv2.aruco版本/字典是否匹配")
 

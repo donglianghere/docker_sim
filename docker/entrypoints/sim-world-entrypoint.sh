@@ -140,6 +140,23 @@ fi
 if [ "${WORLD_ENV}" = "sample_room" ]; then
     _LAYOUT="$(ros2 pkg prefix contest_mission 2>/dev/null)/share/contest_mission/config/sample_room_layout.yaml"
     _WORLD="/opt/mighty_ws/install/mighty/share/mighty/worlds/sample_room.world"
+    # 2026-10-23：场地布置表支持从宿主机挂载覆盖（compose 里的
+    # ./src/contest_mission/config:/layout_override:ro）。选手改宿主机那份、
+    # 重启容器即生效，不用重建 sim-world 镜像。
+    # 为什么是"复制进 install"而不是直接挂到 install 上：
+    #   ① 下面的生成器带 --write-resolved-layout，会把随机抽定的火情位置写回
+    #      这个路径——挂载是 :ro，直接挂会写失败；挂成可写又会改到选手本地文件。
+    #   ② 复制进去之后，scenario_reset_node 等按 ros2 pkg prefix 找表的节点
+    #      一个字都不用改。
+    #   ③ 每次都从挂载的原始表重新开始，不会让上一轮写回的抽定结果越积越多。
+    _OVERRIDE=/layout_override/sample_room_layout.yaml
+    if [ -f "${_OVERRIDE}" ] && [ -f "${_LAYOUT}" ]; then
+        if cp "${_OVERRIDE}" "${_LAYOUT}" 2>/dev/null; then
+            echo "== [sim-world] 场地布置表用挂载那份：${_OVERRIDE} =="
+        else
+            echo "!! 挂载的场地布置表复制失败，沿用镜像里那份 !!" >&2
+        fi
+    fi
     if [ -f "${_LAYOUT}" ] && [ -f /opt/docker_scripts/gen_sample_room_world.py ]; then
         echo "== [sim-world] 抽定高层着火点并重新生成 sample_room.world =="
         python3 /opt/docker_scripts/gen_sample_room_world.py \
@@ -197,6 +214,19 @@ bind_gzserver_to_pcores() {
 bind_gzserver_to_pcores &
 
 echo "== [sim-world] 启动Gazebo世界 env=${WORLD_ENV} rviz_config=${RVIZ_CONFIG} =="
+# ⚠️ 2026-10-24 已回退一个失败的尝试，别再想同一个点子：
+#   10-23 怀疑"飞机视觉位置跟物理位置对不上、机身和桨叶分家"是 gzclient 起太早
+#   造成的——spawn 在 Gazebo 起来 8 秒后才开始，gzclient 若此刻已连上，整个
+#   spawn 过程它都在边上接收模型插入消息，赶上哪一步算哪一步。于是改成
+#   launch 一律按 use_gazebo_gui:=false 起，等 spawn + reset_scenario 全部走完
+#   再用 gzclient.launch.py 单独拉起来。
+#   **结果：无效。** 推迟之后照样错位（日志确认推迟真的生效了），纯粹是净退化
+#   ——Gazebo 窗口白白晚几十秒出现。10-24 回退回"跟 gzserver 一起起"。
+#   这个错位问题至今未解决，但它**只影响 gzclient 画面，不影响任何功能**：
+#   model_states_plug/link_states_plug 实测各 link 紧贴机体，pose/info 的位姿流
+#   与 SDF 逐位吻合，飞行结果/监视器/日志/照片全部可信。
+#   已否证的 9 个假设和唯一没查的方向（<include> 嵌套子模型 gps0/lidar），
+#   记在记忆 project_gazebo_visual_desync 里，排查前先看那份，别重复劳动。
 ros2 launch mighty base_mighty.launch.py \
     env:="${WORLD_ENV}" use_gazebo_gui:="${USE_GAZEBO_GUI}" \
     use_rviz:="${USE_RVIZ}" rviz_config:="${RVIZ_CONFIG}" &
@@ -452,6 +482,8 @@ ros2 run contest_mission scenario_reset_node \
     sleep 5
     echo "== [sim-world] 自动触发一次reset_scenario（随机立柱朝向）=="
     ros2 service call /scenario_reset_node/reset_scenario std_srvs/srv/Trigger "{}"
+    # （2026-10-23 这里曾经单独拉起 gzclient，10-24 回退——无效，见上面启动
+    #   Gazebo 那段的说明。gzclient 现在跟 gzserver 一起由 launch 起。）
 ) &
 
 # ------------------------------------------------------------------

@@ -245,6 +245,16 @@ services:
       - __GLX_VENDOR_LIBRARY_NAME=nvidia
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # 场地布置表（2026-10-23 新增）：挂进来之后，选手改宿主机上的
+      # src/contest_mission/config/*.yaml 就能换场地，**不用重建 sim-world 镜像**，
+      # 重启容器即生效——world 本来就是 entrypoint 每次启动时用
+      # docker/scripts/gen_sample_room_world.py 从这张表现场生成的。
+      # 只读挂到独立路径、由 entrypoint 复制进 install 目录，不直接挂到 install 上：
+      #   ① 生成器带 --write-resolved-layout 会把随机抽定的火情位置**写回**这张表，
+      #      直接挂宿主机文件的话，每跑一次仿真你本地的 yaml 就被改一次；
+      #   ② scenario_reset_node 等节点都按 ros2 pkg prefix 找 install 那份，
+      #      覆盖进去之后后续流程一个字都不用改。
+      - ./src/contest_mission/config:/layout_override:ro
       - ./runtime_logs:/logs   # 运行时数据记录用，见README"运行时数据记录"一节;
                                 # 三个服务都挂同一个宿主机目录到容器内同一个/logs，
                                 # 不分服务开子挂载点，各脚本自己按/logs/nx01、

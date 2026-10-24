@@ -458,6 +458,7 @@ COPY patches/mighty_fire_drill_room_world.patch patches/mighty_fire_drill_room_w
 COPY patches/mighty_contest_apriltag_id0.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/apriltag_id0.png
 COPY patches/mighty_contest_apriltag_id1.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/apriltag_id1.png
 COPY patches/mighty_contest_apriltag_id2.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/apriltag_id2.png
+COPY patches/mighty_contest_apriltag_id3.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/apriltag_id3.png
 COPY patches/mighty_contest_helipad_marker.png /opt/mighty_ws/src/mighty/worlds/media/materials/textures/helipad_marker.png
 RUN cd /opt/mighty_ws/src/mighty \
     && (git apply --check /tmp/mighty_fire_drill_room_world.patch && git apply /tmp/mighty_fire_drill_room_world.patch \

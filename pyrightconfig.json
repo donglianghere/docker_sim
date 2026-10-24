@@ -5,11 +5,12 @@
 {
   "extraPaths": ["./src/contest_sdk"],
   // 只查选手程序。整个仓库一起查会冒出大量跟选手无关的告警，淹掉真问题。
-  // 2026-10-04 补全：原来只有 contestant_sim/*.py 一行——真机那一侧整个没纳入，
-  // 两边的 单机测试/ 子目录也没纳入，于是那些文件在编辑器里没有任何提示。
+  // 2026-10-21：单机测试/地面检查已移到 test/，路径跟着改。
   "include": [
-    "contestant_real/*.py", "contestant_real/单机测试/*.py",
-    "contestant_sim/*.py", "contestant_sim/单机测试/*.py"
+    "contestant_real/*.py", "contestant_sim/*.py",
+    "test/单机测试_real/*.py", "test/单机测试_sim/*.py"
+    // 地面检查/ 不纳入检查（搬家前也没纳入）：里面 uav_link_view.py 有三处
+    // Popen.stdout 可能为 None 的告警，跟选手程序无关，不值得在这儿刷屏。
   ],
   "exclude": ["**/__pycache__", "**/API参考", "**/*.bak*"],
   // ⚠️ executionEnvironments 里的 extraPaths 是**相对项目根**（本文件所在目录），
@@ -17,9 +18,10 @@
   // 路径指到仓库外面去了，于是 `sdk.` 完全没有补全、而 `venue` 却正常——
   // 后者是顶层 extraPaths 兜住的，很容易误判成"配置生效了"。
   "executionEnvironments": [
-    {"root": "contestant_real/单机测试", "extraPaths": ["./src/contest_sdk", "./contestant_real"]},
+    {"root": "test/单机测试_real", "extraPaths": ["./src/contest_sdk", "./contestant_real"]},
+    {"root": "test/单机测试_sim", "extraPaths": ["./src/contest_sdk", "./contestant_sim"]},
+    {"root": "test/地面检查", "extraPaths": ["./src/contest_sdk", "./contestant_real"]},
     {"root": "contestant_real", "extraPaths": ["./src/contest_sdk", "./contestant_real"]},
-    {"root": "contestant_sim/单机测试", "extraPaths": ["./src/contest_sdk", "./contestant_sim"]},
     {"root": "contestant_sim", "extraPaths": ["./src/contest_sdk", "./contestant_sim"]}
   ],
   "reportMissingImports": "none",

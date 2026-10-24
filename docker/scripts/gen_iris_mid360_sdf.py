@@ -47,6 +47,7 @@ dlio_extrinsics_mount.patch 用的是同一套外参，保持一致。
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -670,6 +671,44 @@ CAMERA_MOUNTS = {
 }
 
 
+#: Gazebo 自带材质脚本（容器内路径）。`_lookup_gazebo_color()` 从这儿读颜色值。
+GAZEBO_MATERIAL_SCRIPT = "/usr/share/gazebo-11/media/materials/scripts/gazebo.material"
+
+
+def _lookup_gazebo_color(material: str,
+                         script_path: str = GAZEBO_MATERIAL_SCRIPT):
+    """把 `Gazebo/Red` 这种材质脚本名解析成 (ambient, diffuse) 两个 "R G B" 串。
+
+    2026-10-24 新增，起因见 `merge_body_color()` 里那段说明：机身是整份 SDF 里
+    唯一"STL 网格 + 只靠 `<material><script>` 上色"的 visual，而那条路在这套
+    场景里实测**不生效**。与其猜 OGRE 为什么不应用，不如把颜色值读出来直接写
+    进 `<ambient>/<diffuse>`——测距雷达那个红圆柱一直是这么写的，一直正常。
+
+    从文件里读而不是硬编码一张色表：材质名随时可能换（BODY_COLOR 环境变量就能
+    改），硬编码漏一个就悄悄退化成"颜色不对"，而读文件永远跟 Gazebo 自己一致。
+
+    解析不出来就返回 None，调用方退回原来的 script 写法（不会更差）。
+    """
+    try:
+        with open(script_path) as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r"^material\s+" + re.escape(material) + r"\s*$(.*?)^}",
+                  text, re.M | re.S)
+    if not m:
+        return None
+    block = m.group(1)
+    amb = re.search(r"\bambient\s+([\d.]+\s+[\d.]+\s+[\d.]+)", block)
+    dif = re.search(r"\bdiffuse\s+([\d.]+\s+[\d.]+\s+[\d.]+)", block)
+    a = amb.group(1) if amb is not None else None
+    d = dif.group(1) if dif is not None else None
+    if a is None and d is None:
+        return None
+    # 只写了其中一个的材质（gazebo.material 里有这种）：另一个跟着它走。
+    return (a or d), (d or a)
+
+
 def merge_body_color(sdf_path: str, namespace: str, material: str) -> None:
     """把机身（iris 的 base_link_inertia_visual）换成指定的 Gazebo 材质。
 
@@ -705,11 +744,53 @@ def merge_body_color(sdf_path: str, namespace: str, material: str) -> None:
             f"base_link_inertia_visual 里期望恰好一个 {old_name}，"
             f"实际 {body.count(old_name)} 个"
         )
-    body = body.replace(old_name, f"<name>{material}</name>")
+    # ⚠️ 2026-10-24：这里**不再只改 script 里的名字**，而是把整个 <material>
+    # 换成直接给色。
+    #
+    # 为什么：排查"Gazebo 里飞机像一堆散件"查到最后，根因是机身根本没上色——
+    # 渲染出来是灰阶 (116,116,116)，而地面是 (155,155,155)，两者太接近，机身
+    # 就"隐形"了，画面上只剩蓝桨叶、白雷达罩、小红柱和一地阴影飘着，看着就是
+    # 散架（那些"碎片"量过像素，纯灰阶零色相，其实是**阴影**不是模型）。
+    #
+    # 而材质本身是好的，逐项都验过：所有 .material 括号配对、5 个纹理齐全、
+    # GAZEBO_RESOURCE_PATH 里有 gazebo-11、OGRE 日志里 gazebo.material 解析
+    # 成功且 General 组 "Finished parsing scripts" + "All done" 零 error。
+    # 也就是说 Gazebo/Red **注册成功了但没应用到这个 visual 上**。规律很整齐：
+    #     桨叶 .dae（COLLADA 内嵌材质）         -> 正常，纯蓝 (5,5,255)
+    #     测距雷达圆柱（直接 ambient/diffuse）  -> 正常，红
+    #     mid360 球（直接给色）                 -> 正常，白
+    #     物资点 tag 贴片（script）             -> 正常
+    #     机身 iris.stl（**STL + script**）     -> 失效，灰
+    # STL 不含任何材质信息，百分百依赖 script，是唯一踩中这个组合的 visual。
+    #
+    # 与其继续追 OGRE 为什么不应用 script，不如走已经被证明可靠的那条路：把
+    # 颜色值从 gazebo.material 里读出来直接写死。颜色和原来逐位相同。
+    rgb = _lookup_gazebo_color(material)
+    if rgb is None:
+        # 没解析出来（材质名不在 gazebo.material 里，或文件读不到）：退回原来
+        # 的 script 改名方式。不比以前差，但会留下这条日志便于发现。
+        body = body.replace(old_name, f"<name>{material}</name>")
+        note = f"{material}（script 方式——没能解析出颜色值，机身可能仍不上色）"
+    else:
+        ambient, diffuse = rgb
+        new_material = (
+            "<material>\n"
+            f"          <ambient>{ambient} 1</ambient>\n"
+            f"          <diffuse>{diffuse} 1</diffuse>\n"
+            "          <specular>0.1 0.1 0.1 1</specular>\n"
+            "        </material>"
+        )
+        body, n = re.subn(r"<material>.*?</material>", new_material, body,
+                          count=1, flags=re.S)
+        if n != 1:
+            raise RuntimeError(
+                f"base_link_inertia_visual 里期望恰好一个 <material> 块，实际换掉 {n} 个"
+            )
+        note = f"{material} = ambient({ambient}) / diffuse({diffuse})（直接给色，不走 script）"
 
     with open(sdf_path, "w") as f:
         f.write(head + body + tail)
-    print(f"[gen_iris_mid360_sdf] {namespace} 机身材质 -> {material}")
+    print(f"[gen_iris_mid360_sdf] {namespace} 机身材质 -> {note}")
 
 
 def render_iris(instance: int, output_file: str) -> None:

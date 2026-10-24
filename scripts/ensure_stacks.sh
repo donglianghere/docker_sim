@@ -10,6 +10,39 @@
 #
 # 两个函数都**幂等**：已经是对的就什么都不做，不会去重启一个正在服务的容器。
 
+# 声光反馈装置的串口是否就位。缺了就问选手：忽略（本轮没有声光）还是退出去修。
+# 选"忽略"会 export SOUND_LIGHT_IGNORE=1，下面 ensure_sound_light 也跟着不致命。
+check_sound_light_port() {
+    local port="${SOUND_LIGHT_PORT:-/dev/ttyUSB0}" ans why
+    if [ -c "$port" ] && [ -r "$port" ] && [ -w "$port" ]; then
+        log "声光串口 $port 就位（端口在不等于板子通电，不响先查供电）"
+        return 0
+    fi
+    if [ -e "$port" ]; then
+        why="存在但当前用户不能读写（不在 dialout 组？）"
+    else
+        why="设备不存在（板子没插、USB 线松、或被 brltty 抢了）"
+    fi
+    echo "!! 声光串口 $port 不可用：$why" >&2
+    if systemctl is-active --quiet brltty 2>/dev/null; then
+        echo "   brltty 正在跑，它会抢 CH340：sudo systemctl stop brltty" >&2
+    fi
+    echo "   忽略的后果：全程没有声光播报，而程序一切正常（静默失效）。" >&2
+    if [ "${SOUND_LIGHT_IGNORE:-0}" = 1 ]; then
+        log "SOUND_LIGHT_IGNORE=1：已跳过声光串口检查"
+        return 0
+    fi
+    # 非交互（CI / nohup）时不卡住：默认按"必须修"处理。
+    [ -t 0 ] || die "声光串口不可用，且不是交互运行；修好，或带 SOUND_LIGHT_IGNORE=1 重跑"
+    ans=""
+    read -r -p "   忽略这一项继续飞行？[y=继续 / 其它=退出去修]： " ans || true
+    case "$ans" in
+        y|Y|yes|YES) export SOUND_LIGHT_IGNORE=1
+                     log "已选择忽略声光：本轮没有声光播报" ;;
+        *) die "请先修好声光串口再飞（要忽略就重跑并输入 y）" ;;
+    esac
+}
+
 # 声光栈：确保在跑、而且在对的域（仿真21 / 真机20）。
 # 域不对必须重起——常驻程序只能在一个域，这是共享资源的本质限制。
 ensure_sound_light() {   # ensure_sound_light sim|real
@@ -51,12 +84,20 @@ ensure_sound_light() {   # ensure_sound_light sim|real
     fi
 
     log "起声光栈（$mode 域 $want，串口 $PORT）"
-    out="$(printf '\n' | "$SH/start_sound_light_server.sh" "${REAL_FLAG[@]}" "$PORT" 2>&1)" \
-        || { echo "$out" >&2; die "起声光栈失败——串口被 brltty 抢了？试 sudo systemctl stop brltty"; }
+    if ! out="$(printf '\n' | "$SH/start_sound_light_server.sh" "${REAL_FLAG[@]}" "$PORT" 2>&1)"; then
+        echo "$out" >&2
+        [ "${SOUND_LIGHT_IGNORE:-0}" = 1 ] \
+            && { echo "（起声光栈失败，已按选手选择忽略，本轮没有声光）" >&2; return 0; }
+        die "起声光栈失败——串口被 brltty 抢了？试 sudo systemctl stop brltty"
+    fi
 
     d="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null \
          | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)"
-    [ "$d" = "$want" ] || die "声光栈起来了但域是 $d，期望 $want"
+    if [ "$d" != "$want" ]; then
+        [ "${SOUND_LIGHT_IGNORE:-0}" = 1 ] \
+            && { echo "（声光栈域是 $d、期望 $want，已按选手选择忽略）" >&2; return 0; }
+        die "声光栈起来了但域是 $d，期望 $want"
+    fi
     # 串口没打开就等于没有声光：装置不响，但程序一切正常，属于静默失效
     echo "$out" | grep -q "已打开" \
         || echo "（声光串口还没打开，常驻程序会每3秒重试——板子插好了吗？）" >&2

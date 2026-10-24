@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# 一键在**仿真**里跑单机测试。跟 contestant_real/run_test.sh 是一对：
-# 同一套测试程序（逐字节相同），坐标各取自己目录的 venue.py。
+# 一键在**仿真**里跑单机测试。跟 run_test_real.sh 是一对：同一套测试程序
+# （逐字节相同），场地坐标取 contestant_sim/venue.py。
 #
-#   ./run_test.sh t1              # 物资抓取（默认 NX02，带夹爪）
-#   ./run_test.sh t2              # 地面火情对准（默认 NX01）
-#   ./run_test.sh t3 --n          # 高层火情，用 N 点看 3# 楼
-#   ./run_test.sh t4 --nx02       # 避障，指定用 NX02
-#   ./run_test.sh t5 --keep       # 仿地，结束后保留容器看日志
-#   ./run_test.sh t1 --restart    # 强制重起仿真（默认复用已在跑的）
-#   ./run_test.sh                 # 不给就列出可选的测试
+#   ./run_test_sim.sh t1              # 物资抓取（默认 NX02，带夹爪）
+#   ./run_test_sim.sh t2              # 地面火情对准（默认 NX01）
+#   ./run_test_sim.sh t3 --n          # 高层火情，用 N 点看 3# 楼
+#   ./run_test_sim.sh t4 --nx02       # 避障，指定用 NX02
+#   ./run_test_sim.sh t5 --keep       # 仿地，结束后保留容器看日志
+#   ./run_test_sim.sh t1 --restart    # 强制重起仿真（默认复用已在跑的）
+#   ./run_test_sim.sh                 # 不给就列出可选的测试
 #
 # 为什么不能用 run.sh 跑这些：run.sh **无条件起两架**（sim_leader +
 # sim_follower 跑同一个程序），而这五个测试都是 DroneSDK.run(leader=test,
@@ -24,7 +24,10 @@
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-TDIR="$HERE/单机测试"
+TDIR="$HERE/单机测试_sim"
+# 测试程序 import venue，而 venue.py 在选手目录——所以选手目录挂 /workspace
+# （PYTHONPATH 第一条），测试程序自己挂 /tests。
+VENUEDIR="$ROOT/contestant_sim"
 IMAGE=contestant-sdk:latest
 LOGDIR="$ROOT/runtime_logs"
 # 监视的底图布局。run.sh 用的是容器内路径
@@ -105,7 +108,7 @@ ensure_sound_light sim
 
 # ---- 静态自检 ----
 if [ -f "$ROOT/scripts/check_python_static.py" ]; then
-    python3 "$ROOT/scripts/check_python_static.py" "$SCRIPT" "$HERE/venue.py" \
+    python3 "$ROOT/scripts/check_python_static.py" "$SCRIPT" "$VENUEDIR/venue.py" \
         || die "静态自检不通过，先修好再跑"
 fi
 
@@ -167,9 +170,9 @@ PYPATH="/workspace${BASE_PYPATH:+:$BASE_PYPATH}"; PYPATH="${PYPATH%:}"
 log "启动测试程序"
 docker run -d --name "$C_TEST" --network host \
     -v /etc/localtime:/etc/localtime:ro \
-    -v "$HERE:/workspace:ro" -v "$LOGDIR:/logs" \
+    -v "$VENUEDIR:/workspace:ro" -v "$TDIR:/tests:ro" -v "$LOGDIR:/logs" \
     -e PYTHONPATH="$PYPATH" "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
-    python3 -u "/workspace/单机测试/$BASENAME" \
+    python3 -u "/tests/$BASENAME" \
       --namespace "$NS" --role leader --teammate "$NS" "${EXTRA[@]}" >/dev/null
 
 log "测试中……（实时日志：docker logs -f $C_TEST）"
@@ -199,4 +202,4 @@ echo "======================================================="
 echo "报告图：runtime_logs/$(basename "$MON_OUT")"
 echo "完整日志：runtime_logs/${BASENAME%.py}_sim_test.log"
 echo "监视日志：runtime_logs/${BASENAME%.py}_sim_monitor.log"
-echo "跑真机同一个测试： cd ../contestant_real && ./run_test.sh $WHICH"
+echo "跑真机同一个测试： ./run_test_real.sh $WHICH"

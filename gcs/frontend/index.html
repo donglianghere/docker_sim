@@ -540,8 +540,10 @@
 <div id="rightPane">
   <div class="rightTabs" id="rightTabs">
     <span class="rightTab active" data-tab="map" onclick="switchRightTab('map')">🗺️ 规划地图</span>
-    <span class="rightTab" data-tab="frontcam" onclick="switchRightTab('frontcam')">🎥 前视相机</span>
-    <span class="rightTab" data-tab="topcam" onclick="switchRightTab('topcam')">📷 俯视相机</span>
+    <span class="rightTab" data-tab="nx01front" onclick="switchRightTab('nx01front')">🎥 NX01前视</span>
+    <span class="rightTab" data-tab="nx01down" onclick="switchRightTab('nx01down')">📷 NX01下视</span>
+    <span class="rightTab" data-tab="nx02front" onclick="switchRightTab('nx02front')">🎥 NX02前视</span>
+    <span class="rightTab" data-tab="nx02down" onclick="switchRightTab('nx02down')">📷 NX02下视</span>
   </div>
   <div class="rightTabContent">
     <div id="rightTabPage-map" class="rightTabPage active">
@@ -563,34 +565,64 @@
         <div id="mapQueueStatus"></div>
       </div>
     </div>
-    <div id="rightTabPage-topcam" class="rightTabPage">
+    <div id="rightTabPage-nx01front" class="rightTabPage">
       <div class="camPanel">
         <div class="camToolbar">
           <label style="font-size:12px;color:#9aa4b2;">信号源：</label>
-          <select id="camMode-topcam" onchange="camModeChange('topcam', this.value)">
+          <select id="camMode-nx01front" onchange="camModeChange('nx01front', this.value)">
             <option value="mjpeg">MJPEG</option>
             <option value="h264">H.264(经本机转码)</option>
           </select>
           <label style="font-size:12px;color:#9aa4b2;">地址：</label>
-          <input id="camUrl-topcam" placeholder="http://192.168.2.102:8081/stream.mjpg（下视）">
-          <button onclick="camApply('topcam')">应用</button>
+          <input id="camUrl-nx01front" placeholder="http://192.168.2.101:8080/stream.mjpg（前视）">
+          <button onclick="camApply('nx01front')">应用</button>
         </div>
-        <div class="camView" id="camView-topcam"></div>
+        <div class="camView" id="camView-nx01front"></div>
       </div>
     </div>
-    <div id="rightTabPage-frontcam" class="rightTabPage">
+    <div id="rightTabPage-nx01down" class="rightTabPage">
       <div class="camPanel">
         <div class="camToolbar">
           <label style="font-size:12px;color:#9aa4b2;">信号源：</label>
-          <select id="camMode-frontcam" onchange="camModeChange('frontcam', this.value)">
+          <select id="camMode-nx01down" onchange="camModeChange('nx01down', this.value)">
             <option value="mjpeg">MJPEG</option>
             <option value="h264">H.264(经本机转码)</option>
           </select>
           <label style="font-size:12px;color:#9aa4b2;">地址：</label>
-          <input id="camUrl-frontcam" placeholder="http://192.168.2.101:8080/stream.mjpg（前视）">
-          <button onclick="camApply('frontcam')">应用</button>
+          <input id="camUrl-nx01down" placeholder="http://192.168.2.101:8081/stream.mjpg（下视）">
+          <button onclick="camApply('nx01down')">应用</button>
         </div>
-        <div class="camView" id="camView-frontcam"></div>
+        <div class="camView" id="camView-nx01down"></div>
+      </div>
+    </div>
+    <div id="rightTabPage-nx02front" class="rightTabPage">
+      <div class="camPanel">
+        <div class="camToolbar">
+          <label style="font-size:12px;color:#9aa4b2;">信号源：</label>
+          <select id="camMode-nx02front" onchange="camModeChange('nx02front', this.value)">
+            <option value="mjpeg">MJPEG</option>
+            <option value="h264">H.264(经本机转码)</option>
+          </select>
+          <label style="font-size:12px;color:#9aa4b2;">地址：</label>
+          <input id="camUrl-nx02front" placeholder="http://192.168.2.102:8080/stream.mjpg（前视）">
+          <button onclick="camApply('nx02front')">应用</button>
+        </div>
+        <div class="camView" id="camView-nx02front"></div>
+      </div>
+    </div>
+    <div id="rightTabPage-nx02down" class="rightTabPage">
+      <div class="camPanel">
+        <div class="camToolbar">
+          <label style="font-size:12px;color:#9aa4b2;">信号源：</label>
+          <select id="camMode-nx02down" onchange="camModeChange('nx02down', this.value)">
+            <option value="mjpeg">MJPEG</option>
+            <option value="h264">H.264(经本机转码)</option>
+          </select>
+          <label style="font-size:12px;color:#9aa4b2;">地址：</label>
+          <input id="camUrl-nx02down" placeholder="http://192.168.2.102:8081/stream.mjpg（下视）">
+          <button onclick="camApply('nx02down')">应用</button>
+        </div>
+        <div class="camView" id="camView-nx02down"></div>
       </div>
     </div>
   </div>
@@ -3952,10 +3984,7 @@ function switchRightTab(id) {
 
 // ---- 俯视/前视相机——MJPEG推流(2026-08-22新增) ----
 // multipart/x-mixed-replace是浏览器原生支持的格式，<img src="...">直接
-// 播放，不需要转码/后端中转；地址存localStorage，不经过后端。topcam
-// 先填一个实测能打开的默认地址(用户2026-08-22给的)，frontcam暂时留空
-// ——没有现成地址可以预填，硬填一个假地址反而
-// 会先弹一次连接失败。
+// 播放，不需要转码/后端中转；地址存 localStorage，不经过后端。
 //
 // 2026-08-22追加第二路信号源：RTP+H.264硬编码推流，浏览器没有任何API
 // 能直接播放原始RTP包（跟MJPEG完全不是一回事，RTP连HTTP都不是），必须
@@ -3970,19 +3999,19 @@ function switchRightTab(id) {
 // GCS容器自动管理的服务——转码依赖的gst-launch-1.0只装在宿主机上，
 // 不在任何docker镜像里，装进镜像属于要改Dockerfile+重新build的范畴，
 // 这次没有做。
-// 2026-10-16 修正：原来 topcam 默认指向 192.168.43.19:8080 / 192.168.43.7:8081，
-// 那是早期调试时的网段，现在两架飞机是 192.168.2.101/102——地址不通，所以界面上
-// 两个视频框一直是空的。frontcam 更干脆，默认值本来就是空字符串。
-// 现在按当前分工给默认值：侦察机(.101)用**前视** cam0=8080、任务机(.102)用
-// **下视** cam1=8081（见 control_server 的 _CAM_DEFAULTS：cam0=front=8080、
-// cam1=down=8081）。要看另一架/另一路，在地址栏改端口和 IP 再点"应用"。
+// 2026-10-22：四路独立页面（NX01/NX02 × 前视/下视），默认地址按两架的 IP 和
+// control_server 的 _CAM_DEFAULTS 端口直接填好，不用再手改地址。
 // h264 那一路留空：转码依赖宿主机的 gst-launch-1.0，这个功能一直没做完（见上面注释）。
 // ⚠️ 这里只是**没填过时的默认值**。填过一次就存进 localStorage
 // （gcsCamUrl_<位>_<模式>），之后一直用存的那个，改这里不生效——界面上手动改
 // 地址再点"应用"即可。
+// 2026-10-22 改成四路：两架各两路，端口按 control_server 的 _CAM_DEFAULTS
+// （cam0=front=8080、cam1=down=8081）。
 const CAM_MODE_DEFAULT_URL = {
-  topcam:   { mjpeg: "http://192.168.2.102:8081/stream.mjpg", h264: "" },  // 📷 俯视＝任务机下视
-  frontcam: { mjpeg: "http://192.168.2.101:8080/stream.mjpg", h264: "" },  // 🎥 前视＝侦察机前视
+  nx01front: { mjpeg: "http://192.168.2.101:8080/stream.mjpg", h264: "" },  // 侦察机 前视
+  nx01down:  { mjpeg: "http://192.168.2.101:8081/stream.mjpg", h264: "" },  // 侦察机 下视
+  nx02front: { mjpeg: "http://192.168.2.102:8080/stream.mjpg", h264: "" },  // 任务机 前视
+  nx02down:  { mjpeg: "http://192.168.2.102:8081/stream.mjpg", h264: "" },  // 任务机 下视
 };
 function camUrlStorageKey(key, mode) { return `gcsCamUrl_${key}_${mode}`; }
 // 滚轮缩放+拖动平移的状态，跟俯视图画布(mapView.scale/centerWorld)
@@ -3995,7 +4024,9 @@ function camUrlStorageKey(key, mode) { return `gcsCamUrl_${key}_${mode}`; }
 // 值本身小到可以认为是"事实上不设限"。CAM_SCALE_FIT=1这个值现在只
 // 用来判断"什么时候该把平移归零/该不该允许拖动"，不再是缩放范围的
 // 边界。
-const camViewState = { topcam: { scale: 1, tx: 0, ty: 0 }, frontcam: { scale: 1, tx: 0, ty: 0 } };
+// 每一路各自的缩放/平移状态，键跟 CAM_MODE_DEFAULT_URL 一致
+const camViewState = Object.fromEntries(
+  Object.keys(CAM_MODE_DEFAULT_URL).map((k) => [k, { scale: 1, tx: 0, ty: 0 }]));
 const CAM_SCALE_FIT = 1, CAM_SCALE_SAFETY_MIN = 0.05, CAM_SCALE_MAX = 6;
 
 function applyCamTransform(key) {

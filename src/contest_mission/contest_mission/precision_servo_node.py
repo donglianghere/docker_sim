@@ -355,7 +355,15 @@ class PrecisionServoNode(Node):
         self.declare_parameter('land_handoff_m', 0.7)        # 降到离地这么高交给 AUTO_LAND
         self.declare_parameter('land_handoff_tol_m', 0.15)   # 悬停有起伏，死等"严格低于"会卡住
         self.declare_parameter('track_land_timeout_s', 30.0) # 总时限，到点直接交给 AUTO_LAND
-        self.declare_parameter('track_lost_grace_s', 5.0)    # 丢目标超过这么久才放弃，用最后坐标撑住
+        # 2026-10-24 由 5.0 提到 8.0：丢目标后不再是"拿最后坐标干等"，而是抬回
+        # 进入高度主动重搜（见 track_land 分支），抬升+重新检出要时间，给够。
+        # ⚠️ 这个值必须 >= track_cache_max_age_s，否则坐标"已陈旧但还没判丢"的
+        # 那段空档里，agl 是 1e9 哨兵而控制回路仍在跑——2026-10-24 窜高就出在这。
+        self.declare_parameter('track_lost_grace_s', 8.0)    # 丢目标超过这么久才放弃，中间先重搜
+        # 重搜期间的水平限速。精降本身限 0.075 m/s，那是为了降得稳；重搜时不在
+        # 下降，水平慢反而有害——2026-10-24 实测偏 0.51 m，按 0.075 m/s 在宽限
+        # 窗口内只能挪 0.375 m，追不回最后已知坐标，目标就永远回不到视野里。
+        self.declare_parameter('track_research_speed_mps', 0.30)
         # ⚠️ 解算坐标的保质期（2026-10-06 实测事故）：缓存没有时效检查时，apriltag:0
         # 在飞机还贴地时被看到过的那份结果会一直有效——地面 z 跟飞机 z 几乎相等，于是
         # 飞到物资点上空一进 track_land 就算出 agl≈0.04 m，第一拍判"已到交接高度"直接
@@ -504,6 +512,10 @@ class PrecisionServoNode(Node):
         # class_id -> (x, y, z, 收到时刻)，见 _on_target_positions 的说明
         self._track_cache: dict = {}
         self._track_target_z: float = 0.0   # track_* 这一拍要去的高度，见控制回路
+        # 进入 track_land 那一拍的绝对高度。两个用处：① 丢目标时抬回这里重搜；
+        # ② 发布前的兜底闸门——track_land 只降不升，设定点不该超过它。
+        self._track_entry_z: Optional[float] = None
+        self._track_researching = False     # 这一拍是不是在"丢目标重搜"状态
         self._track_xy: Optional[Tuple[float, float]] = None
         self._track_z: float = 0.0
         self._track_seen_t: Optional[float] = None
@@ -652,6 +664,8 @@ class PrecisionServoNode(Node):
             self._track_px = None
             self._track_xy = None
             self._track_seen_t = None
+            self._track_entry_z = None      # 跟 _control_start_time 一起在接管那拍重记
+            self._track_researching = False
             self._landing_triggered = False
             self._landed_notified = False
             self._converge_since = None
@@ -926,6 +940,9 @@ class PrecisionServoNode(Node):
             else:
                 return  # 开关开着但这次service调用真失败了，本周期先不发指令，下个周期重试
             self._control_start_time = time.monotonic()  # 硬超时兜底计时起点，见__init__/文件头说明
+            # 同一拍记下进入高度：track_land 丢目标时抬回这里重搜，发布前也拿它
+            # 当"不许飞得更高"的闸门。这里还没解包 x,y,z,yaw（在下面），直接取下标。
+            self._track_entry_z = self._odom_xy_z_yaw[2]
             self._relay_last_assert_t = time.monotonic()
         else:
             # 2026-10-05：接管期间周期性重申 relay_mode，防止被别的节点顶掉而本
@@ -1092,13 +1109,36 @@ class PrecisionServoNode(Node):
             # 被打死**，relay 停在 precision_land 没人交还，飞机指令全被中继丢弃。
             # 真机复现：highrise 的任务机开着前视去抓物资，下视没有任何检测数据。
             # 还没坐标时原地稳住等（等多久由 track_lost_grace_s 兜底，到点转 AUTO_LAND）。
+            self._track_researching = False
             if self._track_xy is None:
                 world_dx = world_dy = 0.0     # 还没有解算结果，原地稳住等
                 self._track_target_z = z
             else:
                 world_dx = self._track_xy[0] - x
                 world_dy = self._track_xy[1] - y
-                self._track_target_z = self._track_z + max(handoff, agl - step)
+                if self._track_is_fresh():
+                    self._track_target_z = self._track_z + max(handoff, agl - step)
+                else:
+                    # ⚠️ 2026-10-24 真机事故（NX02 第 3 轮取 tag3）：坐标陈旧时上面
+                    # 那个 `agl` 是 **1e9 哨兵**，代进来就是 max(handoff, 1e9-step)
+                    # ＝ 下发"飞到 10 亿米"。飞机 2 秒从 0.69 m 窜到 5.13 m，飞手
+                    # 拨杆切出 OFFBOARD 才停住。**哨兵值只能进判据，不能进设定点。**
+                    # 窜高窗口 ＝ track_lost_grace_s − track_cache_max_age_s：坐标过了
+                    # max_age 就算陈旧（agl 变哨兵），却要等 grace 满才交棒，中间这
+                    # 几秒控制回路照跑，发的全是哨兵。
+                    #
+                    # 丢目标改成**主动重搜**（用户 2026-10-24："目标丢失也可以往之前
+                    # 检测的位置移动，目标必然再次出现"）：
+                    #   垂直 —— 停止下降并抬回进入高度。视野宽度正比于高度，抬上去
+                    #           是重新捕获最有效的手段（0.69 m 处半视野只有 0.60 m，
+                    #           tag 偏 0.51 m 就被挤出画面，aruco 四角不全就解不出）。
+                    #   水平 —— 不动，照旧朝 `_track_xy`（最后一次解算的坐标）飞，
+                    #           语义同上面 track_target 的注释"丢出画面也照飞不误"。
+                    # 重新看见目标 -> _track_seen_t 刷新 -> _track_is_fresh() 转真 ->
+                    # 自动回到分级下降，不需要额外的状态机。真找不到由 grace 兜底。
+                    self._track_researching = True
+                    self._track_target_z = (self._track_entry_z
+                                            if self._track_entry_z is not None else z)
         elif servo_mode in ('coordinate_land', 'coordinate_goto'):
             # 2026-09-14新增：直接拿目标坐标跟当前里程计位置作差，不经过
             # 视觉/像素偏移这一整套换算——见VALID_SERVO_MODES声明处说明。
@@ -1114,6 +1154,11 @@ class PrecisionServoNode(Node):
         if servo_mode in ('coordinate_land', 'coordinate_goto',
                           'track_target', 'track_land'):
             max_speed = float(self.get_parameter('coordinate_max_speed_mps').value)
+            if servo_mode == 'track_land' and self._track_researching:
+                # 重搜期间不在下降，水平放开（见 track_research_speed_mps 声明处）。
+                max_speed = max(
+                    max_speed,
+                    float(self.get_parameter('track_research_speed_mps').value))
             rate_hz = float(self.get_parameter('control_rate_hz').value)
             max_step = max_speed / rate_hz if rate_hz > 0.0 else max_speed
             step_norm = math.hypot(step_x, step_y)
@@ -1297,6 +1342,20 @@ class PrecisionServoNode(Node):
                     step = float(self.get_parameter('descent_step_m').value)
                     target_z = max(z - step, handoff_height)
                     self._descent_converge_since = None
+
+        # 兜底闸门（2026-10-24 加）：track_land 是**只降不升**的模式，任何情况下
+        # 都不该飞得比进入这个模式时还高（留 0.3 m 给重搜抬升和悬停起伏）。这道
+        # 闸门防的是"脏值/哨兵值漏进设定点"这一整类故障，不止上面那处 1e9——
+        # 真机实测要不是飞手 1.2 秒内拨了杆，那次会一直爬到撞顶。
+        if servo_mode == 'track_land' and self._track_entry_z is not None:
+            capped = min(target_z, self._track_entry_z + 0.3)
+            if capped < target_z - 0.01:
+                self.get_logger().warn(
+                    f'track_land 高度设定点 {target_z:.2f} m 超过进入高度 '
+                    f'{self._track_entry_z:.2f} m+0.3，已夹到 {capped:.2f} m'
+                    f'——这不该发生，查上游是不是把哨兵值算进设定点了',
+                    throttle_duration_sec=2.0)
+            target_z = capped
 
         cmd = PositionCommand()
         cmd.header.stamp = self.get_clock().now().to_msg()

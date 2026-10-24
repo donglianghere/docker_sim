@@ -1,78 +1,42 @@
 #!/usr/bin/env bash
-# 一键真机：在地面站跑选手程序控制两架真飞机。
+# 一键真机：在地面站跑选手程序，控制两架真飞机。
 #
-# 参数就是**要跑的程序文件名**（本目录里的 .py，.py 可省略，可 Tab 补全）：
+# 用法：./run_real.sh [程序名] [选项]   程序名 = 本目录下的 .py（.py 可省、可 Tab 补全）
+#   ./run_real.sh formation_slim       编队飞行（不给程序名时的默认）
+#   ./run_real.sh groundfire_slim      地面火情
+#   ./run_real.sh highrise_slim        高层火情
+#   ./run_real.sh mission_slim         三轮连贯（火情要人工布置，真机没有出题裁判）
 #
-#   ./run_real.sh formation_slim      # 编队飞行
-#   ./run_real.sh groundfire_slim     # 地面火情
-#   ./run_real.sh highrise_slim       # 高层火情
-#   ./run_real.sh mission_slim        # 三轮连贯（火情需**人工布置**，真机没有出题裁判）
-#                                     #   2026-10-14 真机实飞稳定完成
+# 选项：
+#   --spacing N          编队目标间距（米），跟 --min-sep 一起调
+#   --min-sep N          两机直线距离下限（米），打到飞机上，只对本次飞行有效
+#   --max-vel N          经规划器航段的巡航限速（m/s）
+#   --skip-clock-check   跳过两机时钟同步闸门
+#   --allow-drift        程序代码与仿真不一致时只告警不拦（现场应急，会留痕）
+#   --sim-frozen         仿真侧已冻结：跳过"四个流程程序两侧逐字节相同"这一项，
+#                        赛场任务逻辑可以独立演进。另两项照查（见下）。
+#   --keep               结束后保留选手容器，便于翻日志
 #
-#   2026-10-14：_lite 版已由用户删除，只剩这四个 _slim 版。
+# 跟仿真 run.sh 的区别：不起飞行栈（它在飞机上，本脚本只探测）、就绪判据是两机
+# ROS 节点可见 + 检测话题有发布者、网络走 real 模式、监视窗口另起容器、没有裁判。
 #
-#   ./run_real.sh formation_slim --spacing 4.0 --min-sep 3.0
-#                                     # 改编队目标间距，同时把两机直线距离的安全
-#                                     # 下限往下调（这两个必须一起改，否则目标值
-#                                     # 压在保护线上、僚机参考点会被频繁冻住）。
-#                                     # --min-sep 走 ros2 param set 打到**飞机上**
-#                                     # 的 formation_follower_node，只对本次飞行
-#                                     # 有效；在这个脚本里设环境变量没用。
-#
-#   ./run_real.sh                     # 不给就跑 formation_slim.py
-#   ./run_real.sh highrise_slim --keep # 结束后保留选手容器，便于翻日志
-#   ./run_real.sh formation_slim --skip-clock-check  # 跳过时钟同步闸门（见下）
-#   ./run_real.sh mission_slim --max-vel 0.4         # 临时压低巡航限速
-#
-# 跟仿真的 run.sh 的区别（为什么不能直接改域号复用那一个）：
-#   · 不起仿真容器。机载飞行栈/视觉栈跑在两架飞机上，由各机的 control_server
-#     管理；本脚本只做**探测**，不替你启动，也不在收尾时把它们拆掉。
-#   · 就绪判据不同。仿真等 Gazebo 日志里的 "Ready for takeoff"；真机等
-#     两机的 ROS 节点可见 + 检测话题有发布者。
-#   · 网络参数走 scripts/contestant_network.sh 的 real 模式（ROS_DOMAIN_ID=20
-#     + 生成带静态 Peer 的 cyclonedds_real.xml），不是镜像自带的回环配置。
-#   · 监视窗口在地面站另起一个容器跑。仿真那边是 docker exec 进本机的
-#     flight-stack 容器，真机的 flight-stack 在飞机上，进不去也不该进。
-#   · 没有出题裁判。referee.py 靠增删 Gazebo 模型让火情随机出现，真机没有这个
-#     手段——综合任务的火情按赛前约定**人工布置**。
+# 环境变量：SOUND_LIGHT_IGNORE=1 跳过声光串口检查（本轮没有声光播报）。
+#           SIM_FROZEN=1 等同于 --sim-frozen。
 set -eo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
 SCRIPT=formation_slim.py   # 2026-10-14：原 formation_lite.py 已删
-# 编队间距（米）。2026-10-07 由 4.0 改为 5.0（用户要求），跟 SDK 的
-# DroneSDK.spacing_m / run(spacing_m=) 默认值保持一致——这里用 --spacing 传给
-# 选手程序，会**覆盖** SDK 的默认值，所以两边必须一起改。监视器画的"目标间距"
-# 虚线也用这个值。临时换：./run_real.sh <程序> --spacing 4.0
+# 编队目标间距（米）：传给选手程序覆盖 SDK 默认值。
 SPACING=5.0
-# 两机**空间直线距离**的安全下限（米），对应飞机上 formation_follower_node 的
-# min_separation_m：低于它僚机参考点会被冻住（"直线距离保护：两机仅 X m < Y m，
-# 参考点冻结等待"），现象是僚机不跟队。2026-10-07 真机两机相撞（最小直线间距
-# 0.03 m）之后加的硬保护。
-# 留空 = 不动飞机上的值（飞机本地 .env 的 FORMATION_MIN_SEPARATION_M）。
-# 🔴 **真机这边只能用 ros2 param set，环境变量没用**：formation_follower_node
-# 跑在**飞机上**（Jetson 里的 flight-stack 容器，由机载 control_server 起、读的
-# 是飞机本地那份 compose/.env），而这个脚本跑在地面站，只 docker run 选手程序和
-# 监视器三个容器——在这里 export FORMATION_MIN_SEPARATION_M 根本到不了那个节点，
-# 而且是**静默**没用（跟"真机 compose 不透传 = 参数永远默认值"同一类坑）。
-# 好在节点每轮循环都重读这个参数（不是启动时缓存一次），所以 param set 立刻
-# 生效、不用重启飞行栈（避免 UWB 被热重启搞坏那条老坑）。
-# ⚠️ 只在**本次飞行**有效：飞行栈一重启就回到飞机本地 .env 的值。调参定下来
-# 之后要固化，得改飞机上那份 .env。
-# ⚠️ 想把 --spacing 调到 4.0 的话，这个值必须一起往下调（比如 3.0），否则目标
-# 值正好压在保护线上，参考点会被频繁冻住。
+# 两机直线距离下限（米），低于它僚机参考点冻结。留空=用飞机上的现值；调 --spacing 要一起调。
 MIN_SEP=
 KEEP=0
 TIMEOUT_S=1500
 SKIP_CLOCK=0
-# 经规划器航段的限速（m/s），透传给选手程序的 --max-vel，覆盖程序里的默认常量
-# （比如 mission_lite.py 的 MISSION_MAX_VEL_MPS）。管 goto/goto_world/fly_route/
-# lead_formation。
-# ⚠️ **不管直飞**：goto_direct / return_home(direct=True) 走的是 precision_servo
-# 的另一条链路，速度是 SDK 的 DIRECT_CRUISE_MPS（1.0 m/s），改这里不影响它。
-# 留空（MAX_VEL=）则不透传，各程序用自己的默认值。
-MAX_VEL=0.6   # 2026-10-13 用户要求：0.8 -> 0.6。这是**主控**，会覆盖 .env 的 LINE_CRUISE_MPS
+# 经规划器航段的巡航限速（m/s）。不管直飞。
+MAX_VEL=0.6   # 主控：会覆盖 .env 的 LINE_CRUISE_MPS
 LEADER=NX01
 FOLLOWER=NX02
 LEADER_IP=192.168.2.101
@@ -82,6 +46,9 @@ LOGDIR="$ROOT/runtime_logs"
 C_LEADER=real_leader
 C_FOLLOWER=real_follower
 C_MONITOR=real_monitor
+ALLOW_DRIFT=0
+# 仿真侧冻结开关：1 = 不再要求流程程序两侧逐字节相同。环境变量可预置。
+SIM_FROZEN=${SIM_FROZEN:-0}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -89,9 +56,11 @@ while [ $# -gt 0 ]; do
         --min-sep) MIN_SEP="$2"; shift 2 ;;
         --keep)    KEEP=1; shift ;;
         --skip-clock-check) SKIP_CLOCK=1; shift ;;
+        --allow-drift) ALLOW_DRIFT=1; shift ;;
+        --sim-frozen) SIM_FROZEN=1; shift ;;
         --max-vel) MAX_VEL="$2"; shift 2 ;;
         --timeout) TIMEOUT_S="$2"; shift 2 ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
         -*) echo "未知参数: $1（用 --help 看用法）" >&2; exit 2 ;;
         *)  SCRIPT="${1%.py}.py"; shift ;;
     esac
@@ -100,27 +69,21 @@ done
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "!! $*" >&2; exit 1; }
 
-# 前一次的残余：容器名是固定的，上次若用了 --keep、或者崩了/被 Ctrl-C 掉，
-# 容器会留着，这次 docker run --name 会直接报 "name already in use" 起不来。
-# 所以**启动前先清一遍**，并注册 trap 保证 Ctrl-C 也清（跟仿真 run.sh 同样的两层）。
-# 这一趟的时间戳：归档目录用它，保证历次飞行不互相覆盖。
+# 容器名固定：上一趟用了 --keep 或崩了/被 Ctrl-C，残留要先清掉。
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
 
 # 把这一趟的日志和监视器产物归档到带时间戳的目录。
-# **放在 cleanup 里**（trap EXIT）而不是只放在正常收尾流程里：中途 Ctrl-C 或
-# 异常退出时，正常收尾那段根本不会执行，容器被 docker rm -f 一清日志就没了——
-# 2026-10-07 连着几次查故障翻不到当趟日志就是这么丢的。
 archive_run() {
     local dir="$LOGDIR/archive/${SCRIPT%.py}_$RUN_STAMP"
     mkdir -p "$dir" 2>/dev/null || return 0
     local c
     for c in "$C_LEADER" "$C_FOLLOWER" "$C_MONITOR"; do
         docker logs "$c" > "$dir/$c.log" 2>&1 || true
-        # 容器不存在时 docker logs 会把报错写进文件，留个空文件没意义，删掉
+        # 容器不存在时 docker logs 会把报错写进文件，空文件删掉。
         [ -s "$dir/$c.log" ] || rm -f "$dir/$c.log"
         grep -q "No such container" "$dir/$c.log" 2>/dev/null && rm -f "$dir/$c.log"
     done
-    # 监视器的 CSV/PNG：它自己写在 LOGDIR 下、每趟同名覆盖，这里拷一份进归档
+    # 监视器的 CSV/PNG 每趟同名覆盖，这里拷一份进归档。
     local f
     for f in "${SCRIPT%.py}_real_formation.csv" "${SCRIPT%.py}_real_formation_diag.csv" \
              "${SCRIPT%.py}_real_formation.png"; do
@@ -147,63 +110,90 @@ purge_stale() {
     docker rm -f $stale >/dev/null 2>&1 || true
 }
 
-# 同一时刻只允许一个 run_real.sh：两个并行会互相拆对方的选手容器。
+# 同一时刻只允许一个 run_real.sh：并行会互相拆对方的选手容器。
 LOCK=/tmp/docker_sim_run_real.lock
 exec 9>"$LOCK"
 flock -n 9 || die "已经有一个 run_real.sh 在跑（锁 $LOCK）。先等它结束或 ./stop.sh"
 
 # ---- 1. 找程序 ----
 SRCDIR="$HERE"
-# 列举时排除 venue.py（那是坐标表，不是可跑的程序）。原来只列 *_lite.py，
-# 结果 basic_test.py 这类测试程序不会出现在提示里。
+# 列举时排除 venue.py（坐标表，不是可跑的程序）。
 [ -f "$HERE/$SCRIPT" ] || die "找不到程序 $SCRIPT（本目录下可选：$(cd "$HERE" && ls *.py 2>/dev/null | grep -v '^venue\|^rounds\.py$' | tr '\n' ' '))"
 log "程序：$SRCDIR/$SCRIPT"
 
 purge_stale
 
 # ---- 1.8 程序代码一致性 ----
-# 真机与仿真的选手程序**必须逐字节相同**，差异只允许出现在 venue.py（场地参数）。
-# 这样改场地坐标不会把程序改出分叉，修 bug 也只需要改一边再同步。
-# 漂移了就拦下——不然两套代码会悄悄长歪，到现场才发现就晚了。
 SIMDIR="$ROOT/contestant_sim"
 if [ -d "$SIMDIR" ]; then
     drift=""
-    # 比**所有** .py，不只 *_lite.py：basic_test.py 这类场地无关的测试
-    # 程序两边也该逐字节相同。venue.py 本来就该不同，跳过。
-    # 顶层 + 单机测试/ 都比。venue.py 本来就该不同，跳过。
-    for f in "$HERE"/*.py "$HERE"/单机测试/*.py; do
-        [ -e "$f" ] || continue
-        b="${f#$HERE/}"                 # 保留相对路径，便于区分同名文件
-        [ "$(basename "$f")" = venue.py ] && continue
-        [ -f "$SIMDIR/$b" ] || continue
-        cmp -s "$f" "$SIMDIR/$b" || drift="$drift $b"
-    done
-    if [ -n "$drift" ]; then
-        echo "!! 这些程序跟 contestant_sim/ 下的不一致：$drift" >&2
-        echo "   场地差异应该只在 venue.py 里。看看差了什么：" >&2
-        for b in $drift; do echo "     diff -u $SIMDIR/$b $HERE/$b" >&2; done
-        die "程序代码已漂移，先对齐再飞"
+    # 2026-10-23 这道闸门拆成三项，只有第一项受 SIM_FROZEN 影响：
+    #   ① 流程程序逐字节相同 —— 防"改了真机忘了仿真"。但仿真一旦冻结、不再
+    #      跑了，它就变成"要求你同步维护一个不会执行的副本"，赛场临时改任务
+    #      逻辑时纯粹是摩擦，所以可以用 --sim-frozen / SIM_FROZEN=1 关掉。
+    #   ② rounds.py 两侧逐字节一致 —— **跟冻结无关，永远查**。
+    #      2026-10-24 起它从 SDK 镜像搬到了选手目录（挂载进容器，改完不用重建
+    #      镜像）。既然成了选手文件，就跟四个任务程序一样要求两侧同步：它是
+    #      公共飞行段，真机改了而仿真没改，等于仿真验证的不是同一套流程。
+    #   ③ 两份 venue 顶层常量名一致 —— **跟冻结无关，永远查**。rounds.py 两套
+    #      场地共用，真机 venue 加了常量而仿真没有，仿真那套就启动即 ImportError；
+    #      仿真是交付给高校实验室的产品，赛后还要能跑。
+    if [ "$SIM_FROZEN" = "1" ]; then
+        log "SIM_FROZEN：跳过流程程序逐字节比对（仿真侧已冻结，赛场逻辑独立演进）"
+    else
+        # 比两侧同名的所有 .py；真机独有的文件名（赛场特供流程）天然豁免。
+        # 单机测试和地面检查 2026-10-21 移到 docker_sim/test/，不在这道闸门里。
+        for f in "$HERE"/*.py; do
+            [ -e "$f" ] || continue
+            b="${f#$HERE/}"                 # 保留相对路径，便于区分同名文件
+            if [ "$(basename "$f")" = venue.py ]; then continue; fi
+            if [ ! -f "$SIMDIR/$b" ]; then continue; fi
+            cmp -s "$f" "$SIMDIR/$b" || drift="$drift $b"
+        done
     fi
-    log "程序代码与仿真版一致（差异只在 venue.py）"
+    # rounds.py 2026-10-24 起住在选手目录（挂载、免重建镜像）。它是两侧共用的
+    # 公共飞行段，所以要求逐字节一致；少了一边就是没同步，直接拦。
+    if [ ! -f "$HERE/rounds.py" ]; then
+        drift="$drift rounds.py(真机侧缺失)"
+    elif [ ! -f "$SIMDIR/rounds.py" ]; then
+        drift="$drift rounds.py(仿真侧缺失)"
+    elif ! cmp -s "$HERE/rounds.py" "$SIMDIR/rounds.py"; then
+        drift="$drift rounds.py"
+    fi
+    # 两份 venue 的顶层常量名必须一致，少一个就是选手程序启动时 ImportError。
+    if ! diff -q <(grep -oE '^[A-Z_][A-Z0-9_]*' "$HERE/venue.py" | sort -u) \
+                 <(grep -oE '^[A-Z_][A-Z0-9_]*' "$SIMDIR/venue.py" | sort -u) >/dev/null; then
+        drift="$drift venue.py(两侧常量名不一致)"
+    fi
+    if [ -n "$drift" ]; then
+        echo "!! 跟 contestant_sim/ 不一致：$drift" >&2
+        echo "   场地差异应该只在 venue.py 的值里；流程要分叉请用新文件名。" >&2
+        for b in $drift; do
+            case "$b" in *'('*) continue ;; esac
+            echo "     diff -u $SIMDIR/$b $HERE/$b" >&2
+        done
+        if [ "$ALLOW_DRIFT" = "1" ]; then
+            log "⚠ --allow-drift 放行：本架次飞的不是仿真验证过的那一套（上面是清单）"
+        else
+            die "程序代码已漂移，先对齐再飞；确要放行用 --allow-drift"
+        fi
+    elif [ "$SIM_FROZEN" = "1" ]; then
+        log "rounds.py 与两侧 venue 常量名均已对齐"
+    else
+        log "程序代码与仿真版一致（差异只在 venue.py）"
+    fi
 fi
 
 # ---- 2. 仿真残留检查 ----
-# 仿真和真机主要靠 ROS_DOMAIN_ID 隔离（21 / 20），话题不会串；但声光常驻程序
-# 只有一个容器、只能在一个域，而且 Gazebo 很重会挤占 CPU。这两类隔离不了，
-# 必须在起飞前拦住。
 # ---- 共享栈必起（2026-10-03 用户要求）----
-# 声光栈和网页栈都不属于本脚本自己的容器，原来 check_env.sh 对它们只给 △
-# 提示不拦。真机侧两个都必起。放在 check_env 之前，让它复核修好之后的状态。
 source "$ROOT/scripts/ensure_stacks.sh"
+check_sound_light_port
 ensure_sound_light real
 ensure_gcs_web
 
 "$ROOT/scripts/check_env.sh" real || die "环境检查未通过（见上），处理后再跑"
 
 # ---- 3. 两机可达性与机载栈就绪 ----
-# 本脚本只检查机载栈、不代起（机载栈归各机 control_server 管，生命周期比一次
-# 飞行长，重起还要重锁原点）。但报错时要把补救命令打出来，跟下面视觉那步一致，
-# 不然人得翻手册才知道敲什么。
 hint_stack() {   # hint_stack <ip> <flight|vision>
     echo "   起它：地面站界面点按钮，或" >&2
     echo "     curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \\" >&2
@@ -225,7 +215,7 @@ for ip in "$LEADER_IP" "$FOLLOWER_IP"; do
         echo "     ssh nvidia@$ip 'sudo systemctl restart uav-control-server'" >&2
         die "机载管控服务不可用，已中止"
     fi
-    # /status 直接给 flight_up / vision_up / namespace，比"端口有响应"硬得多
+    # /status 直接给 flight_up / vision_up / namespace，比"端口有响应"硬得多。
     ns=$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null)
     fu=$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("flight_up"))' 2>/dev/null)
     vu=$(echo "$st" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("vision_up"))' 2>/dev/null)
@@ -242,7 +232,7 @@ for ip in "$LEADER_IP" "$FOLLOWER_IP"; do
     fi
     log "  $ip: namespace=$ns  flight_up=$fu  vision_up=$vu"
 done
-# 命名空间别装错机：两机 .namespace 配反过的话，话题全错位且不报错
+# 命名空间别装错机：两机配反的话题全错位，而且不报错。
 ns1=$(curl -s --noproxy '*' --max-time 8 "http://$LEADER_IP:8890/status" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null || true)
 ns2=$(curl -s --noproxy '*' --max-time 8 "http://$FOLLOWER_IP:8890/status" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("namespace",""))' 2>/dev/null || true)
 [ "$ns1" = "$LEADER" ] || die "长机 IP $LEADER_IP 报的命名空间是 $ns1，期望 $LEADER（.namespace 配反了？）"
@@ -250,23 +240,16 @@ ns2=$(curl -s --noproxy '*' --max-time 8 "http://$FOLLOWER_IP:8890/status" | pyt
 log "两机机载栈就绪，命名空间对应正确"
 
 # ---- 3.5 时钟同步闸门（2026-10-10 加）----
-# 为什么必须拦：ego_planner 交换 swarm 轨迹时，对方的时间戳比本机晚 0.25 秒以上
-# 就把整条轨迹丢弃。10-09 两机时钟源不统一（地面站自己没有上游、NX02 把它判成
-# false ticker 转而去对外网），两机差 0.45~0.52 秒，编队协同全程失效——而机载
-# 日志里只表现为"轨迹被丢弃"，现场完全看不出是时钟的事，白飞了一下午。
-# 断电重启后 chrony 会重新选源，所以**每趟都要查**，不是配完那次查过就完了。
-# 代价：两次 ssh，实测 0.3 秒。
 GCS_IP=192.168.2.103
 CLOCK_MAX_OFFSET_S=0.05   # 单机 RMS 偏移上限。两机各 0.05 → 相对 0.1，仍远低于 0.25
 if [ "$SKIP_CLOCK" = 1 ]; then
     log "△ 跳过时钟同步检查（--skip-clock-check）——编队协同可能失效"
 else
-    # chrony 的 Reference ID 是当前选中源的 IP 十六进制。两机必须都选地面站，
-    # 只看"偏移小"不够：各自对不同的源也可能都显示偏移小，但彼此差一大截。
+    # chrony 的 Reference ID 是选中源 IP 的十六进制，两机必须都选地面站。
     want_hex=$(LC_ALL=C python3 -c \
         'import sys;print("".join("%02X"%int(x) for x in sys.argv[1].split(".")))' "$GCS_IP")
     for ip in "$LEADER_IP" "$FOLLOWER_IP"; do
-        # 机载 locale 是印尼语，awk 不把 . 当小数点，两边都得钉 LC_ALL=C
+        # 机载 locale 不把 . 当小数点，两边都要钉 LC_ALL=C。
         trk=$(timeout 8 ssh -o BatchMode=yes -o ConnectTimeout=4 "nvidia@$ip" \
                 'LC_ALL=C chronyc -n tracking' 2>/dev/null || true)
         if [ -z "$trk" ]; then
@@ -296,36 +279,15 @@ else
 fi
 
 # ---- 4. 网络参数（真机模式）----
-# shellcheck source=/dev/null
 source "$ROOT/scripts/contestant_network.sh"
 contestant_net_args real "$ROOT" "$HOME/.cache/contest_sdk" || die "真机网络参数生成失败"
 log "网络：$CONTESTANT_NET_DESC"
 
 # ---- 机载 MAVLink 流收窄（降 CPU，2026-10-03）----
-# 飞控 SD 卡把 ODOMETRY / LOCAL_POSITION_NED / ATTITUDE_QUATERNION /
-# HIGHRES_IMU 四路顶到了 100Hz，实测白占机载整机 8-9 个百分点的 CPU。改那四
-# 行要拆机取 SD 卡，所以在这里用 MAV_CMD_SET_MESSAGE_INTERVAL(511) 运行时压
-# 回来。每一路关/降的依据和完整实测数据见 scripts/tune_mavlink_streams.sh
-# 文件头。失败只警告不中止（不收窄也能飞，只是 CPU 高一截）。
-# 必须放在 contestant_net_args 之后——它要靠 CONTESTANT_NET_ARGS 进真机域。
 source "$ROOT/scripts/tune_mavlink_streams.sh"
 log "收窄机载 MAVLink 高频流（降 CPU）"
 tune_mavlink_streams "$LEADER" "$FOLLOWER"
 
-# ---- 5. 相机：不在这里配 ----
-# 用哪一路相机**由程序自己声明**（开头调 sdk.set_camera_mode()）。SDK 从
-# 2026-10-03 起在 set_camera_mode() 里做**两路互斥**：开一路之前先停掉另一路，
-# 保证"每架飞机同时最多只有一路检测在跑"；并且等到那一路真出数据才返回，失败
-# 抛异常。在那之前互斥只做在 mission_lite 的 _use_camera() 里，5 个单任务程序
-# 只"加开自己那路"，于是地面站起 vision 栈时默认拉起的那一路会一直挂着——实测
-# NX02 默认开下视、跑 highrise_lite（要前视）之后两路都在跑，整机 88.7%。
-# 这里曾经有一套"按程序文件名猜需要哪路、运行器替它配好"的机制，拆掉了：
-#   · 按文件名匹配（*groundfire*|*抓取*…）本身就脆，改个名就失效，新程序要
-#     回来改表；
-#   · 程序自己最清楚用哪一路，声明在代码里比写在运行器的表里更不容易错；
-#   · set_camera_mode(wait=True) 本身就验证了"这一路真在出数据"，不需要运行器
-#     再单独验一遍。
-# 需要的只是"能动态起停"这个能力，那在 SDK 里。
 
 # ---- 6. 声光（只接地面站）----
 sl_dom=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' contestant-sound-light 2>/dev/null | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)
@@ -337,33 +299,21 @@ elif [ "$sl_dom" != "20" ]; then
 fi
 
 # ---- 7. 监视窗口 ----
-# 必开：任何飞行测试都要同时起编队监视。数据源是两机的 uwb/pose_abs。
-MON_OUT="/logs/${SCRIPT%.py}_real_formation.png"
+# 报告图的名字就是"时间 + 飞行报告"，每趟一份、不互相覆盖。
+MON_OUT="/logs/$(date "+%Y-%m-%d %H%M") 飞行报告.png"
 MON_LOG="/logs/${SCRIPT%.py}_real_monitor.log"
 log "启动监视窗口（报告将存到 runtime_logs/$(basename "$MON_OUT")）"
-# 俯视底图：monitor.py 不给 --layout 就退回写死的 fire_drill_room 老坐标
-# （房间原点在**中心**、立柱 (4.5,7)），跟样题场景完全不是一套，轨迹会叠在
-# 错误的底图上。样题布局的权威来源是 src/contest_mission/config 下那份 yaml
-# （room/pillars/pads/obstacle_cylinder/terrain_module 都在里面）。
-# 2026-10-05 补：之前一直没传，每趟监视器都在打那条"没给 --layout"的警告。
-# 沿航线间距的"尺子"：两机都投影到这条折线上，间距 = 弧长差（同段内就是
-# 直线距离，跨段就是经过航点那几段之和）。2026-10-15 补上：以前真机从来不传
-# --route，监视器退回用直线距离，报告里"沿航线间距"和"空间直线距离"两条
-# 线一直是重合的（指纹：CSV 里 gap_route == gap_line）。
-# 坐标用 contestant_real/venue.py 的**实测校准值**，改了那边记得同步这里。
-# ⚠️ 必须跟长机实际带队跑的那条逐点一致；尤其是**最后回 A 那一段不能漏**
-#   （lead_formation 会把 final_xy 接到尾巴上）——monitor 的 RoutePath.is_closed()
-#   靠首尾距离 <0.5 m 判闭合，不闭合就不走"环上取短边"保护，两机停在
-#   起降点上时间距会读成整条航线长（仿真那边实测 67 m，占全程 38% 的样本）。
-#   A B C G E F G D A（formation_slim / mission_slim 第 1 轮跑的全环，总长 88.9 m）
-MON_ROUTE_LOOP="2.5,2.5 2.5,22.5 17.5,22.5 17.5,12.5 10,12.5 13.4,17 17.5,12.5 17.5,2.8 2.5,2.5"
-#   G D A（groundfire/highrise 和 mission 第 2/3 轮的 formation_home：只带队跑
-#   [G, D] 再解散回 A，不是闭合环，总长 24.7 m）
-MON_ROUTE_TAIL="17.5,12.5 17.5,2.8 2.5,2.5"
-case "$SCRIPT" in
-    formation*|mission*) MON_ROUTE="$MON_ROUTE_LOOP" ;;
-    *)                   MON_ROUTE="$MON_ROUTE_TAIL" ;;
-esac
+# 监视器底图与航线：必须跟长机实际带队跑的那条逐点一致（含闭合段）。
+# 2026-10-23 起由 scripts/route_for_monitor.py 从本目录的 venue.py 现算，
+# **不再在这里抄第二份坐标**。改成现算的直接原因：核对时发现这里抄的那份
+# 已经跟 venue.py 漂了 4 个点（A 写 2.5,2.5 实为 2.7,2.7；F 写 13.4,17 实为
+# 10.0,17.5；C 写 17.5,22.5 实为 17.0,22.5；D 写 17.5,2.8 实为 17.2,2.7），
+# 而航线对不上会让间距读成整条航线长（实测 67 米、占 38% 样本）。
+# 算不出来就不传 --route：少一条间距曲线而已，不该让整个架次飞不了。
+MON_ROUTE="$(python3 "$ROOT/scripts/route_for_monitor.py" "$HERE" "$SCRIPT" 2>&1)" || {
+    echo "!! 航线算不出来（$MON_ROUTE），本架次监视器不画沿航线间距" >&2
+    MON_ROUTE=""
+}
 LAYOUT_YAML="${LAYOUT_YAML:-sample_room_layout.yaml}"
 LAYOUT_HOST="$ROOT/src/contest_mission/config/$LAYOUT_YAML"
 MON_LAYOUT_ARGS=()
@@ -375,16 +325,6 @@ else
     MON_LAYOUT_OPT=()
 fi
 # ---- --min-sep：把安全下限设到两机（飞机上）的 formation_follower_node ----
-# 放在起监视器**之前**：监视器画的那条红线要跟飞机上实际生效的值一致。
-#
-# ⚠️ 为什么是"一个容器里把两机都设了" + "先等节点出现" + "失败重试"：
-# 2026-10-19 第一版是每台各起一个 `docker run --rm` 容器，实测 NX01 成功、
-# NX02 **set 超时失败而随后的 get 成功**，于是回读到旧值 4.0、脚本判定失败。
-# 根因是新容器每次都要重做 DDS 服务发现，第一次 param set 赶在发现完成之前就
-# 超时了（几百毫秒后的 get 就正常）。所以：一次容器调用里顺序处理两机（发现
-# 只做一次、连接已经热了），调服务前先用 node list 等节点真的出现，再给 set
-# 三次重试，并且**不吞 set 的错误输出**——第一版 `>/dev/null 2>&1` 把真实原因
-# 全吃掉了，只能看到一句没头没尾的"没设上"。
 MON_MIN_SEP_OPT=()
 if [ -n "$MIN_SEP" ]; then
     MON_MIN_SEP_OPT=(--min-sep "$MIN_SEP")
@@ -419,13 +359,7 @@ if [ -n "$MIN_SEP" ]; then
         echo "   值不确定就不飞。先确认两机飞行栈都起了、都在 ROS 域 20。" >&2
         exit 1
     fi
-    # ⚠️ 退出后留一点时间让 DDS 收敛再往下走。2026-10-19 实测：这一步的临时
-    # 容器 11:15:34 刚退出，选手程序紧接着启动、5 秒内没发现 pt4ctrl 的
-    # set_parameters 服务，takeoff 第一步就报 `takeoff:set_height` 超时
-    # （历史归档里从没出现过这个错，加了这一步当天就出现）。participant 离开
-    # 会让域里所有节点更新发现信息，而这套真机环境的发现本来就慢——同一时段
-    # `ros2 node list` 第一次只看得到 NX01，等 5 秒才看到 NX02 那 27 个节点。
-    # 代价只是多等几秒，换掉一次"飞不起来还看不出为什么"。
+    # 等 DDS 收敛再起选手程序：紧接着起会报 takeoff:set_height 超时。
     sleep 5
 fi
 
@@ -452,7 +386,7 @@ COMMON=(--network host
         -e PYTHONPATH="$PYPATH"
         "${CONTESTANT_NET_ARGS[@]}")
 
-# 速度留空就不传：老镜像的 SDK 不认 --max-vel，argparse 会直接报错起不来。
+# 速度留空就不传：老镜像的 SDK 不认 --max-vel，argparse 会直接报错。
 VEL_ARGS=()
 if [ -n "$MAX_VEL" ]; then
     VEL_ARGS=(--max-vel "$MAX_VEL")
@@ -461,10 +395,7 @@ else
     vel_desc="限速=程序默认"
 fi
 log "启动选手程序：$SCRIPT（长机=$LEADER 僚机=$FOLLOWER 间距=${SPACING}米 $vel_desc）"
-# CONTEST_CONTROL_HOST：SDK 的 set_camera_mode() 靠它找自己飞机的
-# control_server(8890) 切相机模式。**不注入的话 SDK 会判成仿真、空操作**
-# （仿真没有 control_server，检测节点随飞行栈起、本来不用切），于是真机上
-# 的切换会静默不生效。各容器注入**自己那架**的 IP。
+# CONTEST_CONTROL_HOST：SDK 的 set_camera_mode() 靠它找自己飞机的机载服务。
 docker run -d --name "$C_LEADER" -e CONTEST_CONTROL_HOST="$LEADER_IP" "${COMMON[@]}" "$IMAGE" \
     python3 -u "/workspace/$SCRIPT" --namespace "$LEADER" --role leader \
     --teammate "$FOLLOWER" --spacing "$SPACING" "${VEL_ARGS[@]}" >/dev/null
@@ -503,8 +434,6 @@ for c in "$C_LEADER" "$C_FOLLOWER"; do
     echo "--- $c 退出码 $code"
     [ "$code" = "0" ] || rc=1
     # 先落盘再摘要：下面 cleanup 会 docker rm -f，不存下来异常原文就没了。
-    # 2026-10-04 补（run_test.sh 那边同日修了同类问题，那边更严重：它 grep 的
-    # 是一个从没被生成的文件，摘要恒为空）。
     docker logs "$c" > "$LOGDIR/${SCRIPT%.py}_real_$c.log" 2>&1 || true
     grep -E 'Traceback|Error|错误|失败' "$LOGDIR/${SCRIPT%.py}_real_$c.log" | tail -5 || true
 done

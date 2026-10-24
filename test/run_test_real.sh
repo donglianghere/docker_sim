@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # 一键跑单机测试。跟 run_real.sh 共用同一套前置闸门，但**只起一架**。
 #
-#   ./run_test.sh t1              # 物资抓取（默认 NX02，带夹爪）
-#   ./run_test.sh t2              # 地面火情对准（默认 NX01）
-#   ./run_test.sh t3 --n          # 高层火情瞄准，用 N 点看 1# 楼
-#   ./run_test.sh t4 --nx02       # 避障，指定用 NX02
-#   ./run_test.sh t5 --keep       # 仿地，结束后保留容器看日志
-#   ./run_test.sh                 # 不给就列出可选的测试
+#   ./run_test_real.sh t1              # 物资抓取（默认 NX02，带夹爪）
+#   ./run_test_real.sh t2              # 地面火情对准（默认 NX01）
+#   ./run_test_real.sh t3 --n          # 高层火情瞄准，用 N 点看 1# 楼
+#   ./run_test_real.sh t4 --nx02       # 避障，指定用 NX02
+#   ./run_test_real.sh t5 --keep       # 仿地，结束后保留容器看日志
+#   ./run_test_real.sh                 # 不给就列出可选的测试
 #
 # 默认机号是按测试内容定的：t1 要夹爪所以默认 NX02（任务机），其余默认 NX01。
 # 用 --nx01 / --nx02 可以覆盖。
@@ -14,7 +14,10 @@ set -eo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-TDIR="$HERE/单机测试"
+TDIR="$HERE/单机测试_real"
+# 测试程序 import venue，而 venue.py 在选手目录——所以选手目录挂 /workspace
+# （PYTHONPATH 第一条），测试程序自己挂 /tests。
+VENUEDIR="$ROOT/contestant_real"
 IMAGE=contestant-sdk:latest
 LOGDIR="$ROOT/runtime_logs"
 C_TEST=real_test
@@ -53,7 +56,7 @@ list_tests() {
         printf '  %-16s %s\n' "${b%%_*}" "$desc"
     done
     echo
-    echo "用法： ./run_test.sh t1 [--nx01|--nx02] [--keep] [--timeout 秒] [程序自己的参数...]"
+    echo "用法： ./run_test_real.sh t1 [--nx01|--nx02] [--keep] [--timeout 秒] [程序自己的参数...]"
 }
 
 [ $# -eq 0 ] && { list_tests; exit 0; }
@@ -226,9 +229,9 @@ log "启动测试程序"
 # CONTEST_CONTROL_HOST：见 run_real.sh 同名处的说明。不注入 SDK 会判成仿真。
 docker run -d --name "$C_TEST" -e CONTEST_CONTROL_HOST="$IP" --network host \
     -v /etc/localtime:/etc/localtime:ro \
-    -v "$HERE:/workspace:ro" -v "$LOGDIR:/logs" \
+    -v "$VENUEDIR:/workspace:ro" -v "$TDIR:/tests:ro" -v "$LOGDIR:/logs" \
     -e PYTHONPATH="$PYPATH" "${CONTESTANT_NET_ARGS[@]}" "$IMAGE" \
-    python3 -u "/workspace/单机测试/$BASENAME" \
+    python3 -u "/tests/$BASENAME" \
       --namespace "$NS" --role "$ROLE" --teammate "$NS" "${EXTRA[@]}" >/dev/null
 
 echo

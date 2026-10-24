@@ -46,7 +46,9 @@ import matplotlib.patches      # 模块级导入：放 main() 里会把 matplotl
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import Float64MultiArray
+import functools
+import json
+from std_msgs.msg import Float64MultiArray, String
 from rclpy.node import Node
 # 电池话题要用 sensor data QoS（BEST_EFFORT），见下面订阅处的说明
 from rclpy.qos import qos_profile_sensor_data
@@ -60,14 +62,20 @@ ROOM_X, ROOM_Y = 20.0, 25.0
 ROOM_ORIGIN = 'center'               # 'center'=原点在房间中心；'southwest'=在西南角
 PILLARS = [(4.5, 7.0), (-4.5, 7.0), (0.0, 0.0)]
 PILLAR_HALF = 0.5
+#: 孪生柱方向键 `twin_dir` -> 单位方向向量（跟 gen_sample_room_world.py
+#: 和 scenario_reset_node.py 的同名表一致）。
+_TWIN_UNIT = {'+x': (1.0, 0.0), '-x': (-1.0, 0.0),
+              '+y': (0.0, 1.0), '-y': (0.0, -1.0)}
 PADS = {'NX01': (2.0, -9.5), 'NX02': (-2.0, -9.5)}
 CYLINDERS = []                       # [(x, y, r), ...]
 TERRAIN = None                       # (x, y, size_x, size_y)
+SUPPLY = None                        # (x, y, size_x, size_y)
 
 
 def load_scene(path):
     """从布局 yaml 覆盖上面那组底图常量。找不到文件就保持原值。"""
     global ROOM_X, ROOM_Y, ROOM_ORIGIN, PILLARS, PILLAR_HALF, PADS, CYLINDERS, TERRAIN
+    global SUPPLY
     import yaml
     with open(path, encoding='utf-8') as f:
         L = yaml.safe_load(f)
@@ -78,8 +86,14 @@ def load_scene(path):
     PILLARS = []
     for q in L['pillars']:
         PILLARS.append((float(q['x']), float(q['y'])))
-        if q.get('twin_east'):       # 正东孪生柱，底图上要画成两个方块
-            PILLARS.append((float(q['x']) + 2 * PILLAR_HALF, float(q['y'])))
+        # 孪生柱底图上要画成第二个方块。方向读 yaml 的 twin_dir（2026-10-19：
+        # 1# 楼的孪生柱挪到了正南，原来这里写死"正东"会把底图画错一整栋楼）；
+        # 旧键 twin_east: true 等价 '+x'。
+        d = _TWIN_UNIT.get(str(q.get('twin_dir') or
+                               ('+x' if q.get('twin_east') else '')).lower())
+        if d:
+            PILLARS.append((float(q['x']) + d[0] * 2 * PILLAR_HALF,
+                            float(q['y']) + d[1] * 2 * PILLAR_HALF))
     PADS = {p['id'].upper(): (float(p['x']), float(p['y']))
             for p in L['takeoff_landing_pads']}
     c = L.get('obstacle_cylinder')
@@ -90,6 +104,10 @@ def load_scene(path):
                  if c and c.get('enabled', True) else [])
     t = L.get('terrain_module')
     TERRAIN = (float(t['x']), float(t['y']), float(t['size_x']), float(t['size_y'])) if t else None
+    sp = L.get('supply_point')
+    # 物资点是矩形（坐标为中心），没给尺寸就按 0.5 m 见方画。
+    SUPPLY = (float(sp['x']), float(sp['y']),
+              float(sp.get('size_x', 0.5)), float(sp.get('size_y', 0.5))) if sp else None
 COLORS = {'NX01': '#d62728', 'NX02': '#1f77b4'}   # 长机红、僚机蓝
 
 AIRBORNE_Z = 1.0        # 高于这个算"在空中"（判"两机都起飞过"用）
@@ -214,6 +232,15 @@ class FormationMonitor(Node):
         # ---- 飞行统计（2026-09-30 用户要求：动画上显示起飞时刻、编队时长、里程、均速）----
         self.takeoff_t = {n: None for n in names}   # 首次高于 AIRBORNE_Z 的时刻（相对 t0）
         self.land_t = {n: None for n in names}      # 判定降落的时刻
+        #: 发射记录 {机号: [(x, y, label), ...]}（2026-10-24 加）。
+        #: 来源是 SDK 在 shoot() 里广播的 shot_event，每发一条带世界坐标。
+        #: 用途：轨迹图上标出在哪儿打的，数据表里累计打了几发——原来
+        #: "侦察机 1 发破窗弹、任务机 4 发灭火弹"只有日志文本能证明。
+        self.shots = {n: [] for n in names}
+        #: 任务阶段时间线 [(相对时刻, 阶段名)]（2026-10-24 加）。
+        #: 选手程序调 sdk.mark_phase() 打点，相邻两条之差就是上一段用时。
+        #: 只认侦察机那一路——它主导轮次，任务机跟着走。
+        self.phases = []
         self.dist_m = {n: 0.0 for n in names}       # 水平飞行里程（累加）
         self._last_xy = {n: None for n in names}    # 上一帧位置，算增量用
         self.gap_t, self.gap_d = [], []      # 沿航线的间距（主指标）
@@ -308,6 +335,10 @@ class FormationMonitor(Node):
         # RELIABLE 发布者的数据，反过来不行，所以这么写两边都兼容。
         self.fcu = {n: {'mt': [], 'mode': [], 'pt': [], 'pos_ok': []} for n in names}
         for n in names:
+            self.create_subscription(String, f'/{n}/shot_event',
+                                     functools.partial(self._on_shot, n), 10)
+            self.create_subscription(String, f'/{n}/phase_event',
+                                     functools.partial(self._on_phase, n), 10)
             self.create_subscription(State, f'/{n}/mavros/state',
                                      self._make_state_cb(n), qos_profile_sensor_data)
             self.create_subscription(EstimatorStatus, f'/{n}/mavros/estimator_status',
@@ -381,6 +412,40 @@ class FormationMonitor(Node):
             self._note_airborne()
             self._update_gap(t)
         return cb
+
+    def _on_phase(self, name, msg):
+        """收一条阶段标记。只认第一架（侦察机）的，避免两机重复打点。"""
+        if name != self.names[0]:
+            return
+        try:
+            d = json.loads(msg.data)
+            self.phases.append((time.monotonic() - self.t0, str(d.get('phase', ''))))
+        except Exception:
+            pass
+
+    def phase_durations(self):
+        """[(阶段名, 用时秒)]。最后一段没有后继打点就按"到现在"算。"""
+        out = []
+        for i, (t, nm) in enumerate(self.phases):
+            if nm == '完成':
+                continue
+            end = self.phases[i + 1][0] if i + 1 < len(self.phases) else (time.monotonic() - self.t0)
+            out.append((nm, end - t))
+        return out
+
+    def _on_shot(self, name, msg):
+        """收一条发射事件：SDK 在 shoot() 里每发一发广播一次，带世界坐标。
+
+        解析失败就丢掉——报告上少一个标记，不值得让监视器崩。
+        """
+        try:
+            d = json.loads(msg.data)
+            x, y = float(d['x']), float(d['y'])
+            if x != x or y != y:          # NaN：拿不到位置时只计数、不标位置
+                x = y = None
+            self.shots.setdefault(name, []).append((x, y, str(d.get('label', '发射'))))
+        except Exception:
+            pass
 
     def _on_diag(self, msg):
         if len(msg.data) >= 1:
@@ -563,6 +628,145 @@ def stats_lines(mon):
     return out
 
 
+def max_speed(d, win=1.0):
+    """全程最大水平速度（米/秒）。"""
+    _ts, vs = speed_series(d, win)
+    return max(vs) if vs else None
+
+
+def draw_speed_panel(ax, mon, tlo, tmax):
+    """速度曲线：两机的实时速度，各自的平均速度画成虚线参考。"""
+    ax.clear()
+    ax.set_title('速度曲线')
+    rows, _form = mon.flight_stats()
+    avg = {n: v for n, _w, _a, _d, v in rows}
+    for n in mon.names:
+        ts, vs = speed_series(mon.track[n])
+        if ts:
+            ax.plot(ts, vs, '-', color=COLORS[n], lw=1.3,
+                    label=f'{n} 实时 {vs[-1]:.2f} m/s')
+        if avg.get(n):
+            ax.axhline(avg[n], ls='--', color=COLORS[n], lw=1.0, alpha=0.7,
+                       label=f'{n} 平均 {avg[n]:.2f} m/s')
+    ax.set_xlim(tlo, max(tmax, tlo + 5))
+    ax.set_ylim(bottom=0.0)
+    ax.grid(alpha=0.3)
+    ax.set_xlabel('t (s)'); ax.set_ylabel('水平速度 (m/s)')
+    ax.legend(loc='upper right', fontsize=7, ncol=2)
+
+
+def draw_state_panel(ax, mon, tlo, tmax):
+    """状态时间带：每机一行飞控模式，定位失效用红色叠在同一行上。
+
+    这两项查事故最常用——模式跳 ALTCTL、定位翻 false 都是"飞机被莫名放到
+    地上"的指纹，看一眼这张图就知道是哪一秒开始坏的。
+    """
+    ax.clear()
+    ax.set_title('状态时间带')
+    hi = max(tmax, tlo + 5)
+    for i, n in enumerate(mon.names):
+        f = mon.fcu[n]
+        y0 = -(i + 1.0)
+        buckets = {}
+        for k, t_s in enumerate(f['mt']):
+            t_e = f['mt'][k + 1] if k + 1 < len(f['mt']) else hi
+            if t_e <= t_s:
+                continue
+            md = f['mode'][k]
+            c = ('#2ca02c' if md == 'OFFBOARD' else
+                 '#ff7f0e' if md in ('ALTCTL', 'POSCTL') else '#bbbbbb')
+            buckets.setdefault(c, []).append((t_s, t_e - t_s))
+        for c, spans in buckets.items():
+            ax.broken_barh(spans, (y0, 0.7), facecolors=c, alpha=0.9)
+        bad = []
+        for k, t_s in enumerate(f['pt']):
+            if f['pos_ok'][k]:
+                continue
+            t_e = f['pt'][k + 1] if k + 1 < len(f['pt']) else hi
+            if t_e > t_s:
+                bad.append((t_s, t_e - t_s))
+        if bad:
+            ax.broken_barh(bad, (y0, 0.7), facecolors='#d62728', alpha=1.0)
+        # 当前模式写在带子右端内侧（不能越出坐标区，否则会糊到隔壁那张图上）
+        md_now = f['mode'][-1] if f['mode'] else '—'
+        ax.text(0.995, (y0 + 0.35 - (-len(mon.names) - 0.4)) / (len(mon.names) + 0.6),
+                md_now, transform=ax.transAxes, va='center', ha='right',
+                fontsize=7, color='#222222',
+                bbox=dict(fc='white', ec='none', alpha=0.75, pad=1.0))
+    ax.set_xlim(tlo, hi)
+    ax.set_ylim(-len(mon.names) - 0.4, 0.2)
+    ax.set_yticks([-(i + 0.65) for i in range(len(mon.names))])
+    ax.set_yticklabels(list(mon.names), fontsize=8)
+    ax.grid(axis='x', alpha=0.3)
+    ax.set_xlabel('t (s)')
+    ax.text(tlo, 0.05, '绿=OFFBOARD　橙=ALTCTL/POSCTL　红=定位失效　灰=其它',
+            fontsize=6.5, color='#666666', va='bottom')
+
+
+def draw_stats_table(ax, mon):
+    """底部那条扁表：一机一行，列是各项指标；两机共用的两项写进标题里。"""
+    ax.clear()
+    ax.axis('off')
+    rows, form = mon.flight_stats()
+    stat = {n: (wall, air, dist, v) for n, wall, air, dist, v in rows}
+    now_rel = time.monotonic() - mon.t0
+    # 2026-10-24：原来只有一个"任务用时"总数，分不出三圈。改成按阶段分列，
+    # 数据来自选手程序的 sdk.mark_phase() 打点（见 Monitor.phase_durations）。
+    cols = ['', '起飞时刻', '空中时间 (s)', '里程 (m)', '位姿频率 (Hz)',
+            '最长断流 (s)', '发射 (发)', '编队飞行 (s)',
+            '1圈编队 (s)', '2圈灭火 (s)', '3圈灭火 (s)']
+    MERGE = (7, 8, 9, 10)                       # 两机共用、上下两格并一格的列
+    _ups = [t for t in mon.takeoff_t.values() if t is not None]
+    _dns = [mon.land_t[n] for n in mon.names]
+    _end = now_rel if any(t is None for t in _dns) else max(_dns)
+    # 这几项两机共用：值只写第一行，两行并成一格（见下面的 visible_edges）
+    # 三圈用时按 mark_phase 打点的先后取前三段；没打点就是"—"（比如跑的是
+    # 单项任务程序，本来就没有三圈）。
+    _durs = mon.phase_durations()
+    _ring = [f'{d:.0f}' for _nm, d in _durs[:3]] + ['—'] * 3
+    shared = ['—' if form is None else f'{form:.1f}'] + _ring[:3]
+    body = []
+    for who, n in zip(('侦察机', '任务机'), mon.names[:2]):
+        wall, air, dist, _v = stat.get(n, (None, None, 0.0, None))
+        hz, _jit = _rate(mon.link[n]['recv'], now_rel)
+        body.append([
+            f'{who} {n}',
+            '未起飞' if wall is None else time.strftime('%H:%M:%S', time.localtime(wall)),
+            '—' if air is None else f'{air:.0f}',
+            f'{dist:.1f}',
+            f'{hz:.1f}',
+            f"{mon.link[n]['max_gap']:.1f}",
+            # 发射弹数：没打过就写 0，打过写"标签 xN"（如 发射破窗弹 x1）
+            (lambda _s: '0' if not _s
+             else f'{_s[0][2]} x{len(_s)}')(mon.shots.get(n, [])),
+            '', '', '', '',                     # 4 个合并列的值单独画在两格正中
+        ])
+    widths = [0.15] + [0.085] * (len(cols) - 1)   # 2026-10-24 从 9 列加到 11 列，调窄
+    tb = ax.table(cellText=body, colLabels=cols, cellLoc='center',
+                  colWidths=widths, bbox=[0.0, 0.0, 1.0, 1.0])
+    tb.auto_set_font_size(False)
+    tb.set_fontsize(9)
+    for (r, c), cell in tb.get_celld().items():
+        cell.set_edgecolor('#555555')
+        cell.set_text_props(color='#111111')
+        if r == 0:
+            cell.set_facecolor('#dcdcdc')
+        elif c == 0:                            # 行首的机号用本机颜色
+            cell.set_text_props(fontweight='bold',
+                                color=COLORS.get(mon.names[r - 1], 'k'))
+        # 两机共用的两列：上下两格并成一格。'LR'+'LRB' 实测不会出对角线伪影，
+        # 'BLT' 那一类三边组合会（matplotlib 把路径斜着闭合）。
+        if c in MERGE and r == 1:
+            cell.visible_edges = 'LR'
+        elif c in MERGE and r == 2:
+            cell.visible_edges = 'LRB'
+    _tot = sum(widths)
+    for k, ci in enumerate(MERGE):
+        _cx = (sum(widths[:ci]) + widths[ci] / 2.0) / _tot
+        ax.text(_cx, 1.0 / 3.0, shared[k], transform=ax.transAxes,
+                ha='center', va='center', fontsize=9, color='#111111')
+
+
 def min_clearance(x, y):
     """机体到最近障碍(四面墙/方柱/圆柱)的水平净距，米。
 
@@ -581,6 +785,36 @@ def min_clearance(x, y):
 
 
 CLEAR_WARN_M = 0.8      # 净距低于这个值，俯视图上标红报警
+
+
+def speed_series(d, win=1.0):
+    """逐点的水平速度（米/秒）：每个采样点都用 win 秒滑窗按轨迹弧长算。
+
+    返回 (时刻列表, 速度列表)。实时速度、最大速度、速度曲线都从这一份出，
+    免得三处各算一遍、口径还不一样。
+    """
+    n = len(d['t'])
+    if n < 2:
+        return [], []
+    acc = [0.0]
+    for k in range(n - 1):
+        acc.append(acc[-1] + math.hypot(d['x'][k + 1] - d['x'][k],
+                                        d['y'][k + 1] - d['y'][k]))
+    ts, vs, i = [], [], 0
+    for j in range(1, n):
+        while d['t'][j] - d['t'][i] > win and i < j - 1:
+            i += 1
+        dt = d['t'][j] - d['t'][i]
+        if dt > 1e-3:
+            ts.append(d['t'][j])
+            vs.append((acc[j] - acc[i]) / dt)
+    return ts, vs
+
+
+def current_speed(d, win=1.0):
+    """当前水平速度（米/秒），样本不够返回 None。"""
+    _ts, vs = speed_series(d, win)
+    return vs[-1] if vs else None
 
 
 def _rate(times, now, win=5.0):
@@ -708,16 +942,14 @@ def draw_link_panel(ax, mon, now):
 
 
 def draw(fig, axes, mon):
-    # 田字格（2026-10-05 改）：
-    #   左上 俯视轨迹+障碍净距   右上 间距-时间（2026-10-14 从通信链路面板换的）
-    #   左下 高度-时间            右下 电压-时间（6S 总电压）
-    ax_xy, ax_link, ax_alt, ax_volt = axes.ravel()
+    # 版面：左边六张图（水平轨迹 / 速度曲线 / 间距曲线 ／ 状态时间带 / 高度曲线
+    #       / 电压曲线），右边整高一张飞行数据小表。
+    ax_xy, ax_link, ax_alt, ax_volt, ax_speed, ax_state = axes
     for ax in (ax_xy, ax_link, ax_alt, ax_volt):
         ax.clear()
     now = time.monotonic() - mon.t0
 
-    # ---- ① 俯视轨迹 ----
-    ax_xy.set_title('水平轨迹（俯视）')
+    # ---- ① 水平轨迹 ----
     # 房间：原点在西南角时左下角就是 (0,0)，在中心时左下角是 (-X/2,-Y/2)
     _x0, _y0 = (0.0, 0.0) if ROOM_ORIGIN == 'southwest' else (-ROOM_X / 2, -ROOM_Y / 2)
     ax_xy.add_patch(matplotlib.patches.Rectangle(
@@ -732,6 +964,12 @@ def draw(fig, axes, mon):
         tx, ty, tw, th = TERRAIN
         ax_xy.add_patch(matplotlib.patches.Rectangle(
             (tx - tw / 2, ty - th / 2), tw, th, fc='#f2e6a0', ec='#b8a020'))
+    if SUPPLY is not None:
+        sx, sy, sw, sh = SUPPLY
+        ax_xy.add_patch(matplotlib.patches.Rectangle(
+            (sx - sw / 2, sy - sh / 2), sw, sh, fc='#d9c7f5', ec='#7048e8'))
+        ax_xy.text(sx, sy + sh / 2 + 0.45, '物资点', color='#7048e8',
+                   fontsize=7.5, ha='center', va='bottom')
     for n, (px, py) in PADS.items():
         ax_xy.plot(px, py, 'x', color=COLORS.get(n, 'k'), ms=9, mew=2)
     last = {}
@@ -756,36 +994,76 @@ def draw(fig, axes, mon):
                        ((x1 + x2) / 2, (y1 + y2) / 2),
                        fontsize=9, color='#222',
                        bbox=dict(fc='white', ec='none', alpha=0.7, pad=1.5))
+    # ---- 发射位置（2026-10-24 加）----
+    # 用户要的"体现侦察机打了 1 发破窗弹、任务机打了 4 发灭火弹"：
+    # 位置比时刻更有裁判意义，所以标在轨迹图上而不是时间轴上；同一处的连发
+    # 自动并成一个标记写 xN，不会像时间轴那样 4 发挤成一团。总数另见数据表。
+    for n in mon.names:
+        pts = [(x, y) for x, y, _lb in mon.shots.get(n, []) if x is not None]
+        if not pts:
+            continue
+        grouped = []            # [(x, y, 次数)]：0.5 m 内的算同一处
+        for x, y in pts:
+            for g in grouped:
+                if math.dist((x, y), (g[0], g[1])) < 0.5:
+                    g[2] += 1
+                    break
+            else:
+                grouped.append([x, y, 1])
+        lb = (mon.shots[n][0][2] or '发射')
+        # 破窗弹和灭火弹用不同图形，一眼能分（2026-10-24 用户要求）：
+        #   破窗弹 -> 朝上的三角，像往楼上冲击；暗紫色
+        #   灭火弹 -> 五角星；品红
+        # 认标签里的关键字，不认机号——哪架打什么是赛制决定的，可能会变。
+        if '破窗' in lb:
+            mk, mcol, msz = '^', '#7048e8', 15
+        elif '灭火' in lb:
+            mk, mcol, msz = '*', '#d6336c', 18
+        else:
+            mk, mcol, msz = 'P', '#f76707', 14
+        for gx, gy, cnt in grouped:
+            ax_xy.plot(gx, gy, marker=mk, color=mcol, ms=msz,
+                       mec='white', mew=1.2, zorder=6, linestyle='none')
+            ax_xy.annotate(f'{lb}x{cnt}' if cnt > 1 else lb, (gx, gy),
+                           textcoords='offset points', xytext=(9, -11),
+                           fontsize=8, color=mcol, zorder=6,
+                           bbox=dict(fc='white', ec='none', alpha=0.75, pad=1.2))
+
     # ---- 障碍净距：撞过 3# 柱，这个数值要一眼能看见 ----
     # 开销实测 1.5us/帧(两机)，相对一次重绘 70~80ms 完全可忽略，每帧算。
-    clr_txt = []
     for n in mon.names:
         d = mon.track[n]
         if not d['t']:
             continue
-        c = min_clearance(d['x'][-1], d['y'][-1])
-        clr_txt.append((n, c))
-        if c < CLEAR_WARN_M:          # 逼近障碍：当前位置套一个红圈
+        if min_clearance(d['x'][-1], d['y'][-1]) < CLEAR_WARN_M:   # 逼近障碍套红圈
             ax_xy.plot([d['x'][-1]], [d['y'][-1]], 'o', ms=16, mfc='none',
                        mec='#d62728', mew=2.2, zorder=6)
-    if clr_txt:
-        worst = min(c for _, c in clr_txt)
-        # 放进标题：右下角会被图边界截断，左下角被飞行统计占了
-        ax_xy.set_title('水平轨迹（俯视）    最近障碍 '
-                        + '/'.join(f'{c:.2f}' for _, c in clr_txt) + ' m',
-                        color='#d62728' if worst < CLEAR_WARN_M else 'black',
-                        fontweight='bold' if worst < CLEAR_WARN_M else 'normal')
+    ax_xy.set_title('水平轨迹')
 
     ax_xy.set_aspect('equal'); ax_xy.grid(alpha=0.3)
+    # 等比例会按数据长宽比缩画框，格子用不满。所以反过来：按**格子**的长宽比
+    # 把坐标范围对称撑开（比例一点没变，只是多显示一截空场地），这样这一格就
+    # 和旁边几张图一样大。
+    _pad = 1.0
+    _xlo, _xhi = _x0 - _pad, _x0 + ROOM_X + _pad
+    _ylo, _yhi = _y0 - _pad, _y0 + ROOM_Y + _pad
+    _cell = ax_xy.get_subplotspec().get_position(fig)
+    _fw, _fh = fig.get_size_inches()
+    _want = (_cell.width * _fw) / max(_cell.height * _fh, 1e-6)
+    _xs, _ys = _xhi - _xlo, _yhi - _ylo
+    if _xs / _ys < _want:                    # 画面比格子窄 -> 横向撑
+        _d = (_want * _ys - _xs) / 2.0
+        _xlo -= _d; _xhi += _d
+    else:                                    # 比格子宽 -> 纵向撑
+        _d = (_xs / _want - _ys) / 2.0
+        _ylo -= _d; _yhi += _d
+    ax_xy.set_xlim(_xlo, _xhi)
+    ax_xy.set_ylim(_ylo, _yhi)
     ax_xy.set_xlabel('x (m)'); ax_xy.set_ylabel('y (m)')
     ax_xy.legend(loc='upper right', fontsize=8)
-    # 飞行统计（2026-09-30 用户要求：动画上直接显示起飞时刻/编队时长/里程/均速）。
-    # 贴在俯视图左下角——equal aspect 在这里本来就留白，不遮轨迹。
-    txt = '\n'.join(stats_lines(mon))
-    if txt:
-        ax_xy.text(0.02, 0.02, txt, transform=ax_xy.transAxes,
-                   va='bottom', ha='left', fontsize=7.5,
-                   bbox=dict(fc='white', ec='#bbb', alpha=0.85, pad=3))
+    # 飞行统计画在轨迹图**旁边**那条独立坐标区里，不压轨迹（见 main 里的 ax_stats）
+    if getattr(fig, 'ax_stats', None) is not None:
+        draw_stats_table(fig.ax_stats, mon)
 
     tmax = max([d['t'][-1] for d in mon.track.values() if d['t']] or [0.0])
     tlo = 0.0                                   # 全程，不滚动
@@ -804,7 +1082,7 @@ def draw(fig, axes, mon):
     # 这一格现在只看**两机空间直线距离**：它才是"不许靠太近"那条安全要求的
     # 直接量，也是 formation_follower_node 里 min_separation_m 守的那个量。
     ax_link.clear()
-    ax_link.set_title('两机直线距离-时间')
+    ax_link.set_title('间距曲线')
     if mon.gap_t and len(mon.gap_line) == len(mon.gap_t):
         ax_link.plot(mon.gap_t, mon.gap_line, '-', color='#1f77b4', lw=1.6,
                      label=f'空间直线距离 {mon.gap_line[-1]:.2f} m')
@@ -818,58 +1096,17 @@ def draw(fig, axes, mon):
                         label=f'安全下限 {mon.min_sep:.1f} m')
     ax_link.set_xlim(tlo, max(tmax, tlo + 5)); ax_link.grid(alpha=0.3)
     ax_link.set_xlabel('t (s)'); ax_link.set_ylabel('直线距离 (m)')
-    # ---- 底部状态带：飞控模式 + 定位健康（2026-10-19 新增）----
-    # 共用同一条时间轴，所以"定位红了 -> 距离随即崩"这种因果一眼可见。
+    # 状态带 2026-10-21 搬去独立的「状态时间带」那一格，这里只留距离。
     _hi = max([v for v in mon.gap_line if v == v] or [mon.spacing])
-    _top = max(mon.spacing, _hi) + 0.5
-    _band_h = _top * 0.09                      # 每行高度，跟着量程缩放
-    _rows = []
-    for i, n in enumerate(mon.names):
-        y0 = -_band_h * (1.25 * i + 1.15)
-        _rows.append((n, y0, _band_h))
-        f = mon.fcu[n]
-        # mode 分段：把同色区间收一起批量画，几百段也不卡
-        buckets = {}
-        for k, t_s in enumerate(f['mt']):
-            t_e = f['mt'][k + 1] if k + 1 < len(f['mt']) else max(tmax, t_s)
-            if t_e <= t_s:
-                continue
-            md = f['mode'][k]
-            c = ('#2ca02c' if md == 'OFFBOARD' else
-                 '#ff7f0e' if md in ('ALTCTL', 'POSCTL') else
-                 '#bbbbbb')
-            buckets.setdefault(c, []).append((t_s, t_e - t_s))
-        for c, spans in buckets.items():
-            ax_link.broken_barh(spans, (y0, _band_h), facecolors=c, alpha=0.85)
-        # 定位失效叠在同一行上（红），它是因、模式降级是果，所以画在最上层
-        bad = []
-        for k, t_s in enumerate(f['pt']):
-            if f['pos_ok'][k]:
-                continue
-            t_e = f['pt'][k + 1] if k + 1 < len(f['pt']) else max(tmax, t_s)
-            if t_e > t_s:
-                bad.append((t_s, t_e - t_s))
-        if bad:
-            ax_link.broken_barh(bad, (y0, _band_h), facecolors='#d62728', alpha=1.0)
-        ax_link.text(tlo, y0 + _band_h * 0.5, f' {n}', va='center', ha='left',
-                     fontsize=6.5, color='#333', zorder=5)
-    if _rows:
-        ax_link.set_ylim(_rows[-1][1] - _band_h * 0.4, _top)
-        # 负半轴是状态带，不该出现在"距离"刻度上，所以刻度只留 >=0 的
-        ax_link.set_yticks([t for t in ax_link.get_yticks() if t >= 0])
-        ax_link.axhline(0.0, color='#888', lw=0.8)
-    else:
-        ax_link.set_ylim(0.0, _top)
-    ax_link.legend(loc='upper right', fontsize=7,
-                   title='带：绿=OFFBOARD 橙=ALTCTL/POSCTL 红=定位失效 灰=其它',
-                   title_fontsize=6)
+    ax_link.set_ylim(0.0, max(mon.spacing, _hi) + 0.5)
+    ax_link.legend(loc='upper right', fontsize=7)
 
     # ---- ③ 高度-时间（2026-10-05 用户要求：这一格只看高度）----
     # 间距的两条线（目标间距虚线 + 节点自报间距）撤掉了：实时值看右上角链路
     # 面板那个大数字，历史值照常落 formation.csv / formation_diag.csv。
     # 曲线用实线、各机一条，起飞段/定高段的台阶一眼能看出来——这一格现在就是
     # 查"起飞到底停在几米""定高有没有把它拉上去"的地方。
-    ax_alt.set_title('高度-时间')
+    ax_alt.set_title('高度曲线')
     for n in mon.names:
         d = mon.track[n]
         if d['t']:
@@ -897,7 +1134,7 @@ def draw(fig, axes, mon):
     # 于是不再需要 twinx——单轴画电压，刻度就是真实伏数，跟满电/告警线对得上。
     # 看什么：电压随负载下坠是正常的，要留意**台阶式骤降**（接触不良/线损）和
     # 整段持续走低压到告警线附近（续航不够，起飞前就该换电池）。
-    ax_volt.set_title(f'电压-时间（{BATT_CELLS}S 总电压）')
+    ax_volt.set_title(f'电压曲线（{BATT_CELLS}S 总电压）')
     for n in mon.names:
         b = mon.batt[n]
         if b['t']:
@@ -919,7 +1156,10 @@ def draw(fig, axes, mon):
         ax_volt.text(0.5, 0.5, '没收到 /mavros/battery', transform=ax_volt.transAxes,
                      ha='center', va='center', fontsize=10, color='#d62728')
     ax_volt.legend(loc='lower left', fontsize=7, ncol=2)
-    fig.tight_layout()
+
+    # ---- ⑤ 速度曲线、⑥ 状态时间带 ----
+    draw_speed_panel(ax_speed, mon, tlo, tmax)
+    draw_state_panel(ax_state, mon, tlo, tmax)
 
 
 def summarize(mon):
@@ -1042,7 +1282,25 @@ def main():
     mon = FormationMonitor([args.leader, args.follower],
                            args.spacing, args.cruise_agl, args.tol, route,
                            min_sep=args.min_sep)
-    fig, axes = plt.subplots(2, 2, figsize=(15, 9.5))   # 田字格
+    # 版面：上两行是 2x3 六张图（水平轨迹 / 速度曲线 / 间距曲线 ／
+    # 状态时间带 / 高度曲线 / 电压曲线），最下面一条扁表放飞行数据。
+    # 边距写死在 gridspec 里，draw() 不调 tight_layout——那个会按标签重算一切。
+    fig = plt.figure(figsize=(15, 9.5))
+    # 标题只给窗口用，不画进图里——报告的"名字"落在文件名上（运行器给的 --out）
+    try:                      # 无窗口模式没有 manager，不要为它炸掉
+        fig.canvas.manager.set_window_title(
+            time.strftime('%Y-%m-%d %H:%M') + ' 飞行报告')
+    except Exception:
+        pass
+    _gs = fig.add_gridspec(3, 3, height_ratios=[1.0, 1.0, 0.17],
+                           hspace=0.42, wspace=0.20,
+                           left=0.045, right=0.985, top=0.945, bottom=0.055)
+    # 顺序按 draw() 的拆包来：轨迹 / 间距 / 高度 / 电压 / 速度 / 状态
+    axes = (fig.add_subplot(_gs[0, 0]), fig.add_subplot(_gs[0, 2]),
+            fig.add_subplot(_gs[1, 1]), fig.add_subplot(_gs[1, 2]),
+            fig.add_subplot(_gs[0, 1]), fig.add_subplot(_gs[1, 0]))
+    fig.ax_stats = fig.add_subplot(_gs[2, :])
+    fig.ax_stats.axis('off')
     if gui:
         plt.ion(); plt.show(block=False)
 

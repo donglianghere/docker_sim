@@ -55,9 +55,17 @@ def load_obstacles(path):
         obs.append((f"避障圆柱({c['x']},{c['y']})",
                     lambda p, c=c: math.hypot(p[0] - c['x'], p[1] - c['y']) - c['diameter'] / 2))
     size = float(d.get('pillar_size', 1.0))
+    # 一栋楼 = 本柱 + 紧挨着的孪生柱，外接矩形要把孪生柱那一半算进去。
+    # 方向读 yaml 的 twin_dir（2026-10-19：1# 楼的孪生柱挪到了正南，原来这里
+    # 写死"正东"会把那半栋楼算到空地上去——余量报出来是干净的，实际擦楼）。
+    # 旧键 twin_east: true 等价 '+x'；没有孪生柱就是一根方柱。
+    _TWIN = {'+x': (1.0, 0.0), '-x': (-1.0, 0.0), '+y': (0.0, 1.0), '-y': (0.0, -1.0)}
     for pl in d.get('pillars', []):
         x, y, hw = pl['x'], pl['y'], size / 2
-        b = (x - hw, x + hw + (size if pl.get('twin_east') else 0.0), y - hw, y + hw)
+        ux, uy = _TWIN.get(str(pl.get('twin_dir') or
+                               ('+x' if pl.get('twin_east') else '')).lower(), (0.0, 0.0))
+        tx, ty = x + ux * size, y + uy * size
+        b = (min(x, tx) - hw, max(x, tx) + hw, min(y, ty) - hw, max(y, ty) + hw)
         obs.append((f"{pl['id']}", lambda p, b=b: math.hypot(
             max(b[0] - p[0], 0.0, p[0] - b[1]), max(b[2] - p[1], 0.0, p[1] - b[3]))))
     t = d.get('terrain_module')

@@ -75,6 +75,12 @@ from contest_mission.layout_loader import load_layout
 # 本地+Y映射到世界(-sinθ, cosθ)：要正面朝世界+X得θ=-π/2。'-X'面用+π/2
 # 正好把正面转到世界-X，本来就是对的。'+Y'面长期在用、实测能检出，是
 # "本地+Y就是正面"这个前提的依据。
+#: 孪生柱方向键 `twin_dir` -> 单位方向向量。跟 gen_sample_room_world.py 的同名
+#: 表必须一致：那边生成 world 的位置，这边每次重置再摆一遍，两边不一致
+#: 就会出现"启动时在南边、重置后跑到东边"这种只有飞起来才看得出的错位。
+TWIN_UNIT = {'+x': (1.0, 0.0), '-x': (-1.0, 0.0),
+             '+y': (0.0, 1.0), '-y': (0.0, -1.0)}
+
 FIRE_TAG_FACE_LOCAL_OFFSETS = {
     '+X': (1.0, 0.0, -math.pi / 2.0),
     '-X': (-1.0, 0.0, math.pi / 2.0),
@@ -104,15 +110,21 @@ class ScenarioResetNode(Node):
         # 坐标——每次reset都把下面6个模型摆回各自yaml里写的(x,y)，不
         # 再做随机撒点（min_separation/wall_margin那套随机布局逻辑已
         # 整体移除，不是这里可以顺手保留的死代码）。
-        # 样题版每根立柱正东紧挨一根同样的（yaml 里 twin_east: true，孪生柱
-        # id = 本柱 id + '_e'，中心在 x+pillar_size 处）。这里要展开，不然
-        # 重置时那 3 根孪生柱不在名单里、永远不会被摆正。
+        # 样题版每根立柱紧挨一根同样的（yaml 里 twin_dir，孪生柱 id = 本柱
+        # id + '_e'，中心沿 twin_dir 偏 pillar_size）。这里要展开，不然重置时
+        # 那 3 根孪生柱不在名单里、永远不会被摆正。
+        # 2026-10-19：方向从写死的"正东"改成读 twin_dir（1# 楼的孪生柱挪到了
+        # 正南）。旧键 twin_east: true 等价 '+x'，仍然认——别的 layout yaml
+        # 还可能是旧写法，认不出来的后果是那半栋楼永远不被摆正、静默错位。
         _psize = float(layout['pillar_size'])
         _pillars = []
         for _p in layout['pillars']:
             _pillars.append((_p['id'], _p['x'], _p['y']))
-            if _p.get('twin_east'):
-                _pillars.append((_p['id'] + '_e', _p['x'] + _psize, _p['y']))
+            _d = TWIN_UNIT.get(str(_p.get('twin_dir') or
+                                   ('+x' if _p.get('twin_east') else '')).lower())
+            if _d:
+                _pillars.append((_p['id'] + '_e',
+                                 _p['x'] + _d[0] * _psize, _p['y'] + _d[1] * _psize))
         self.fixed_positions = {pid: (px, py) for pid, px, py in _pillars}
         # 独立避障圆柱：2026-10-11 用户要求去掉，yaml 里置 `enabled: false`，
         # 生成 world 时就不出这个模型了。这里必须跟着跳过——名单里留着它，

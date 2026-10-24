@@ -15,7 +15,7 @@
 
 ## 两边同一份
 
-这五个程序在 `contestant_sim/单机测试/` 和 `contestant_real/单机测试/` 下
+这五个程序在 `test/单机测试_sim/` 和 `test/单机测试_real/` 下
 **逐字节相同**，坐标各取各自目录上一级的 `venue.py`。`run_real.sh` 的代码
 漂移检查会比对这个子目录，改了一边不同步会被拦下。
 

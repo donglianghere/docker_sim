@@ -223,7 +223,38 @@ def walls_and_ceiling(room):
     return "".join(out)
 
 
-def pillar_model(name, x, y, size, height, rings, divider=None):
+#: 孪生柱方向键 `twin_dir` 的取值 -> 单位方向向量。
+#: 2026-10-19 加：原来孪生柱写死"正东"（旧键 `twin_east: true`），1# 楼的孪生柱
+#: 要挪到正南，方向就得成为布局参数。旧键仍然认（等价 '+x'），见 twin_offset()。
+TWIN_UNIT = {"+x": (1.0, 0.0), "-x": (-1.0, 0.0), "+y": (0.0, 1.0), "-y": (0.0, -1.0)}
+
+
+def twin_dir_of(p):
+    """这根本柱的孪生柱朝哪边；没有孪生柱返回 None。
+
+    `twin_dir` 优先，缺省时退回旧键 `twin_east: true`（等价 '+x'）。这份
+    向后兼容是给**别的 layout yaml**留的（fire_drill_room 那份没有孪生柱，
+    但以后谁复制一份旧写法过来不该静默少半栋楼）。
+    """
+    d = p.get("twin_dir")
+    if d is None:
+        return "+x" if p.get("twin_east") else None
+    d = str(d).lower()
+    if d not in TWIN_UNIT:
+        raise KeyError(f"{p.get('id')}: twin_dir='{d}' 不认识，可选 {sorted(TWIN_UNIT)}")
+    return d
+
+
+def twin_offset(p, size):
+    """孪生柱中心相对本柱中心的 (dx, dy)；没有孪生柱返回 None。"""
+    d = twin_dir_of(p)
+    if d is None:
+        return None
+    ux, uy = TWIN_UNIT[d]
+    return (ux * size, uy * size)
+
+
+def pillar_model(name, x, y, size, height, rings, divider=None, divider_dir="+x"):
     """一根立柱：带 collision 的柱身 + 若干**纯视觉**的楼层线环。
 
     楼层线没有 <collision> 是有意的：Gazebo 的射线传感器打的是 collision
@@ -237,15 +268,23 @@ def pillar_model(name, x, y, size, height, rings, divider=None):
             f"          <geometry><box><size>{size} {size} {height}</size></box></geometry>\n"
             f"{rgba_mat(PILLAR_RGBA, 10)}"
             f"        </visual>\n")
-    # 单元分隔线：压在本柱 +x 面（两柱贴合的缝）上的一条竖线，通顶。
+    # 单元分隔线：压在**两柱贴合的那条缝**上的一条竖线，通顶。
     # 只给"带孪生柱的那一根"画，孪生柱自己不画，否则一栋楼会出现两条。
+    # 2026-10-19：缝的位置跟着 twin_dir 走（`divider_dir`），不再写死 +x 面——
+    # 1# 楼的孪生柱挪到正南之后，缝在本柱的 -y 面上，还画在 +x 面就是把分隔线
+    # 画到了整栋楼的外侧立面正中，比不画更误导。
     div_xml = ""
     if divider and divider.get("enabled"):
         dw = float(divider["width_m"])
         dp = float(divider["protrude_m"])
+        ux, uy = TWIN_UNIT[divider_dir]
+        # 沿缝的法向半个柱宽摆过去；线本身在法向上薄(dw)、在另一个水平方向上
+        # 跟柱面等宽并外扩 protrude_m（跟楼层线一样，不会互相穿模）。
+        span = size + 2 * dp
+        sx, sy = (dw, span) if ux else (span, dw)
         div_xml = (f"        <visual name='unit_divider'>\n"
-                   f"          <pose>{size/2:.3f} 0 0 0 0 0</pose>\n"
-                   f"          <geometry><box><size>{dw} {size + 2*dp:.3f} {height}</size></box></geometry>\n"
+                   f"          <pose>{ux*size/2:.3f} {uy*size/2:.3f} 0 0 0 0</pose>\n"
+                   f"          <geometry><box><size>{sx:.3f} {sy:.3f} {height}</size></box></geometry>\n"
                    f"{rgba_mat(divider['color'], 10)}"
                    f"        </visual>\n")
     ring_xml = ""
@@ -278,12 +317,16 @@ def pillars(layout):
     out = []
     div = layout.get("unit_divider")
     for p in layout["pillars"]:
-        # 分隔线只画在本柱上（缝在它的 +x 面），孪生柱不画，一栋楼一条
+        d = twin_dir_of(p)
+        # 分隔线只画在本柱上（缝在 twin_dir 那一面），孪生柱不画，一栋楼一条
         out.append(pillar_model(p["id"], p["x"], p["y"], size, h, rings,
-                                divider=div if p.get("twin_east") else None))
-        if p.get("twin_east"):
-            # 正东紧挨着一根同样的：中心 +size，两柱侧面正好贴合
-            out.append(pillar_model(p["id"] + "_e", p["x"] + size, p["y"], size, h, rings))
+                                divider=div if d else None,
+                                divider_dir=d or "+x"))
+        if d:
+            # 紧挨着一根同样的：中心沿 twin_dir 偏 size，两柱侧面正好贴合
+            dx, dy = twin_offset(p, size)
+            out.append(pillar_model(p["id"] + "_e", p["x"] + dx, p["y"] + dy,
+                                    size, h, rings))
     return "".join(out)
 
 
@@ -314,13 +357,17 @@ def cylinder_model(layout):
             f"    </model>\n")
 
 
-def floor_marker(name, x, y, tag_material, size=None, tag_size=0.5):
-    """地面标识：底座 + 上面一张 AprilTag 贴片。
+def floor_marker(name, x, y, tag_material, size=None, tag_size=0.5, tags=None):
+    """地面标识：底座 + 上面若干张 AprilTag 贴片。
 
     `size=None` 画半径 0.4 的**圆盘**（地面火情点）；给 `(sx, sy)` 就画那么大的
     **长方形**底座（物资点，2026-10-11 用户指定 2 米(X) x 1 米(Y)，x/y 是矩形
     对角线中心）。两种形状都只是贴地的薄片，没有 <collision>，不会被雷达扫成
     障碍，也不挡精准降落。
+
+    `tags=None` 就在正中放一张 `tag_material`（老行为，地面火情点用）。
+    2026-10-23 起物资点要摆两张（ID0 在西、ID3 在东），这时给
+    `tags=[(dx, dy, material), ...]`，偏移是相对底座中心的米数。
     """
     if size is None:
         base = ("          <geometry><cylinder><radius>0.4</radius>"
@@ -328,6 +375,17 @@ def floor_marker(name, x, y, tag_material, size=None, tag_size=0.5):
     else:
         base = (f"          <geometry><box><size>{size[0]} {size[1]} 0.02</size>"
                 f"</box></geometry>\n")
+    if tags is None:
+        tags = [(0.0, 0.0, tag_material)]
+    # visual 名字在同一个 link 下必须唯一，多张贴片要带序号。
+    tag_visuals = "".join(
+        f"        <visual name='visual_apriltag{'' if i == 0 else f'_{i + 1}'}'>\n"
+        f"          <cast_shadows>0</cast_shadows>\n"
+        f"          <pose>{dx} {dy} 0.025 0 0 0</pose>\n"
+        f"          <geometry><box><size>{tag_size} {tag_size} 0.01</size></box></geometry>\n"
+        f"{marker_mat(mat, 10)}"
+        f"        </visual>\n"
+        for i, (dx, dy, mat) in enumerate(tags))
     return (f"\n    <model name='{name}'>\n"
             f"      <static>1</static>\n"
             f"      <pose>{x} {y} 0 0 0 0</pose>\n"
@@ -338,14 +396,32 @@ def floor_marker(name, x, y, tag_material, size=None, tag_size=0.5):
             f"{base}"
             f"{script_mat('Gazebo/Grey', 10)}"
             f"        </visual>\n"
-            f"        <visual name='visual_apriltag'>\n"
-            f"          <cast_shadows>0</cast_shadows>\n"
-            f"          <pose>0 0 0.025 0 0 0</pose>\n"
-            f"          <geometry><box><size>{tag_size} {tag_size} 0.01</size></box></geometry>\n"
-            f"{marker_mat(tag_material, 10)}"
-            f"        </visual>\n"
+            f"{tag_visuals}"
             f"      </link>\n"
             f"    </model>\n")
+
+
+def supply_tags(sp):
+    """物资点上的 AprilTag 贴片表 [(dx, dy, material), ...]。
+
+    2026-10-23 赛题改动：高层火情处置也要先到物资点抓一件灭火物资，用 ID 3 的
+    tag 代表。两张贴片沿**东西**方向摆，各偏中心 `tag_offset_x_m`：
+      ID 0 在西(-X) = 地面火情用的灭火弹
+      ID 3 在东(+X) = 高层火情用的灭火器材
+    任务机到物资点后靠 class_id(apriltag:0 / apriltag:3) 挑该抓的那件，不靠位置猜。
+    没配 `apriltag_id_high` 就退回只摆一张（老场景照常能生成）。
+
+    ⚠️ 2026-10-24 回退说明：曾把 ID3 拆成独立模型 `supply_tag_high`（结构上跟
+    fire_apriltag_marker 一致、比"一个 link 两张图"干净），但那版在界面上整张
+    tag 看不见——独立模型的薄贴片跟物资点底座顶面共面会 z-fighting。按用户
+    要求退回这里的双贴片写法。要再试独立模型，记得把它的 z 抬到 0.035 以上。
+    """
+    if "apriltag_id_high" not in sp:
+        return None
+    off = float(sp.get("tag_offset_x_m", 0.3))
+    return [(-off, 0.0, "ContestMarkers/AprilTagSupply"),
+            (+off, 0.0, "ContestMarkers/AprilTagSupplyHigh")]
+
 
 
 def helipads(layout):
@@ -390,11 +466,26 @@ def resolve_random_fire(layout, rng=None):
     spacing = float((layout.get("floor_rings") or {}).get("spacing_m", 1.0))
     bldg = rng.choice(list(fr.get("buildings") or ["pillar_2", "pillar_3"]))
     floor = int(rng.choice([int(v) for v in (fr.get("floors") or [2, 3])]))
-    unit = rng.randrange(2)                       # 0=本柱(西单元) 1=孪生柱(东单元)
+    face = str(fr.get("face", "-y")).lower()
+    # 2026-10-19 自检：火情 tag 贴在所选柱子 `face` 那一面、standoff 半个柱宽多
+    # 一点，所以**孪生柱不能压在这条轴上**——否则抽到被挡住的那一半时，tag 会
+    # 落在另一根柱子的体内，界面和相机都看不见，表现成"这一轮火情怎么也查不到"。
+    # 1# 楼的孪生柱 2026-10-19 挪到了正南(-y)，它因此不能进 buildings 名单；
+    # 这里宁可生成阶段直接报错，也不要放一个 50% 看不见的火情进场。
+    for _b in (fr.get("buildings") or []):
+        _bp = next(q for q in layout["pillars"] if q["id"] == _b)
+        _bd = twin_dir_of(_bp)
+        if _bd and _bd[1] == face[1]:
+            raise ValueError(
+                f"{_b} 的孪生柱在 {_bd} 方向，跟火情贴面 {face} 同一条轴："
+                f"抽到其中一个单元时 tag 会埋进另一根柱子里。要么把这栋楼从 "
+                f"fire_apriltag_random.buildings 里去掉，要么把它的 twin_dir "
+                f"改到跟 {face} 垂直的方向。")
+    unit = rng.randrange(2)                       # 0=本柱 1=孪生柱
     pid = bldg if unit == 0 else f"{bldg}_e"
     z = (floor - 1) * spacing + spacing / 2.0
 
-    # 孪生柱不在 layout['pillars'] 里（由 twin_east 展开）。**不要**为了查坐标
+    # 孪生柱不在 layout['pillars'] 里（由 twin_dir 展开）。**不要**为了查坐标
     # 往那个列表里补一条——pillars() 会照着再生成一个模型，等于凭空多一根柱子
     # （还跟已展开的孪生柱重名/重叠）。改成让 fire_apriltag() 自己解析 '_e' 后缀。
     base = next(q for q in layout["pillars"] if q["id"] == bldg)
@@ -402,11 +493,16 @@ def resolve_random_fire(layout, rng=None):
     layout["fire_apriltag_marker"]["face"] = fr.get("face", "-y")
     layout["fire_apriltag_height_m"] = z
     layout["fire_apriltag_random"]["enabled"] = False   # 已抽定，reset 节点别再抽
-    x = base["x"] + (psize if unit == 1 else 0.0)
+    tdx, tdy = twin_offset(base, psize) or (0.0, 0.0)
+    x = base["x"] + (tdx if unit == 1 else 0.0)
+    y = base["y"] + (tdy if unit == 1 else 0.0)
     d = float(layout["fire_apriltag_marker"]["mount_standoff_m"])
+    # 单元怎么称呼取决于孪生柱朝哪边：正东孪生 -> 西/东单元，正南孪生 -> 北/南单元
+    names = {"+x": ("西", "东"), "-x": ("东", "西"),
+             "+y": ("南", "北"), "-y": ("北", "南")}[twin_dir_of(base) or "+x"]
     note = (f'{bldg.replace("pillar_", "")}# 楼 {floor} 层 '
-            f'{"西" if unit == 0 else "东"}单元')
-    return note, (x, base["y"] - d, z)
+            f'{names[unit]}单元')
+    return note, (x, y - d, z)
 
 
 def resolve_random_ground_fire(layout, rng=None):
@@ -470,12 +566,14 @@ def fire_apriltag(layout):
     所以 yaw=0 即可；贴东西面才需要转 90 度（见 fire_drill_room 那份）。
     """
     m = layout["fire_apriltag_marker"]
+    tag_sz = layout["apriltag_size_m"]
     pid = m["pillar_id"]
     # pillar_id 可能指的是**孪生柱**（id 以 '_e' 结尾），它不在 pillars 列表里、
-    # 是由 twin_east 展开出来的，中心在本柱 +pillar_size 处。
+    # 是由 twin_dir 展开出来的，中心在本柱沿 twin_dir 偏 pillar_size 处。
     if pid.endswith("_e"):
         base = next(q for q in layout["pillars"] if q["id"] == pid[:-2])
-        p = {"x": base["x"] + float(layout["pillar_size"]), "y": base["y"]}
+        dx, dy = twin_offset(base, float(layout["pillar_size"]))
+        p = {"x": base["x"] + dx, "y": base["y"] + dy}
     else:
         p = next(q for q in layout["pillars"] if q["id"] == pid)
     d = m["mount_standoff_m"]
@@ -498,7 +596,10 @@ def fire_apriltag(layout):
             f"      <link name='link'>\n"
             f"        <visual name='visual'>\n"
             f"          <cast_shadows>0</cast_shadows>\n"
-            f"          <geometry><box><size>0.5 0.01 0.5</size></box></geometry>\n"
+            # 2026-10-23：尺寸跟 apriltag_size_m 走，不再写死 0.5——用户要求
+            # 全场 tag 统一 0.4 米。厚度那一维（本地 Y）保持 0.01 不变，
+            # scenario_reset_node 摆位姿时靠的就是"厚度沿本地 Y"这个约定。
+            f"          <geometry><box><size>{tag_sz} 0.01 {tag_sz}</size></box></geometry>\n"
             f"{marker_mat('ContestMarkers/AprilTagFirePillar', 10)}"
             f"        </visual>\n"
             f"      </link>\n"
@@ -590,7 +691,8 @@ def main():
              floor_marker("supply_point_marker", L["supply_point"]["x"],
                           L["supply_point"]["y"], "ContestMarkers/AprilTagSupply",
                           size=(L["supply_point"]["size_x"], L["supply_point"]["size_y"]),
-                          tag_size=L["apriltag_size_m"]),
+                          tag_size=L["apriltag_size_m"],
+                          tags=supply_tags(L["supply_point"])),
              floor_marker("fire_point_marker", L["ground_fire_point"]["x"],
                           L["ground_fire_point"]["y"], "ContestMarkers/AprilTagGroundFire",
                           tag_size=L["apriltag_size_m"]),
@@ -607,10 +709,12 @@ def main():
               f"{fire_xyz[1]:.2f}, {fire_xyz[2]:.2f})")
     if gfire_note:
         print(f"  [地面火情真值] {gfire_note} tag=({gfire_xy[0]:.2f}, {gfire_xy[1]:.2f})")
-    n_pillars = sum(2 if p.get("twin_east") else 1 for p in L["pillars"])
+    n_pillars = sum(2 if twin_dir_of(p) else 1 for p in L["pillars"])
     print(f"[gen_sample_room_world] wrote {args.output}")
     print(f"  房间 {room['size_x']}x{room['size_y']}x{room['height']} m，原点在西南角")
-    print(f"  立柱 {n_pillars} 根（{len(L['pillars'])} 根 + 各自正东孪生柱），"
+    _tw = "、".join(f"{p['id'].replace('pillar_', '')}#->{twin_dir_of(p)}"
+                    for p in L["pillars"] if twin_dir_of(p))
+    print(f"  立柱 {n_pillars} 根（{len(L['pillars'])} 根 + 各自孪生柱 {_tw}），"
           f"每根 {int((L['pillar_height'] - 1e-6) // L['floor_rings']['spacing_m'])} 圈楼层线")
     print(f"  避障圆柱 {'有' if L['obstacle_cylinder'].get('enabled', True) else '无（enabled: false）'}")
 

@@ -15,7 +15,7 @@
 # **遥控器接管**。--land 会就地降落，落点不一定是起降垫，用前确认下方无人。
 #
 # 和 stop_real.sh 的分工：选手容器和监视交给它，本脚本补它不管的：
-#   · run_test.sh 起的 real_test / real_test_monitor
+#   · run_test_real.sh 起的 real_test / real_test_monitor
 #   · 声光栈   —— 共享资源，**只在它处于真机域 20 时才关**
 #   · 网页栈   —— run_real.sh 必起它，所以这里也负责关（--keep-gcs 可留）
 #   · 选手调试容器 contestant-sdk-shell —— 同样按域判断
@@ -54,7 +54,7 @@ echo "=============================================="
 echo "[A] 选手容器 / 监视 —— 交给 stop_real.sh"
 "$HERE/stop_real.sh" "${PASS[@]}" 2>&1 | sed 's/^/  /'
 
-echo "[B] run_test.sh 起的单机测试容器"
+echo "[B] run_test_real.sh 起的单机测试容器"
 drop real_test
 drop real_test_monitor
 

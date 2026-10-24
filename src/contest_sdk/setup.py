@@ -8,6 +8,9 @@ setup(
     name='contest_sdk',
     version='0.0.1',
     packages=find_packages(),
+    # rounds.py 是**顶层**模块（选手程序 `from rounds import ...` 直接吃它），
+    # 它 import 的 venue 由选手目录提供——运行器把那个目录挂成 /workspace 并
+    # 排在 PYTHONPATH 最前，所以仿真/真机各自绑到自己那份场地表。
     install_requires=[
         'rclpy',
         'pyserial',
